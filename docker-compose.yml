@@ -1,0 +1,27 @@
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: autods-mcp-server:local
+    container_name: autods-mcp-server
+    ports:
+      - "8000:8000"
+    environment:
+      MCP_ENV: local
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ./src:/app/src
+    command:
+      [
+        "uvicorn",
+        "--factory",
+        "autods_mcp_server.app:create_app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+        "--reload-dir",
+        "/app/src",
+      ]

@@ -1,0 +1,47 @@
+"""A5 acceptance — HTTPS-only request guard."""
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from autods_mcp_server.middleware import HttpsOnlyMiddleware
+from autods_mcp_server.settings import Settings
+
+
+def _app(settings: Settings) -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(HttpsOnlyMiddleware, settings=settings)
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    return app
+
+
+def test_local_env_allows_plain_http() -> None:
+    settings = Settings(MCP_ENV="local")
+    with TestClient(_app(settings)) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+
+
+def test_non_local_rejects_request_without_https_proto() -> None:
+    settings = Settings(MCP_ENV="staging", FORCE_HTTPS="true", PUBLIC_HOSTNAME="example.com")
+    with TestClient(_app(settings)) as client:
+        response = client.get("/health")
+    assert response.status_code == 403
+    assert response.json()["error"] == "https_required"
+
+
+def test_non_local_accepts_request_with_https_proto() -> None:
+    settings = Settings(MCP_ENV="staging", FORCE_HTTPS="true", PUBLIC_HOSTNAME="example.com")
+    with TestClient(_app(settings)) as client:
+        response = client.get("/health", headers={"x-forwarded-proto": "https"})
+    assert response.status_code == 200
+
+
+def test_non_local_rejects_request_with_http_proto() -> None:
+    settings = Settings(MCP_ENV="prod", FORCE_HTTPS="true", PUBLIC_HOSTNAME="example.com")
+    with TestClient(_app(settings)) as client:
+        response = client.get("/health", headers={"x-forwarded-proto": "http"})
+    assert response.status_code == 403

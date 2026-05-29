@@ -54,6 +54,38 @@ class Settings(BaseSettings):
         validation_alias="ALLOWED_COGNITO_CLIENT_IDS",
     )
 
+    # Cognito Hosted UI domain — used to build authorize/token endpoints
+    # in the AS metadata document. Typically
+    # "<prefix>.auth.<region>.amazoncognito.com" or a custom-domain CNAME.
+    # Bare hostname OR full URL; we normalise below. Required in every
+    # environment — the discovery surface is dead without it.
+    cognito_domain: str = Field(validation_alias="COGNITO_DOMAIN")
+
+    # The pre-created public Cognito client_id the DCR shim returns to MCP
+    # clients. Required in every environment, and must also be in
+    # allowed_cognito_client_ids (validated below) so tokens minted via this
+    # flow actually authenticate against us.
+    cognito_public_client_id: str = Field(validation_alias="COGNITO_PUBLIC_CLIENT_ID")
+
+    # OAuth scopes published in PRM + AS metadata and requested by clients.
+    mcp_oauth_scopes: list[str] = Field(
+        default_factory=lambda: [
+            "email",
+            "openid",
+            "phone",
+            "profile",
+        ],
+        validation_alias="MCP_OAUTH_SCOPES",
+    )
+
+    # Allowlist of redirect URIs the DCR shim accepts. Must mirror the URIs
+    # pre-registered on the Cognito public client — registering a URI not
+    # in Cognito's list would let the authorize step fail downstream.
+    mcp_registration_redirect_uris: list[str] = Field(
+        default_factory=list,
+        validation_alias="MCP_REGISTRATION_REDIRECT_URIS",
+    )
+
     # Override of computed allowed origins. Comma-separated string, JSON
     # list, or list[str] — pydantic-settings handles the parsing.
     allowed_origins_override: list[str] = Field(
@@ -109,6 +141,29 @@ class Settings(BaseSettings):
         """Public JWKS URL Cognito publishes for this user pool."""
         return f"{self.cognito_issuer}/.well-known/jwks.json"
 
+    @computed_field
+    @property
+    def cognito_hosted_ui_base_url(self) -> str:
+        """Normalised Cognito Hosted UI base URL (no trailing slash).
+
+        Accepts both bare hostnames ("autods.auth.us-west-2.amazoncognito.com")
+        and full URLs. ``cognito_domain`` is required, so this always resolves.
+        """
+        domain = self.cognito_domain.strip().rstrip("/")
+        if "://" not in domain:
+            domain = f"https://{domain}"
+        return domain
+
+    @computed_field
+    @property
+    def cognito_authorization_endpoint(self) -> str:
+        return f"{self.cognito_hosted_ui_base_url}/oauth2/authorize"
+
+    @computed_field
+    @property
+    def cognito_token_endpoint(self) -> str:
+        return f"{self.cognito_hosted_ui_base_url}/oauth2/token"
+
     @model_validator(mode="after")
     def _require_force_https_in_non_local(self) -> Self:
         """A5 startup check: refuse to boot in staging/prod without FORCE_HTTPS=true.
@@ -128,6 +183,21 @@ class Settings(BaseSettings):
         """A4 startup check: refuse to boot in staging/prod without PUBLIC_HOSTNAME specified."""
         if self.mcp_env != McpEnv.local and not self.public_hostname:
             raise ValueError(f"MCP_ENV={self.mcp_env.value} requires PUBLIC_HOSTNAME value")
+        return self
+
+    @model_validator(mode="after")
+    def _public_client_id_must_be_allowed(self) -> Self:
+        """The DCR shim's public client_id must be among the JWT-acceptance set.
+
+        Otherwise tokens minted via the public OAuth flow would fail
+        verification (silent misconfiguration that only surfaces on first
+        end-to-end login attempt).
+        """
+        if self.cognito_public_client_id not in self.allowed_cognito_client_ids:
+            raise ValueError(
+                f"COGNITO_PUBLIC_CLIENT_ID={self.cognito_public_client_id!r} is not in "
+                "ALLOWED_COGNITO_CLIENT_IDS; tokens minted via this client would be rejected."
+            )
         return self
 
 

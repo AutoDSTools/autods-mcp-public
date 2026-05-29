@@ -9,6 +9,9 @@ def test_health_returns_ok(env) -> None:
     env(
         MCP_ENV="local",
         COGNITO_USER_POOL_ID="staging_pool_id",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS='["public-client"]',
     )
 
     app = create_app()

@@ -31,9 +31,12 @@ from autods_mcp_server.auth.exceptions import (
 )
 from autods_mcp_server.auth.jwks import JWKSClient, get_jwks_client
 from autods_mcp_server.auth.verify import verify_token
-from autods_mcp_server.settings import Settings, get_settings
 
-PRM_PATH = "/.well-known/oauth-protected-resource"
+# ``PRM_PATH`` is re-exported here (auth/__init__ surfaces it); its
+# canonical definition lives in ``urls`` so the 401 challenge URL and the
+# served route can't drift apart.
+from autods_mcp_server.settings import Settings, get_settings
+from autods_mcp_server.urls import PRM_PATH, effective_base_url
 
 
 class UserContext(BaseModel):
@@ -48,24 +51,6 @@ class UserContext(BaseModel):
 # Error codes follow RFC 6750 §3.1.
 _ERROR_INVALID_REQUEST = "invalid_request"
 _ERROR_INVALID_TOKEN = "invalid_token"
-
-
-def _effective_base_url(request: Request, settings: Settings) -> str:
-    """Resolve scheme + host for the PRM URL.
-
-    In any environment with ``PUBLIC_HOSTNAME`` configured (mandatory
-    for non-local — see ``Settings._require_public_hostname_in_non_local``),
-    the host is pinned to that value, ignoring request headers. That
-    eliminates Host-header / X-Forwarded-Host injection into the PRM
-    URL we hand back to clients in ``WWW-Authenticate``.
-    """
-    if settings.public_hostname:
-        scheme = "https" if settings.force_https else "http"
-        return f"{scheme}://{settings.public_hostname}"
-    # Local-dev fallback when no PUBLIC_HOSTNAME is set.
-    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
-    host = request.headers.get("host") or request.url.netloc
-    return f"{scheme}://{host}"
 
 
 def build_www_authenticate(
@@ -96,7 +81,7 @@ def _build_unauthorized_exception(
     error: str,
     description: str,
 ) -> HTTPException:
-    prm_url = f"{_effective_base_url(request, settings)}{PRM_PATH}"
+    prm_url = f"{effective_base_url(request, settings)}{PRM_PATH}"
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail={"error": error, "error_description": description},

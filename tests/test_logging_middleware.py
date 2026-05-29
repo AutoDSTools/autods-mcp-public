@@ -18,6 +18,9 @@ def test_one_structured_log_line_per_request(monkeypatch) -> None:
     monkeypatch.setenv("COGNITO_USER_POOL_ID", "staging_pool_id")
     monkeypatch.setenv("FORCE_HTTPS", "true")
     monkeypatch.setenv("PUBLIC_HOSTNAME", "example.com")
+    monkeypatch.setenv("COGNITO_DOMAIN", "autods.auth.us-west-2.amazoncognito.com")
+    monkeypatch.setenv("COGNITO_PUBLIC_CLIENT_ID", "public-client")
+    monkeypatch.setenv("ALLOWED_COGNITO_CLIENT_IDS", '["public-client"]')
     settings = Settings()
     configure_logging(settings)
 
@@ -60,7 +63,13 @@ def test_one_structured_log_line_per_request(monkeypatch) -> None:
 
 
 def test_explicit_request_id_is_preserved(monkeypatch) -> None:
-    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id")
+    settings = Settings(
+        MCP_ENV="local",
+        COGNITO_USER_POOL_ID="staging_pool_id",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS=["public-client"],
+    )
     configure_logging(settings)
 
     app = FastAPI()

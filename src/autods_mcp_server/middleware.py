@@ -32,6 +32,7 @@ DEFAULT_PROTECTED_PATTERNS: Final[tuple[str, ...]] = (
     "/mcp",
     "/mcp/*",
     "/.well-known/*",
+    "/oauth/*",
 )
 
 
@@ -97,13 +98,17 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 class OriginAllowlistMiddleware(BaseHTTPMiddleware):
     """Enforce Origin allowlist + DNS-rebinding Host check on protected paths.
 
-    - Missing Origin on a protected route → 403.
-    - Origin not in allowlist → 403.
-    - Origin present but its host doesn't match the configured public
-      hostname (or the Host header, when public_hostname is empty)
-      → 403. This is the DNS-rebinding defense: a browser tricked into
-      issuing a request from a malicious page will carry that page's
-      Origin, but the TCP connection still lands on our Host header.
+    - Missing Origin → allowed. A browser always attaches an Origin on a
+      cross-origin fetch, so a rebinding/CSRF attempt would carry a
+      (rejected) Origin. Absence means a direct, non-browser caller (e.g.
+      a server-side MCP client) bearing no ambient credentials — there's
+      nothing for the allowlist to defend against, and requiring Origin
+      only locks legitimate MCP clients out of the discovery + DCR
+      endpoints. The Host check below still applies to these requests.
+    - Origin present but not in allowlist → 403.
+    - Host doesn't match the configured public hostname → 403. This is the
+      DNS-rebinding defense: a browser tricked into issuing a request from
+      a malicious page still lands on our Host header.
     """
 
     def __init__(
@@ -120,11 +125,10 @@ class OriginAllowlistMiddleware(BaseHTTPMiddleware):
         if not _path_is_protected(request.url.path, self._protected_patterns):
             return await call_next(request)
 
+        # Only validate the Origin when one is present — a missing Origin is a
+        # non-browser caller, not a rebinding/CSRF vector (see class docstring).
         origin = request.headers.get("origin")
-        if not origin:
-            return _forbidden("origin_missing", "Origin header is required on this route.")
-
-        if not _origin_matches(origin, self._settings.allowed_origins):
+        if origin and not _origin_matches(origin, self._settings.allowed_origins):
             return _forbidden("origin_not_allowed", f"Origin {origin!r} is not permitted.")
 
         # DNS-rebinding defense: the Origin allowlist proves the *caller*

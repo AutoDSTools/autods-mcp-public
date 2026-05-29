@@ -10,7 +10,10 @@ This repo is the foundation for the Public MCP epic
 skeleton, the FastAPI app, structured logging, origin / HTTPS-only
 middlewares and the local Docker workflow. Phase B
 ([RD-52](https://autods.atlassian.net/browse/RD-52)) adds the Cognito
-JWT verification stack. MCP/OAuth transport lands in later phases.
+JWT verification stack. Phase C
+([RD-53](https://autods.atlassian.net/browse/RD-53)) adds the MCP-spec
+OAuth discovery endpoints (PRM, AS metadata) and the Dynamic Client
+Registration shim. MCP transport / tool manifests land in later phases.
 
 ## Requirements
 
@@ -57,6 +60,10 @@ All settings come from environment variables. See
 | `COGNITO_USER_POOL_ID` | yes | Cognito user pool that mints tokens |
 | `COGNITO_REGION` | no (default `us-west-2`) | Used to compute the JWKS URL and `iss` claim |
 | `ALLOWED_COGNITO_CLIENT_IDS` | yes (JSON list) | Access tokens are accepted only if their `client_id` is in this list |
+| `COGNITO_PUBLIC_CLIENT_ID` | yes | client_id the DCR shim hands back to MCP clients; must also be in `ALLOWED_COGNITO_CLIENT_IDS` |
+| `COGNITO_DOMAIN` | yes | Cognito Hosted UI domain (bare hostname or full URL); used to build authorize / token endpoints |
+| `MCP_OAUTH_SCOPES` | no (default `email openid phone profile`) | JSON list of scopes published in PRM + AS metadata |
+| `MCP_REGISTRATION_REDIRECT_URIS` | yes for `/oauth/register` | JSON list of redirect URIs the DCR shim will echo back. Must mirror the URIs pre-registered on the Cognito client |
 | `FORCE_HTTPS` | yes in non-local | Set to `true` to acknowledge ALB-terminated TLS |
 | `PUBLIC_HOSTNAME` | yes in non-local | Pins the PRM URL host (defends against `Host` / `X-Forwarded-Host` injection) |
 | `LOG_LEVEL` | no (default `INFO`) | |
@@ -91,6 +98,45 @@ The `JWKSClient` caches keys for `ttl_seconds` (default 24h), refreshes
 on unknown-`kid`, and rate-limits all refresh attempts (success or
 failure) to one per `min_refresh_interval` (default 30s) to bound both
 unknown-kid amplification and Cognito-outage amplification.
+
+## OAuth discovery + DCR (Phase C)
+
+The server exposes three unauthenticated routes that let MCP clients
+auto-bootstrap the OAuth flow:
+
+| Route | RFC | Returns |
+|---|---|---|
+| `GET /.well-known/oauth-protected-resource` | 9728 | `resource`, `authorization_servers`, supported scopes |
+| `GET /.well-known/oauth-authorization-server` | 8414 | Proxy AS metadata — `authorization_endpoint` and `token_endpoint` point at Cognito Hosted UI; `registration_endpoint` points back at us |
+| `POST /oauth/register` | 7591 | DCR shim — returns the pre-created `COGNITO_PUBLIC_CLIENT_ID` and echoes back validated `redirect_uris` |
+
+The DCR shim is a thin proxy because Cognito itself doesn't speak DCR.
+MCP clients (Claude, Cursor, MCP Inspector) refuse to start the OAuth
+flow without a `registration_endpoint`, so we hand them back the fixed
+Cognito public client they would have used anyway, after validating each
+requested redirect URI against `MCP_REGISTRATION_REDIRECT_URIS` (exact
+match — globs would mask Cognito-side rejections).
+
+Token verification still happens against Cognito's issuer
+(`COGNITO_USER_POOL_ID` / `COGNITO_REGION`); the `issuer` field in our
+AS metadata document is our own resource URL (so clients discover this
+proxy via `/.well-known/oauth-authorization-server`).
+
+The 401 `WWW-Authenticate` challenge wired in Phase B advertises the
+PRM URL, completing the discovery loop:
+
+1. Client GETs a protected MCP route → 401 with `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"`.
+2. Client fetches PRM, then AS metadata, then `POST /oauth/register`.
+3. Client redirects the user to Cognito's `authorization_endpoint` and
+   exchanges the code at Cognito's `token_endpoint`.
+4. Client sends the resulting access token in `Authorization: Bearer …`.
+
+### Manual end-to-end test (C6)
+
+The MCP Inspector at `http://localhost:6274` can be pointed at a local
+server (`uv run uvicorn …`) with OAuth enabled. Until Phase D lands
+the `/mcp` transport, the assertion is reduced to "OAuth flow completes
+end-to-end and the bearer token is accepted on a protected route".
 
 ## Lint / format / test
 

@@ -264,9 +264,7 @@ async def test_default_fetcher_calls_cognito_via_httpx(httpx_mock, make_jwks, si
     assert key["kid"] == signing_key.kid
 
 
-async def test_default_fetcher_raises_jwks_unavailable_on_http_error(
-    httpx_mock, signing_key: SigningKey
-) -> None:
+async def test_default_fetcher_raises_jwks_unavailable_on_http_error(httpx_mock, signing_key: SigningKey) -> None:
     """A 5xx from Cognito must surface as `JWKSUnavailable` (via httpx's
     `raise_for_status`), not as a leaked `HTTPStatusError`."""
     httpx_mock.add_response(url=TEST_JWKS_URL, method="GET", status_code=503)
@@ -288,6 +286,9 @@ def test_get_jwks_client_is_thread_safe_under_concurrent_first_calls() -> None:
         MCP_ENV="local",
         COGNITO_USER_POOL_ID="us-west-2_RACEPOOL",
         COGNITO_REGION="us-west-2",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS=["public-client"],
     )
     reset_jwks_client()
 
@@ -304,11 +305,17 @@ def test_get_jwks_client_caches_per_url() -> None:
         MCP_ENV="local",
         COGNITO_USER_POOL_ID="us-west-2_POOLA",
         COGNITO_REGION="us-west-2",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS=["public-client"],
     )
     settings_b = Settings(
         MCP_ENV="local",
         COGNITO_USER_POOL_ID="us-west-2_POOLB",
         COGNITO_REGION="us-west-2",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS=["public-client"],
     )
 
     client_a = get_jwks_client(settings_a)

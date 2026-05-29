@@ -30,6 +30,8 @@ def auth_app(env, make_jwks) -> FastAPI:
         COGNITO_USER_POOL_ID="us-west-2_TESTPOOL",
         COGNITO_REGION="us-west-2",
         ALLOWED_COGNITO_CLIENT_IDS=f'["{TEST_CLIENT_ID}"]',
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID=TEST_CLIENT_ID,
     )
 
     async def fetch(_url: str) -> dict[str, Any]:
@@ -83,9 +85,7 @@ def test_expired_token_returns_401_with_challenge(client: TestClient, make_token
     _assert_bearer_challenge(response, expected_error="invalid_token")
 
 
-def test_disallowed_client_id_returns_401_with_invalid_token_challenge(
-    client: TestClient, make_token
-) -> None:
+def test_disallowed_client_id_returns_401_with_invalid_token_challenge(client: TestClient, make_token) -> None:
     """Wire-level check that an `InvalidAudience` from `verify_token` maps to
     `invalid_token` with a description that pinpoints the `client_id` failure."""
     token = make_token(client_id="some-other-client")
@@ -141,6 +141,8 @@ def test_prm_url_uses_public_hostname_not_request_host(env, make_jwks, make_toke
         COGNITO_USER_POOL_ID="us-west-2_TESTPOOL",
         COGNITO_REGION="us-west-2",
         ALLOWED_COGNITO_CLIENT_IDS=f'["{TEST_CLIENT_ID}"]',
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID=TEST_CLIENT_ID,
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
     )

@@ -1,8 +1,9 @@
 """FastAPI application factory.
 
 Phase A — exposes /health and wires the foundational middlewares
-(request context, Origin allowlist, HTTPS-only). MCP transport,
-OAuth shim, and tool manifests are added in later phases.
+(request context, Origin allowlist, HTTPS-only). Phase C mounts the
+OAuth discovery + DCR endpoints (PRM, AS metadata, /oauth/register).
+MCP transport and tool manifests are added in later phases.
 """
 
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from autods_mcp_server.middleware import (
     OriginAllowlistMiddleware,
     RequestContextMiddleware,
 )
+from autods_mcp_server.oauth import router as oauth_router
 from autods_mcp_server.settings import get_settings
 
 
@@ -39,5 +41,7 @@ def create_app() -> FastAPI:
     @application.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    application.include_router(oauth_router)
 
     return application

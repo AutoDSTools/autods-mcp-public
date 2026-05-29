@@ -31,6 +31,8 @@ def _settings() -> Settings:
         COGNITO_USER_POOL_ID="us-west-2_TESTPOOL",
         COGNITO_REGION="us-west-2",
         ALLOWED_COGNITO_CLIENT_IDS=[TEST_CLIENT_ID],
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID=TEST_CLIENT_ID,
     )
 
 

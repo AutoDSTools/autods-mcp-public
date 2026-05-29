@@ -10,6 +10,15 @@ from fastapi.testclient import TestClient
 from autods_mcp_server.middleware import OriginAllowlistMiddleware
 from autods_mcp_server.settings import Settings
 
+# COGNITO_DOMAIN + COGNITO_PUBLIC_CLIENT_ID are required in every environment
+# (and the public client id must be allowlisted). These Origin-guard tests
+# don't exercise OAuth, but Settings won't construct without them.
+_OAUTH_REQUIRED = {
+    "COGNITO_DOMAIN": "autods.auth.us-west-2.amazoncognito.com",
+    "COGNITO_PUBLIC_CLIENT_ID": "public-client",
+    "ALLOWED_COGNITO_CLIENT_IDS": ["public-client"],
+}
+
 
 def _app(settings: Settings) -> FastAPI:
     app = FastAPI()
@@ -33,14 +42,27 @@ def staging_settings() -> Settings:
         COGNITO_USER_POOL_ID="staging_pool_id",
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
+        **_OAUTH_REQUIRED,
     )
 
 
-def test_missing_origin_rejected(staging_settings: Settings) -> None:
+def test_missing_origin_allowed_for_non_browser_client(staging_settings: Settings) -> None:
+    """A request with no Origin (a server-side / non-browser MCP client) is
+    allowed through — browsers always attach an Origin cross-origin, so absence
+    isn't a rebinding/CSRF vector. The Host check still applies (see below)."""
     with TestClient(_app(staging_settings)) as client:
         response = client.get("/health", headers={"host": "mcp.autods.com"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_missing_origin_with_foreign_host_rejected(staging_settings: Settings) -> None:
+    """Relaxing the Origin requirement must not weaken the DNS-rebinding defense:
+    a no-Origin request whose Host doesn't match PUBLIC_HOSTNAME is still 403."""
+    with TestClient(_app(staging_settings)) as client:
+        response = client.get("/health", headers={"host": "evil.example.com"})
     assert response.status_code == 403
-    assert response.json()["error"] == "origin_missing"
+    assert response.json()["error"] == "host_mismatch"
 
 
 def test_foreign_origin_rejected(staging_settings: Settings) -> None:
@@ -86,7 +108,7 @@ def test_host_mismatch_with_present_origin_rejected(staging_settings: Settings) 
 
 
 def test_localhost_wildcard_accepts_random_port() -> None:
-    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id")
+    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id", **_OAUTH_REQUIRED)
     with TestClient(_app(settings)) as client:
         response = client.get(
             "/health",

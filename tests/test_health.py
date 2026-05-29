@@ -5,7 +5,12 @@ from fastapi.testclient import TestClient
 from autods_mcp_server.app import create_app
 
 
-def test_health_returns_ok() -> None:
+def test_health_returns_ok(env) -> None:
+    env(
+        MCP_ENV="local",
+        COGNITO_USER_POOL_ID="staging_pool_id",
+    )
+
     app = create_app()
     with TestClient(app) as client:
         response = client.get("/health")

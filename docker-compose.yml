@@ -7,9 +7,8 @@ services:
     container_name: autods-mcp-server
     ports:
       - "8000:8000"
-    environment:
-      MCP_ENV: local
-      LOG_LEVEL: DEBUG
+    env_file:
+      - .env
     volumes:
       - ./src:/app/src
     command:

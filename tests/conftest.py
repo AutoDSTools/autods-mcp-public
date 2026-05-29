@@ -10,6 +10,7 @@ from collections.abc import Iterator
 import pytest
 
 from autods_mcp_server import settings as settings_module
+from autods_mcp_server.auth import reset_jwks_client
 
 _MANAGED_ENV_VARS = (
     "MCP_ENV",
@@ -29,11 +30,11 @@ _MANAGED_ENV_VARS = (
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for var in _MANAGED_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
-    # Default to local for tests that don't override.
-    monkeypatch.setenv("MCP_ENV", "local")
     settings_module.reset_settings_cache()
+    reset_jwks_client()
     yield
     settings_module.reset_settings_cache()
+    reset_jwks_client()
 
 
 @pytest.fixture

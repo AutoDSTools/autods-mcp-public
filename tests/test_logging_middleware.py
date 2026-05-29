@@ -15,6 +15,7 @@ from autods_mcp_server.settings import Settings
 
 def test_one_structured_log_line_per_request(monkeypatch) -> None:
     monkeypatch.setenv("MCP_ENV", "staging")
+    monkeypatch.setenv("COGNITO_USER_POOL_ID", "staging_pool_id")
     monkeypatch.setenv("FORCE_HTTPS", "true")
     monkeypatch.setenv("PUBLIC_HOSTNAME", "example.com")
     settings = Settings()
@@ -59,7 +60,7 @@ def test_one_structured_log_line_per_request(monkeypatch) -> None:
 
 
 def test_explicit_request_id_is_preserved(monkeypatch) -> None:
-    settings = Settings(MCP_ENV="local")
+    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id")
     configure_logging(settings)
 
     app = FastAPI()

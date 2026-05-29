@@ -19,14 +19,19 @@ def _app(settings: Settings) -> FastAPI:
 
 
 def test_local_env_allows_plain_http() -> None:
-    settings = Settings(MCP_ENV="local")
+    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id")
     with TestClient(_app(settings)) as client:
         response = client.get("/health")
     assert response.status_code == 200
 
 
 def test_non_local_rejects_request_without_https_proto() -> None:
-    settings = Settings(MCP_ENV="staging", FORCE_HTTPS="true", PUBLIC_HOSTNAME="example.com")
+    settings = Settings(
+        MCP_ENV="staging",
+        COGNITO_USER_POOL_ID="staging_pool_id",
+        FORCE_HTTPS="true",
+        PUBLIC_HOSTNAME="example.com",
+    )
     with TestClient(_app(settings)) as client:
         response = client.get("/health")
     assert response.status_code == 403
@@ -34,14 +39,24 @@ def test_non_local_rejects_request_without_https_proto() -> None:
 
 
 def test_non_local_accepts_request_with_https_proto() -> None:
-    settings = Settings(MCP_ENV="staging", FORCE_HTTPS="true", PUBLIC_HOSTNAME="example.com")
+    settings = Settings(
+        MCP_ENV="staging",
+        COGNITO_USER_POOL_ID="staging_pool_id",
+        FORCE_HTTPS="true",
+        PUBLIC_HOSTNAME="example.com",
+    )
     with TestClient(_app(settings)) as client:
         response = client.get("/health", headers={"x-forwarded-proto": "https"})
     assert response.status_code == 200
 
 
 def test_non_local_rejects_request_with_http_proto() -> None:
-    settings = Settings(MCP_ENV="prod", FORCE_HTTPS="true", PUBLIC_HOSTNAME="example.com")
+    settings = Settings(
+        MCP_ENV="prod",
+        COGNITO_USER_POOL_ID="prod_pool_id",
+        FORCE_HTTPS="true",
+        PUBLIC_HOSTNAME="example.com",
+    )
     with TestClient(_app(settings)) as client:
         response = client.get("/health", headers={"x-forwarded-proto": "http"})
     assert response.status_code == 403

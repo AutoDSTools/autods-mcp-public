@@ -30,6 +30,7 @@ def _app(settings: Settings) -> FastAPI:
 def staging_settings() -> Settings:
     return Settings(
         MCP_ENV="staging",
+        COGNITO_USER_POOL_ID="staging_pool_id",
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
     )
@@ -85,7 +86,7 @@ def test_host_mismatch_with_present_origin_rejected(staging_settings: Settings) 
 
 
 def test_localhost_wildcard_accepts_random_port() -> None:
-    settings = Settings(MCP_ENV="local")
+    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id")
     with TestClient(_app(settings)) as client:
         response = client.get(
             "/health",

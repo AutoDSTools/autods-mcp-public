@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         validation_alias="PRODUCTS_RESEARCH_BASE_URL",
     )
 
-    cognito_user_pool_id: str = Field(default="", validation_alias="COGNITO_USER_POOL_ID")
+    cognito_user_pool_id: str = Field(validation_alias="COGNITO_USER_POOL_ID")
     cognito_region: str = Field(default="us-west-2", validation_alias="COGNITO_REGION")
     allowed_cognito_client_ids: list[str] = Field(
         default_factory=list,
@@ -96,6 +96,18 @@ class Settings(BaseSettings):
     @property
     def is_local(self) -> bool:
         return self.mcp_env == McpEnv.local
+
+    @computed_field
+    @property
+    def cognito_issuer(self) -> str:
+        """Token `iss` claim Cognito mints for this user pool."""
+        return f"https://cognito-idp.{self.cognito_region}.amazonaws.com/{self.cognito_user_pool_id}"
+
+    @computed_field
+    @property
+    def cognito_jwks_url(self) -> str:
+        """Public JWKS URL Cognito publishes for this user pool."""
+        return f"{self.cognito_issuer}/.well-known/jwks.json"
 
     @model_validator(mode="after")
     def _require_force_https_in_non_local(self) -> Self:

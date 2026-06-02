@@ -13,7 +13,11 @@ middlewares and the local Docker workflow. Phase B
 JWT verification stack. Phase C
 ([RD-53](https://autods.atlassian.net/browse/RD-53)) adds the MCP-spec
 OAuth discovery endpoints (PRM, AS metadata) and the Dynamic Client
-Registration shim. MCP transport / tool manifests land in later phases.
+Registration shim. Phase D
+([RD-54](https://autods.atlassian.net/browse/RD-54)) mounts the MCP
+Streamable HTTP transport at `/mcp`, loads tool manifests, converts them
+to MCP tool descriptors, and dispatches each tool call to the right
+upstream service. Curated production manifests land in Phase E.
 
 ## Requirements
 
@@ -66,6 +70,7 @@ All settings come from environment variables. See
 | `MCP_REGISTRATION_REDIRECT_URIS` | yes for `/oauth/register` | JSON list of redirect URIs the DCR shim will echo back. Must mirror the URIs pre-registered on the Cognito client |
 | `FORCE_HTTPS` | yes in non-local | Set to `true` to acknowledge ALB-terminated TLS |
 | `PUBLIC_HOSTNAME` | yes in non-local | Pins the PRM URL host (defends against `Host` / `X-Forwarded-Host` injection) |
+| `MCP_MANIFEST_DIR` | no (default bundled `manifests/`) | Directory the MCP runtime loads tool manifests from. Point at an empty dir to serve zero tools |
 | `LOG_LEVEL` | no (default `INFO`) | |
 
 Non-local environments enforce HTTPS via `X-Forwarded-Proto` and refuse
@@ -134,9 +139,54 @@ PRM URL, completing the discovery loop:
 ### Manual end-to-end test (C6)
 
 The MCP Inspector at `http://localhost:6274` can be pointed at a local
-server (`uv run uvicorn …`) with OAuth enabled. Until Phase D lands
-the `/mcp` transport, the assertion is reduced to "OAuth flow completes
-end-to-end and the bearer token is accepted on a protected route".
+server (`uv run uvicorn …`) with OAuth enabled. With the Phase D `/mcp`
+transport live, the Inspector completes the OAuth flow and then lists the
+manifest-defined tools.
+
+## MCP runtime (Phase D)
+
+The MCP Streamable HTTP transport is mounted at `/mcp` (both `POST` and
+`GET` for the SSE stream, per the MCP spec) behind the Phase B auth
+dependency — an unauthenticated request gets the same RFC 6750 `401 +
+WWW-Authenticate` challenge, which is what MCP clients follow to discover
+the OAuth flow. On success the verified `UserContext` is carried through
+to each tool call, and the dispatcher forwards the caller's own bearer
+token upstream (the server never holds privileged credentials).
+
+### Manifests
+
+Tools are defined by JSON manifests under `MCP_MANIFEST_DIR` (default: the
+bundled `manifests/`). The format mirrors
+`autods-mcp/generated/servers/<server>/operations.json`, extended with two
+fields the public server needs:
+
+- `annotations` — `{ title, readOnlyHint, destructiveHint }` per operation.
+  The server **refuses to boot** if any tool lacks a `title` or lacks both
+  hint flags (D5).
+- `base_url_key` — which upstream serves the operation (`autods_api` →
+  `AUTODS_API_BASE_URL`, `products_research` → `PRODUCTS_RESEARCH_BASE_URL`).
+  Set per-operation or once at the manifest level; one running server can
+  route different tools to different upstreams.
+
+Each operation's path/query/header parameters (plus a free-form JSON `body`
+when present) are converted into a pydantic model whose JSON schema becomes
+the tool's `inputSchema`.
+
+The manifests under `manifests/` are maintained by hand: add a new operation
+as a JSON entry with its `parameters`, `has_json_body`/`request_body_required`
+flags, `annotations` (`title` + at least one hint), and `base_url_key`. The
+server's D5 startup lint refuses to boot if any operation is missing its
+annotations, so a malformed manifest can't reach a client.
+
+### Manifest → upstream call flow
+
+1. Client lists tools via `tools/list`; each descriptor carries the
+   manifest annotations.
+2. Client calls a tool; the SDK validates arguments against `inputSchema`.
+3. The dispatcher looks up the operation, resolves its upstream base URL
+   from `base_url_key`, substitutes path params, attaches query/header
+   params and the JSON body, forwards `Authorization: Bearer …`, and
+   returns a structured `{ operation_id, status, ok, data }` envelope.
 
 ## Lint / format / test
 

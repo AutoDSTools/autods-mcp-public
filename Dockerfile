@@ -20,6 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Now copy the project source and install the package itself.
 COPY src ./src
+COPY manifests ./manifests
 COPY README.md ./README.md
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev

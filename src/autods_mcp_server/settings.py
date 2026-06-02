@@ -6,6 +6,7 @@ fields, but the structure here is the contract.
 """
 
 from enum import StrEnum
+from pathlib import Path
 from typing import Self
 
 from pydantic import Field, computed_field, model_validator
@@ -16,6 +17,20 @@ class McpEnv(StrEnum):
     local = "local"
     staging = "staging"
     prod = "prod"
+
+
+# Default manifest directory: the repo-root ``manifests/`` bundle, resolved from
+# this file's location so it works regardless of the process CWD. Phase E owns
+# the production manifest set; Phase D ships the vendored ``products.json`` here.
+_DEFAULT_MANIFEST_DIR = Path(__file__).resolve().parents[2] / "manifests"
+
+# ``base_url_key`` (manifest/operation field) -> the Settings attribute holding
+# that upstream's base URL. The dispatcher resolves routing through this map, so
+# adding an upstream is: add the URL field below + an entry here.
+_BASE_URL_KEY_TO_ATTR: dict[str, str] = {
+    "autods_api": "autods_api_base_url",
+    "products_research": "products_research_base_url",
+}
 
 
 # Origins shared by every non-local environment. Staging additionally
@@ -103,6 +118,23 @@ class Settings(BaseSettings):
     force_https: bool = Field(default=False, validation_alias="FORCE_HTTPS")
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+
+    # Directory the MCP runtime loads tool manifests from. Defaults to the
+    # bundled ``manifests/`` (which carries the vendored products manifest);
+    # point it at an empty dir to run the transport with zero tools.
+    mcp_manifest_dir: Path = Field(default=_DEFAULT_MANIFEST_DIR, validation_alias="MCP_MANIFEST_DIR")
+
+    def upstream_base_url(self, base_url_key: str) -> str:
+        """Resolve a manifest ``base_url_key`` to the upstream's base URL (D6).
+
+        Raises:
+            ValueError: if the key isn't a known upstream — a manifest
+                packaging error we surface rather than silently mis-route.
+        """
+        attr = _BASE_URL_KEY_TO_ATTR.get(base_url_key)
+        if attr is None:
+            raise ValueError(f"Unknown base_url_key {base_url_key!r}; expected one of {sorted(_BASE_URL_KEY_TO_ATTR)}.")
+        return getattr(self, attr)
 
     @computed_field
     @property

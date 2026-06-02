@@ -3,13 +3,19 @@
 Phase A — exposes /health and wires the foundational middlewares
 (request context, Origin allowlist, HTTPS-only). Phase C mounts the
 OAuth discovery + DCR endpoints (PRM, AS metadata, /oauth/register).
-MCP transport and tool manifests are added in later phases.
+Phase D mounts the MCP Streamable HTTP transport at /mcp (behind the
+Phase B auth dependency) and the runtime that serves manifest-defined
+tools.
 """
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from autods_mcp_server import __version__
 from autods_mcp_server.logging import configure_logging
+from autods_mcp_server.mcp_transport import build_runtime, mcp_lifespan, mount_mcp
 from autods_mcp_server.middleware import (
     HttpsOnlyMiddleware,
     OriginAllowlistMiddleware,
@@ -23,12 +29,23 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings)
 
+    # Build the MCP runtime up front: loading manifests runs the D5 annotation
+    # lint, so a mis-annotated manifest fails create_app() — i.e. boot — rather
+    # than surfacing on the first tool call.
+    runtime = build_runtime(settings)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        async with mcp_lifespan(runtime):
+            yield
+
     application = FastAPI(
         title="autods-mcp-server",
         version=__version__,
         docs_url="/docs" if settings.is_local else None,
         redoc_url=None,
         openapi_url="/openapi.json" if settings.is_local else None,
+        lifespan=lifespan,
     )
 
     # Starlette wraps add_middleware calls innermost-first, so the LAST
@@ -43,5 +60,6 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     application.include_router(oauth_router)
+    mount_mcp(application, runtime)
 
     return application

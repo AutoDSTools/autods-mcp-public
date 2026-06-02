@@ -1,0 +1,30 @@
+{
+  "server_name": "autods-stores",
+  "domain": "stores",
+  "generated_at": "2026-02-11T18:38:32.375586+00:00",
+  "operations_count": 1,
+  "top_typed_operations_count": 1,
+  "instructions": "## AutoDS Stores API \u2014 Agent Reference\n\n### Key enums (all integer unless noted)\n\n**sell_site / site** (selling channel): 1=ebay, 2=amazon, 3=shopify, 4=facebook, 5=wix, 6=woocommerce, 7=etsy, 8=tiktok\n\n**store_type**: 1=ebay_api, 2=ebay_filexchange_api, 3=ebay_non_api, 4=facebook_marketplace, 5=facebook_shop, 6=ebay_mip, 7=etsy_api, 8=etsy_non_api\n\n**token_mechanism**: 1=authnauth, 2=oauth\n\n**region**: 1=us, 2=uk, 3=de, 4=fr, 5=it, 6=cn, 7=all_regions, 8=th, 9=es, 10=au, 11=ca, 12=pl, 13=ru, 14=be, 15=cz, 16=vn, 17=my, 18=sg, 19=ph, 20=id, 21=br, 22=ie\n\n**ship_to**: same values as region (1=us, 2=uk, etc., 7=all)\n\n**shipping_type** (preferred_shipping_type): 1=cheapest, 2=cheapest_with_tracking, 3=fastest, 4=fastest_with_tracking\n\n**suppliers_table_option**: 1=cheapest_first, 2=prime_first\n\n**measurement_type** (default_weight_unit): 1=grams, 2=lb, 3=oz, 4=kg\n\n**bce_conversion**: 1=no_bce, 2=all_carriers, 3=amazon_carrier, 4=aquiline_all_carriers, 5=qtrack_all_carriers, 6=qtrack_amazon_carrier, 7=tracktaco_amazon_carrier\n\n**update_as_shipped**: 1=shipped, 2=ordered, 3=received\n\n**automatic_message_type**: 1=gift_message, 2=feedback_message, 3=ordered_message, 4=shipped_message, 5=delivered_message\n\n**default_currency** (string, NOT integer): ISO codes like \"USD\", \"GBP\", \"EUR\"\n\n**resync_type** (string): \"api\" or \"csv\"\n\n**currency_state**: 1=editable, 2=non_editable, 3=external_update_only\n\n### Common patterns\n- store_id / store_ids is always a path parameter\n- get_all_stores (GET /store/list) returns all stores for the authenticated user\n- Store settings are per-store + per-supplier + per-region combination\n- Sales channel operations (TikTok, Facebook, etc.) require the corresponding store type to be connected \u2014 no separate auth flow needed\n",
+  "operations": [
+    {
+      "operation_id": "list_stores_api",
+      "method": "GET",
+      "path": "/store/list",
+      "summary": "",
+      "description": "",
+      "tags": [
+        "store"
+      ],
+      "parameters": [],
+      "has_json_body": false,
+      "request_body_required": false,
+      "is_top_typed_tool": true,
+      "notes": "Returns all stores for the authenticated user.",
+      "annotations": {
+        "title": "List Stores",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

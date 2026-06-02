@@ -1,0 +1,96 @@
+{
+  "server_name": "autods-products",
+  "domain": "products",
+  "generated_at": "2026-02-11T18:38:32.375200+00:00",
+  "operations_count": 3,
+  "top_typed_operations_count": 0,
+  "instructions": "## AutoDS Products API — Agent Reference\n\n### Key enums\n\n**product_status** (always use integer values):\n1=draft, 2=active, 3=ended, 4=untracked, 5=scheduled, 6=pre_draft\n\n**sell sites** (site_id — the selling channel):\n1=ebay, 2=amazon, 3=shopify, 4=facebook, 5=wix, 6=woocommerce, 7=etsy, 8=tiktok\n\n**buy sites** (supplier — the source site):\n1=amazon, 2=aliexpress, 3=banggood, 4=walmart, 5=homedepot, 6=wayfair,\n7=costco, 8=overstock, 9=costway, 10=chinabrands, 11=etsy, 12=lowes,\n13=ebay, 14=target, 15=cjdropshipping, 16=samsclub, 17=vidaxl,\n18=gearbest, 19=miniinthebox, 20=lightinthebox, 21=alibaba,\n22=pureformulas, 23=redbubble, 24=wish, 25=kmart, 26=dhgate,\n27=autods_marketplace, 28=shein, 29=macys, 30=kohls, 31=catch,\n32=shopify, 33=autods_sourcing, 34=temu, 35=cdiscount,\n36=print_on_demand, 37=tiktok, 38=alibaba_1688, 39=kogan\n\n**region**: 1=us, 2=uk, 3=de, 4=fr, 5=it, 6=cn, 7=all_regions,\n8=th, 9=es, 10=au, 11=ca, 12=pl, 13=ru, 14=be, 15=cz,\n16=vn, 17=my, 18=sg, 19=ph, 20=id, 21=br, 22=ie\n\n**inventory_status**: 1=in_stock, 2=out_of_stock, 3=on_hold\n\n**error_type**: 0=vero_error, 1=internal_error, 2=untracked_error,\n3=monitor_error, 4=upload_error, 5=supplier_changes_error,\n6=draft_error_reason, 7=file_exchange, 8=facebook_helper,\n9=selling_channel_changes\n\n**bulk_action_type** (integer values):\n1=create_draft, 2=import_to_marketplace, 3=import_untracked,\n4=products_update, 5=products_delete, 6=drafts_delete,\n7=orders_update, 8=drafts_update, 9=products_relist,\n10=conversations_update\n\n**bulk_status**: 1=created, 2=in_progress, 3=finished, 4=canceled, 99=error\n\n### Filter system\n\nlist_products body requires: product_status (integer, e.g. 2 for active), optional filters array.\nEach filter: {name, value, op, value_type}.\n\nFilter operators: =, ne, <, <=, >, >=, in, not_in, like, not_like,\nhas, any, starts_with, ends_with, exists, exact_date, between\n\nFilter value types: integer, float, bool, string, list, list_int, datetime, object_id\n\n**Filter by product id**: the filter name `id` is mapped to `_id` upstream and each value is cast to ObjectId. Single id: {\"name\": \"id\", \"op\": \"=\", \"value\": \"<mongo id>\", \"value_type\": \"object_id\"}. Multiple ids: {\"name\": \"id\", \"op\": \"in\", \"value_list\": [\"<mongo id>\", ...], \"value_type\": \"list\"}. Multi-value ops (in/not_in) take their values in `value_list` (not `value`); value_type `list`/`list_int` REQUIRE `value_list`.\n\n**IMPORTANT**: All enum fields use integer values — both top-level fields\n(product_status, buy_site_id, region) and filter values\n(status, variations.inventory_status, variations.active_buy_item.site_id).\n\n### Common patterns\n- store_ids is always a path parameter (comma-separated string of store IDs)\n- POST list/search endpoints are read-only (safe), body contains filter/pagination\n- limit/offset pagination: default limit=100, offset=0\n- product_id in URLs is the MongoDB ObjectId string\n\n### IMPORTANT: PUT = full replacement\nupdate_product (PUT) requires the ENTIRE product object, not just changed fields.\nWorkflow: GET the product first → modify needed fields → PUT the full object back.\nSending only changed fields will wipe everything else. Use update_product_note (PATCH)\nfor note-only changes.\n",
+  "operations": [
+    {
+      "operation_id": "upload_products",
+      "method": "POST",
+      "path": "/products/{store_ids}/",
+      "summary": "Bulk-upload products to one or more stores from supplier products, a file, or finder categories.",
+      "description": "",
+      "notes": "Body follows ProductUploadSchema. Uploads many products in a single async operation. store_ids is a path parameter (comma-separated string of AutoDS store IDs). Provide at least ONE source: new_products (list of {asin: supplier product id/URL (required), title, price, channel_specific}). The asin is the product ID unique to a given supplier and is usually embedded in the product URL — e.g. for Amazon it looks like B0D8HR6M4B (found in .../dp/B0D8HR6M4B/...), so extract that ID from the URL rather than passing a search/category/deals landing page. You may pass either the bare ID or the full product URL. Alternatively, provide file_url (string: a file/CSV of products to import), or finder_categories (list of {category_id: int (required), amount_of_products: int >=1 (required)}). Required enums, passed as INTEGER values (NOT names — the upstream EnumField deserializes by value): region (e.g. 1=us, 2=uk, 3=de - see the region table in instructions), status (1=draft, 2=active, 3=ended, 4=untracked, 5=scheduled, 6=pre_draft), buy_site_id (the supplier site, e.g. 1=amazon, 2=aliexpress, 4=walmart - see the buy sites table). Optional: action_source (integer enum value); supplier_settings (partial store-settings object); upload_settings ({tag: list[str], collection: list[str], min_price_range: float, max_price_range: float, disable_auto_order: bool, disable_stock_monitoring: bool, disable_price_monitoring: bool, scheduled_datetime: ISO 8601 datetime}). If status=5 (scheduled), upload_settings.scheduled_datetime is required and must be a future, timezone-aware time. Async: fires a Celery bulk task and returns immediately with {\"status\": \"Product uploading started\", \"bulk_action\": {...}}. Poll progress by passing bulk_action.id to get_bulk_action_items (autods-bulk-actions manifest).",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "store_ids",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "AutoDS store IDs if more than one should be comma separated"
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "is_top_typed_tool": false,
+      "annotations": {
+        "title": "Upload Products",
+        "readOnlyHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "publish_drafts_to_marketplace",
+      "method": "POST",
+      "path": "/products/{store_ids}/import_to_marketplace",
+      "summary": "",
+      "description": "",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "store_ids",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "AutoDS store IDs if more than one should be comma separated"
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "is_top_typed_tool": false,
+      "notes": "Imports draft products to the marketplace in bulk. Async: fires Celery task upload_product_to_marketplace_bulk and returns immediately with {\"status\": ..., \"bulk_action\": {...}}; poll bulk_action.id via get_bulk_action_items (autods-bulk-actions manifest). Pushes drafts to the selling channel (eBay, Shopify, etc.). Body follows ProductBulkUploadSchema: product_status (required INTEGER enum value, e.g. 1=draft - selects which products to act on; passed by value, NOT name); condition (\"and\"/\"or\", default \"and\"); filters (array selecting which products - OMIT to import ALL products of that status, which is rarely what you want). Each filter: {name, op, value_type, and either value (single string) OR value_list (list of strings)}. To target specific products, filter by id: {\"name\": \"id\", \"op\": \"in\", \"value_type\": \"list\", \"value_list\": [\"<mongo product id>\", ...]} for several, or {\"name\": \"id\", \"op\": \"=\", \"value\": \"<mongo product id>\", \"value_type\": \"object_id\"} for one (the upstream maps id->_id and casts each value to ObjectId). Optional: scheduled_datetime_min, scheduled_datetime_max (ISO 8601).",
+      "annotations": {
+        "title": "Publish Drafts To Marketplace",
+        "readOnlyHint": false,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "list_products",
+      "method": "POST",
+      "path": "/products/{store_ids}/list/",
+      "summary": "",
+      "description": "",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "store_ids",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "AutoDS store IDs if more than one should be comma separated"
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "is_top_typed_tool": false,
+      "notes": "Read-only POST. Queries products by filter from MongoDB. Body: product_status (required enum), filters (array of {name, value, op, value_type}), condition (\"and\"/\"or\"), limit (1-1000, default 100), offset (min 0), order_by ({name, direction}), projection (list of field names). Filterable fields include: title, tags, status, variations.price, variations.active_buy_item.price/site_id/region, created_date, upload_date, etc.",
+      "safe": true,
+      "annotations": {
+        "title": "List Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ],
+  "base_url_key": "autods_api"
+}

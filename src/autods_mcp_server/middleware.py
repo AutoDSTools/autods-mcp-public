@@ -131,20 +131,6 @@ class OriginAllowlistMiddleware(BaseHTTPMiddleware):
         if origin and not _origin_matches(origin, self._settings.allowed_origins):
             return _forbidden("origin_not_allowed", f"Origin {origin!r} is not permitted.")
 
-        # DNS-rebinding defense: the Origin allowlist proves the *caller*
-        # is one we trust, but a rebinding attack tricks a browser into
-        # issuing the request through our server's IP under an attacker
-        # Host. Compare the Host header to our public hostname when we
-        # know it; in local dev (no public_hostname) we skip — the
-        # localhost-only Origin allowlist already pins the audience.
-        if self._settings.public_hostname:
-            actual_host = _host_from_header(request.headers.get("host", ""))
-            if actual_host != self._settings.public_hostname:
-                return _forbidden(
-                    "host_mismatch",
-                    f"Host header {actual_host!r} does not match expected host {self._settings.public_hostname!r}.",
-                )
-
         return await call_next(request)
 
 

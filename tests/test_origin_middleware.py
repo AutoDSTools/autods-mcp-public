@@ -56,15 +56,6 @@ def test_missing_origin_allowed_for_non_browser_client(staging_settings: Setting
     assert response.json() == {"status": "ok"}
 
 
-def test_missing_origin_with_foreign_host_rejected(staging_settings: Settings) -> None:
-    """Relaxing the Origin requirement must not weaken the DNS-rebinding defense:
-    a no-Origin request whose Host doesn't match PUBLIC_HOSTNAME is still 403."""
-    with TestClient(_app(staging_settings)) as client:
-        response = client.get("/health", headers={"host": "evil.example.com"})
-    assert response.status_code == 403
-    assert response.json()["error"] == "host_mismatch"
-
-
 def test_foreign_origin_rejected(staging_settings: Settings) -> None:
     with TestClient(_app(staging_settings)) as client:
         response = client.get(
@@ -89,22 +80,6 @@ def test_allowed_origin_passes_through(staging_settings: Settings) -> None:
         )
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
-
-def test_host_mismatch_with_present_origin_rejected(staging_settings: Settings) -> None:
-    """DNS-rebinding defense: Origin allowed but Host header points elsewhere."""
-    with TestClient(_app(staging_settings)) as client:
-        response = client.get(
-            "/health",
-            headers={
-                "origin": "https://claude.ai",
-                # Browser was rebound to 127.0.0.1; the request lands on
-                # us via a different Host header than our public name.
-                "host": "127.0.0.1:8000",
-            },
-        )
-    assert response.status_code == 403
-    assert response.json()["error"] == "host_mismatch"
 
 
 def test_localhost_wildcard_accepts_random_port() -> None:

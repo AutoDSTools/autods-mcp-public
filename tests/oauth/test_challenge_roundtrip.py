@@ -17,10 +17,7 @@ from autods_mcp_server.auth import (
     get_current_user,
     settings_dependency,
 )
-from autods_mcp_server.middleware import (
-    HttpsOnlyMiddleware,
-    OriginAllowlistMiddleware,
-)
+from autods_mcp_server.middleware import OriginAllowlistMiddleware
 from autods_mcp_server.oauth import router as oauth_router
 from autods_mcp_server.settings import Settings
 
@@ -51,7 +48,6 @@ def test_unauthenticated_request_advertises_resolvable_prm(env) -> None:
 
     app = FastAPI()
     app.add_middleware(OriginAllowlistMiddleware, settings=settings)
-    app.add_middleware(HttpsOnlyMiddleware, settings=settings)
     app.include_router(oauth_router)
 
     @app.get("/mcp")

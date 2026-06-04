@@ -5,7 +5,6 @@
   structured access log line.
 - OriginAllowlistMiddleware: rejects foreign Origins on protected
   routes and defends against DNS rebinding via a Host check.
-- HttpsOnlyMiddleware: in non-local envs, requires X-Forwarded-Proto=https.
 
 The Origin allowlist applies only to paths matching ``protected_patterns``.
 The production wiring targets ``/mcp`` and ``/.well-known/*`` (those
@@ -129,35 +128,9 @@ class OriginAllowlistMiddleware(BaseHTTPMiddleware):
         # non-browser caller, not a rebinding/CSRF vector (see class docstring).
         origin = request.headers.get("origin")
         if origin and not _origin_matches(origin, self._settings.allowed_origins):
-            return _forbidden("origin_not_allowed", f"Origin {origin!r} is not permitted.")
-
-        return await call_next(request)
-
-
-class HttpsOnlyMiddleware(BaseHTTPMiddleware):
-    """Reject plaintext requests in non-local environments.
-
-    ALB terminates TLS and sets X-Forwarded-Proto. Local env is exempt.
-    Applies to every path — the request-level guard is uniform, not
-    per-route.
-    """
-
-    def __init__(self, app: ASGIApp, settings: Settings) -> None:
-        super().__init__(app)
-        self._settings = settings
-
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if self._settings.is_local:
-            return await call_next(request)
-
-        forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
-        if forwarded_proto != "https":
-            return _forbidden(
-                "https_required",
-                "This endpoint requires HTTPS (X-Forwarded-Proto: https).",
+            return JSONResponse(
+                status_code=403,
+                content={"error": "origin_not_allowed", "detail": f"Origin {origin!r} is not permitted."},
             )
+
         return await call_next(request)
-
-
-def _forbidden(code: str, detail: str) -> JSONResponse:
-    return JSONResponse(status_code=403, content={"error": code, "detail": detail})

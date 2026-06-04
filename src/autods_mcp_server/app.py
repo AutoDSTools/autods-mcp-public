@@ -16,11 +16,7 @@ from fastapi import FastAPI
 from autods_mcp_server import __version__
 from autods_mcp_server.logging import configure_logging
 from autods_mcp_server.mcp_transport import build_runtime, mcp_lifespan, mount_mcp
-from autods_mcp_server.middleware import (
-    HttpsOnlyMiddleware,
-    OriginAllowlistMiddleware,
-    RequestContextMiddleware,
-)
+from autods_mcp_server.middleware import OriginAllowlistMiddleware, RequestContextMiddleware
 from autods_mcp_server.oauth import router as oauth_router
 from autods_mcp_server.settings import get_settings
 
@@ -52,7 +48,6 @@ def create_app() -> FastAPI:
     # call becomes the outermost. We want RequestContext outermost so the
     # request_id is bound before any security middleware short-circuits.
     application.add_middleware(OriginAllowlistMiddleware, settings=settings)
-    application.add_middleware(HttpsOnlyMiddleware, settings=settings)
     application.add_middleware(RequestContextMiddleware)
 
     @application.get("/health")

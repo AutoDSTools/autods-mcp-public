@@ -16,7 +16,7 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "pyjwt[crypto]>=2.9.0",
-    "redis>=5.0",
+    "redis>=8.0,<9",
     "structlog>=24.4.0",
     "uvicorn[standard]>=0.32.0",
 ]

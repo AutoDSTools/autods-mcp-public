@@ -23,7 +23,13 @@ def create_redis(settings: Settings) -> Redis | None:
 
     ``decode_responses=True`` so Lua script results and hash fields come back
     as ``str`` rather than ``bytes`` — the rate limiter works in plain numbers.
+
+    ``protocol=2`` pins RESP2. redis-py >= 6 defaults to RESP3, whose connection
+    handshake issues ``HELLO 3`` — a command only added in Redis 6.0. Our Redis
+    is 5.x, which rejects it with ``unknown command HELLO`` and fails every
+    connection, so the rate limiter silently falls open. RESP2 needs no ``HELLO``
+    and the limiter uses no RESP3 feature, so this is a safe, deliberate pin.
     """
     if not settings.redis_url:
         return None
-    return Redis.from_url(settings.redis_url, decode_responses=True)
+    return Redis.from_url(settings.redis_url, decode_responses=True, protocol=2)

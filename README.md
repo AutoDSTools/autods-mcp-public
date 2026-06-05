@@ -41,7 +41,7 @@ Then either:
 
 ```bash
 uv sync
-uv run uvicorn autods_mcp_server.app:app --reload
+uv run uvicorn --factory autods_mcp_server.app:create_app --reload
 curl http://localhost:8000/health   # {"status":"ok"}
 ```
 

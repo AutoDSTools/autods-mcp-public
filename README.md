@@ -17,7 +17,11 @@ Registration shim. Phase D
 ([RD-54](https://autods.atlassian.net/browse/RD-54)) mounts the MCP
 Streamable HTTP transport at `/mcp`, loads tool manifests, converts them
 to MCP tool descriptors, and dispatches each tool call to the right
-upstream service. Curated production manifests land in Phase E. Phase F
+upstream service. Phase E
+([RD-55](https://autods.atlassian.net/browse/RD-55)) finalizes the
+launch endpoint set — the AutoDSApi manifests plus the hand-authored
+ProductsResearch read endpoints (`manifests/products_research.json`) —
+and adds the opt-in staging end-to-end smoke suite. Phase F
 ([RD-56](https://autods.atlassian.net/browse/RD-56)) hardens the server
 for production: a stateless transport, Redis-backed per-user rate
 limiting, audit logging, upstream error mapping, and graceful shutdown.
@@ -239,3 +243,23 @@ Coverage (line + branch, with missing-line report):
 ```bash
 uv run --with pytest-cov pytest --cov=src/autods_mcp_server --cov-report=term-missing --cov-branch
 ```
+
+### Staging end-to-end smoke (E3)
+
+`tests/e2e/` drives the real server (real Cognito JWT verification + real
+upstream calls) against staging and asserts every registered tool returns
+a 2xx or a documented business error. It is **opt-in** and skipped unless
+`RUN_STAGING_E2E=1` and the staging env vars are set:
+
+```bash
+RUN_STAGING_E2E=1 \
+  E2E_COGNITO_USERNAME=… E2E_COGNITO_PASSWORD=… \
+  E2E_COGNITO_CLIENT_ID=… E2E_COGNITO_USER_POOL_ID=… E2E_COGNITO_DOMAIN=… \
+  E2E_STORE_IDS=… \
+  uv run pytest tests/e2e
+```
+
+The app client in `E2E_COGNITO_CLIENT_ID` must have `USER_PASSWORD_AUTH`
+enabled. The write ops (`upload_products`, `publish_drafts_to_marketplace`)
+are skipped unless `E2E_INCLUDE_WRITES=1`, so a default run never mutates
+staging data. See `tests/e2e/conftest.py` for the full env-var contract.

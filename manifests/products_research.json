@@ -1,0 +1,309 @@
+{
+  "server_name": "autods-products-research",
+  "domain": "products_research",
+  "operations_count": 5,
+  "instructions": "## AutoDS Products Research API — Agent Reference\n\nRead-only product-discovery endpoints backed by the ProductsResearch service (Elasticsearch + MongoDB). Every operation here is side-effect-free.\n\n### Common patterns\n- `product_id` in a URL is the MongoDB ObjectId string of a research/winning product (e.g. obtained from `get_winning_products`).\n- The caller's currency and region are resolved server-side from the user's settings — request bodies/params do NOT need (and cannot override) `region`.\n- Pagination is `offset` (>=0) + `limit`; `get_winning_products` caps `limit` at 100.\n- `get_product_by_id` may return HTTP 307 with a redirect message when the product is a winning product the user lacks the Product Finding Hub add-on to view — this is a documented business response, not a failure.\n\n### Search filters (search_products body)\n`filters` is a list of `{name, value, value_type, op}` objects (all four fields required, all strings). `order_by` is `{name, direction}` and is required by the upstream. Useful filter ops: `=`, `ne`, `in`, `between`, `>`, `<`, `search`. Example free-text search: `{\"name\": \"search_query\", \"value\": \"wireless earbuds\", \"value_type\": \"string\", \"op\": \"search\"}`.\n\n### Winning-products query\n- `sort` is a field name; prefix with `-` for descending (e.g. `-created_at` for newest first, `-orders_count`).\n- `profit` / `item_cost` are range buckets (e.g. `10-20`, `100-` for 100+); `created_date` is a day-window enum (0=today, 1=yesterday, 7, 14, 30).\n- `ads` filters by advertising platform name (e.g. `Facebook`, `TikTok`); comma-separated for multiple.",
+  "operations": [
+    {
+      "operation_id": "search_products",
+      "method": "POST",
+      "path": "/products/",
+      "summary": "Search the product-research catalog by filter.",
+      "description": "",
+      "notes": "Read-only POST. Searches the ProductsResearch catalog (Elasticsearch) and returns {results: [...], currency, region}. Winning products and deleted products are excluded automatically. The body is a filter object: `order_by` ({name, direction}) is REQUIRED; `filters` is an optional list of {name, value, value_type, op}. Free-text search is a filter with name=search_query, op=search, value_type=string. `region` is resolved from the user's settings server-side and is ignored if sent. Use `offset`/`limit` for pagination (default limit 10).",
+      "tags": [
+        "products"
+      ],
+      "parameters": [],
+      "has_json_body": true,
+      "request_body_required": true,
+      "annotations": {
+        "title": "Search Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "description": "Product-research search filter. `order_by` is required by the upstream.",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10,
+            "description": "Page size (default 10)."
+          },
+          "condition": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or"
+            ],
+            "default": "and",
+            "description": "How multiple filters combine."
+          },
+          "order_by": {
+            "type": "object",
+            "description": "Sort order (required).",
+            "properties": {
+              "name": {
+                "type": "string",
+                "default": "created_at",
+                "description": "Field to sort by, e.g. created_at."
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "asc",
+                  "desc"
+                ],
+                "default": "desc"
+              }
+            }
+          },
+          "filters": {
+            "type": "array",
+            "description": "Filter conditions combined per `condition`. Omit for an unfiltered listing.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Filterable field name, e.g. search_query, rating, variations.variation_details.price."
+                },
+                "value": {
+                  "type": "string",
+                  "description": "Operand value (always a string; numeric/bool values are cast per value_type)."
+                },
+                "value_type": {
+                  "type": "string",
+                  "enum": [
+                    "string",
+                    "integer",
+                    "float",
+                    "bool",
+                    "list",
+                    "objectId"
+                  ]
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "=",
+                    "ne",
+                    "<",
+                    "<=",
+                    ">",
+                    ">=",
+                    "in",
+                    "between",
+                    "search"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "value",
+                "value_type",
+                "op"
+              ]
+            }
+          }
+        },
+        "required": [
+          "order_by"
+        ]
+      }
+    },
+    {
+      "operation_id": "get_winning_products",
+      "method": "GET",
+      "path": "/products/winning",
+      "summary": "List winning products with optional discovery filters.",
+      "description": "",
+      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (mongo id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set.",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "offset",
+          "in": "query",
+          "required": true,
+          "schema_type": "int",
+          "description": "Pagination offset (>=0)."
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": true,
+          "schema_type": "int",
+          "description": "Page size, 1-100."
+        },
+        {
+          "name": "sort",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "Sort field; prefix with '-' for descending, e.g. -created_at."
+        },
+        {
+          "name": "category",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Category id (mongo ObjectId)."
+        },
+        {
+          "name": "ads",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Advertising platform name(s), comma-separated, e.g. Facebook,TikTok."
+        },
+        {
+          "name": "orders",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Minimum number of orders."
+        },
+        {
+          "name": "profit",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Profit range bucket: -10, 10-20, 20-30, 30-50, 50-100, 100-."
+        },
+        {
+          "name": "item_cost",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Item-cost range bucket: -5, 5-15, 15-30, 30-100, 100-."
+        },
+        {
+          "name": "created_date",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Creation-date window in days: 0=today, 1=yesterday, 7, 14, 30."
+        },
+        {
+          "name": "search",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Free-text search across title, description, or supplier."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Winning Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "get_product_by_id",
+      "method": "GET",
+      "path": "/products/{product_id}",
+      "summary": "Get a single product by its id.",
+      "description": "",
+      "notes": "Read-only. Returns the full product document for the given MongoDB ObjectId, with prices/region normalised to the user's settings. May return HTTP 307 with a message when the product is a winning product the user can't view without the Product Finding Hub add-on — a documented business response.",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "Product MongoDB ObjectId."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Product By Id",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "get_similar_products",
+      "method": "GET",
+      "path": "/products/{product_id}/similar",
+      "summary": "Get products similar to the given product.",
+      "description": "",
+      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results.",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "Product MongoDB ObjectId to find similar products for."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Similar Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "get_recommended_products",
+      "method": "GET",
+      "path": "/products/recommended/{product_id}",
+      "summary": "Get products recommended for the given product.",
+      "description": "",
+      "notes": "Read-only. Returns {results: [...], total_results} of products recommended for the given product id, with prices normalised to the user's currency/region. Use `offset`/`limit` for pagination (default limit 10).",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "Product MongoDB ObjectId to base recommendations on."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Pagination offset (>=0); default 0."
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Page size; default 10."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Recommended Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ],
+  "base_url_key": "products_research"
+}

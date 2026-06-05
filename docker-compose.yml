@@ -11,6 +11,12 @@ services:
       - "host.docker.internal:host-gateway"
     env_file:
       - .env
+    # REDIS_URL points at the sidecar below. .env may override it; if left
+    # unset entirely the app falls back to the in-process rate limiter.
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      - redis
     volumes:
       - ./src:/app/src
       - ./manifests:/app/manifests
@@ -27,3 +33,9 @@ services:
         "--reload-dir",
         "/app/src",
       ]
+
+  redis:
+    image: redis:7-alpine
+    container_name: autods-mcp-redis
+    ports:
+      - "6379:6379"

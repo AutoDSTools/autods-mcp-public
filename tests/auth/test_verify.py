@@ -1,7 +1,5 @@
 """B2 acceptance — verify_token raises the right typed exception per failure mode."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import pytest

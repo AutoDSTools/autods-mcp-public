@@ -17,7 +17,10 @@ Registration shim. Phase D
 ([RD-54](https://autods.atlassian.net/browse/RD-54)) mounts the MCP
 Streamable HTTP transport at `/mcp`, loads tool manifests, converts them
 to MCP tool descriptors, and dispatches each tool call to the right
-upstream service. Curated production manifests land in Phase E.
+upstream service. Curated production manifests land in Phase E. Phase F
+([RD-56](https://autods.atlassian.net/browse/RD-56)) hardens the server
+for production: a stateless transport, Redis-backed per-user rate
+limiting, audit logging, upstream error mapping, and graceful shutdown.
 
 ## Requirements
 
@@ -72,9 +75,12 @@ All settings come from environment variables. See
 | `PUBLIC_HOSTNAME` | yes in non-local | Pins the PRM URL host (defends against `Host` / `X-Forwarded-Host` injection) |
 | `MCP_MANIFEST_DIR` | no (default bundled `manifests/`) | Directory the MCP runtime loads tool manifests from. Point at an empty dir to serve zero tools |
 | `LOG_LEVEL` | no (default `INFO`) | |
+| `REDIS_URL` | yes in non-local | Shared Redis backing the per-user rate limiter (`redis://` / `rediss://`). Unset in local falls back to an in-process limiter |
+| `RATE_LIMIT_PER_MINUTE` | no (default `60`) | Per-user token-bucket ceiling; `0` disables this bucket |
+| `RATE_LIMIT_PER_HOUR` | no (default `1000`) | Per-user token-bucket ceiling; `0` disables this bucket |
 
 Non-local environments enforce HTTPS via `X-Forwarded-Proto` and refuse
-to boot without `FORCE_HTTPS=true` and `PUBLIC_HOSTNAME` set.
+to boot without `FORCE_HTTPS=true`, `PUBLIC_HOSTNAME`, and `REDIS_URL` set.
 
 ## Authentication (Phase B)
 
@@ -187,6 +193,38 @@ annotations, so a malformed manifest can't reach a client.
    from `base_url_key`, substitutes path params, attaches query/header
    params and the JSON body, forwards `Authorization: Bearer …`, and
    returns a structured `{ operation_id, status, ok, data }` envelope.
+
+## Hardening (Phase F)
+
+Production runs 2–10 replicas × 5 uvicorn workers, which shapes every
+choice here:
+
+- **Stateless transport.** The `StreamableHTTPSessionManager` runs
+  `stateless=True`, so no MCP session is retained between requests. A
+  stateful session is a live coroutine pinned to one worker; stateless
+  lets any worker on any replica serve any request (no `Session not
+  found` 404s) and removes unbounded per-worker session growth. The
+  trade-off — the server→client GET SSE / resumability stream — is
+  unused by this synchronous tool-forwarding server.
+- **Per-user rate limiting.** Two token buckets keyed by `user.sub`
+  (`60/min` and `1000/hour` by default) enforced in `call_tool`. State
+  lives in Redis via an atomic Lua script so the limit holds
+  cluster-wide; on a Redis outage the limiter *fails open*. Local dev
+  with no `REDIS_URL` falls back to an in-process limiter. On exceed,
+  the tool returns a `rate_limited` error with a retry-after hint.
+- **Audit logging.** Every tool call emits one structured `tool_call`
+  line: `request_id`, `user_sub`, `tool_name`, `op_id`, `upstream_url`,
+  `upstream_status`, `latency_ms`, and `error_type` on failure. Never a
+  request/response body.
+- **Upstream error mapping.** Upstream `401 → unauthenticated`,
+  `403 → forbidden`, other `4xx → upstream_client_error` (sanitized
+  detail), `5xx → upstream_error` (generic to the user, full detail
+  logged server-side).
+- **Graceful shutdown.** uvicorn runs with
+  `--timeout-graceful-shutdown 30`; on `SIGTERM` it stops accepting new
+  connections and drains in-flight tool calls within the window
+  (≤ Kubernetes `terminationGracePeriodSeconds`). The app lifespan
+  closes the upstream HTTP and Redis clients on exit.
 
 ## Lint / format / test
 

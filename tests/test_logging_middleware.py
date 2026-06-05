@@ -18,6 +18,7 @@ def test_one_structured_log_line_per_request(monkeypatch) -> None:
     monkeypatch.setenv("COGNITO_USER_POOL_ID", "staging_pool_id")
     monkeypatch.setenv("FORCE_HTTPS", "true")
     monkeypatch.setenv("PUBLIC_HOSTNAME", "example.com")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("COGNITO_DOMAIN", "autods.auth.us-west-2.amazoncognito.com")
     monkeypatch.setenv("COGNITO_PUBLIC_CLIENT_ID", "public-client")
     monkeypatch.setenv("ALLOWED_COGNITO_CLIENT_IDS", '["public-client"]')

@@ -75,6 +75,7 @@ def staging_settings(env) -> Settings:
         MCP_REGISTRATION_REDIRECT_URIS=json.dumps(STAGING_REDIRECT_URIS),
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
+        REDIS_URL="redis://localhost:6379/0",
     )
     return Settings()  # type: ignore[call-arg]
 

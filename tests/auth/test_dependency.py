@@ -145,6 +145,7 @@ def test_prm_url_uses_public_hostname_not_request_host(env, make_jwks, make_toke
         COGNITO_PUBLIC_CLIENT_ID=TEST_CLIENT_ID,
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
+        REDIS_URL="redis://localhost:6379/0",
     )
 
     async def fetch(_url: str) -> dict[str, Any]:

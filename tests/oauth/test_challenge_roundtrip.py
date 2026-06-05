@@ -43,6 +43,7 @@ def test_unauthenticated_request_advertises_resolvable_prm(env) -> None:
         MCP_REGISTRATION_REDIRECT_URIS='["https://claude.ai/api/mcp/auth_callback"]',
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
+        REDIS_URL="redis://localhost:6379/0",
     )
     settings = Settings()  # type: ignore[call-arg]
 

@@ -42,6 +42,7 @@ def staging_settings() -> Settings:
         COGNITO_USER_POOL_ID="staging_pool_id",
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="mcp.autods.com",
+        REDIS_URL="redis://localhost:6379/0",
         **_OAUTH_REQUIRED,
     )
 

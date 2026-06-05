@@ -29,4 +29,7 @@ EXPOSE 8000
 
 ENV PATH="/app/.venv/bin:${PATH}"
 
-CMD ["uvicorn", "--factory", "autods_mcp_server.app:create_app", "--host", "0.0.0.0", "--port", "8000"]
+# --timeout-graceful-shutdown (F5): on SIGTERM uvicorn stops accepting new
+# connections and waits up to this many seconds for in-flight tool calls to
+# finish before forcing exit. Keep ≤ Kubernetes terminationGracePeriodSeconds.
+CMD ["uvicorn", "--factory", "autods_mcp_server.app:create_app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "30"]

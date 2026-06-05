@@ -88,11 +88,34 @@ def test_non_local_with_force_https_and_public_hostname_boots(env: str) -> None:
         COGNITO_USER_POOL_ID=f"{env}_pool_id",
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="example.com",
+        REDIS_URL="redis://localhost:6379/0",
         **_OAUTH,
     )
     assert settings.mcp_env.value == env
     assert settings.force_https is True
     assert settings.is_local is False
+
+
+@pytest.mark.parametrize("env", ["staging", "prod"])
+def test_non_local_without_redis_url_fails(env: str) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            MCP_ENV=env,
+            COGNITO_USER_POOL_ID=f"{env}_pool_id",
+            FORCE_HTTPS="true",
+            PUBLIC_HOSTNAME="example.com",
+            **_OAUTH,
+        )
+    message = str(excinfo.value)
+    assert "REDIS_URL" in message
+    assert env in message
+
+
+def test_rate_limit_defaults() -> None:
+    settings = Settings(MCP_ENV="local", COGNITO_USER_POOL_ID="staging_pool_id", **_OAUTH)
+    assert settings.rate_limit_per_minute == 60
+    assert settings.rate_limit_per_hour == 1000
+    assert settings.redis_url is None
 
 
 def test_allowed_origins_local_includes_localhost_wildcard() -> None:
@@ -106,6 +129,7 @@ def test_allowed_origins_prod_excludes_dev_clients() -> None:
         COGNITO_USER_POOL_ID="prod_pool_id",
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="example.com",
+        REDIS_URL="redis://localhost:6379/0",
         **_OAUTH,
     )
     assert "https://claude.com" in settings.allowed_origins
@@ -119,6 +143,7 @@ def test_allowed_origins_staging_includes_inspector() -> None:
         COGNITO_USER_POOL_ID="staging_pool_id",
         FORCE_HTTPS="true",
         PUBLIC_HOSTNAME="example.com",
+        REDIS_URL="redis://localhost:6379/0",
         **_OAUTH,
     )
     assert any("inspector" in o for o in settings.allowed_origins)

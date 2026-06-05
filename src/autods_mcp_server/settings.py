@@ -119,6 +119,18 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 
+    # Redis connection URL (e.g. ``redis://host:6379/0`` or ``rediss://`` for
+    # TLS; auth is carried in the URL userinfo). Backs the per-user rate
+    # limiter (F1) so the limit is enforced across all replicas, not
+    # per-process. Required in staging/prod (validated below); optional in
+    # local, where an unset value falls back to an in-process limiter.
+    redis_url: str | None = Field(default=None, validation_alias="REDIS_URL")
+
+    # Per-user rate-limit ceilings (token buckets keyed by ``user.sub``). Both
+    # apply simultaneously — a call is allowed only if it fits under both.
+    rate_limit_per_minute: int = Field(default=60, validation_alias="RATE_LIMIT_PER_MINUTE")
+    rate_limit_per_hour: int = Field(default=1000, validation_alias="RATE_LIMIT_PER_HOUR")
+
     # Directory the MCP runtime loads tool manifests from. Defaults to the
     # bundled ``manifests/`` (which carries the vendored products manifest);
     # point it at an empty dir to run the transport with zero tools.
@@ -215,6 +227,21 @@ class Settings(BaseSettings):
         """A4 startup check: refuse to boot in staging/prod without PUBLIC_HOSTNAME specified."""
         if self.mcp_env != McpEnv.local and not self.public_hostname:
             raise ValueError(f"MCP_ENV={self.mcp_env.value} requires PUBLIC_HOSTNAME value")
+        return self
+
+    @model_validator(mode="after")
+    def _require_redis_url_in_non_local(self) -> Self:
+        """F0 startup check: staging/prod run multiple replicas, so the rate
+        limiter's state must live in a shared Redis — an in-process limiter
+        would enforce the ceiling per-replica, not per-user cluster-wide.
+
+        Local may omit ``REDIS_URL`` and fall back to the in-process limiter.
+        """
+        if self.mcp_env != McpEnv.local and not self.redis_url:
+            raise ValueError(
+                f"MCP_ENV={self.mcp_env.value} requires REDIS_URL "
+                "(the rate limiter is shared across replicas via Redis)."
+            )
         return self
 
     @model_validator(mode="after")

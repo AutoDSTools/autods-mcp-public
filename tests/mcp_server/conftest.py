@@ -29,6 +29,7 @@ from mcp.client.streamable_http import streamable_http_client
 from autods_mcp_server.auth.dependency import jwks_dependency
 from autods_mcp_server.auth.jwks import JWKSClient
 from autods_mcp_server.mcp_transport import McpRuntime, build_runtime, mount_mcp
+from autods_mcp_server.ratelimit import RateLimiter
 from autods_mcp_server.settings import Settings
 
 TEST_POOL = "us-west-2_TESTPOOL"
@@ -154,11 +155,12 @@ def make_mcp_app(jwks_client: JWKSClient) -> Callable[..., tuple[FastAPI, McpRun
     def _make(
         settings: Settings,
         upstream_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> tuple[FastAPI, McpRuntime]:
         client = (
             httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler)) if upstream_handler is not None else None
         )
-        runtime = build_runtime(settings, http_client=client)
+        runtime = build_runtime(settings, http_client=client, rate_limiter=rate_limiter)
         app = FastAPI()
         mount_mcp(app, runtime)
         app.dependency_overrides[jwks_dependency] = lambda: jwks_client

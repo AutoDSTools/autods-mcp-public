@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from autods_mcp_server.auth import UserContext
 from autods_mcp_server.manifests import ManifestRegistry
@@ -55,6 +55,12 @@ class UpstreamRequestError(DispatchError):
     tool error instead of an unhandled exception escaping ``call_tool``.
     """
 
+    def __init__(self, message: str, *, upstream_url: str = "") -> None:
+        super().__init__(message)
+        # Carried so the audit log (F2) can record the target even when the
+        # round-trip never produced a response.
+        self.upstream_url = upstream_url
+
 
 class DispatchResult(BaseModel):
     """Structured envelope returned for every tool call.
@@ -68,6 +74,10 @@ class DispatchResult(BaseModel):
     status: int
     ok: bool
     data: Any = None
+    # The resolved upstream URL, for the F2 audit log. Excluded from
+    # serialization so it never reaches the client (it would leak internal
+    # hostnames and isn't part of the stable envelope contract).
+    upstream_url: str = Field(default="", exclude=True)
 
 
 class OperationDispatcher:
@@ -160,17 +170,20 @@ class OperationDispatcher:
             raise UnknownOperationError(f"Unknown operation_id '{operation_id}'.")
 
         request = self._build_request(operation, arguments, user_context)
+        upstream_url = str(request.url)
         try:
             response = await self._client.send(request)
         except httpx.HTTPError as exc:
             raise UpstreamRequestError(
-                f"Upstream request for operation '{operation_id}' failed: {exc}"
+                f"Upstream request for operation '{operation_id}' failed: {exc}",
+                upstream_url=upstream_url,
             ) from exc
         return DispatchResult(
             operation_id=operation_id,
             status=response.status_code,
             ok=response.is_success,
             data=self._parse_response(response),
+            upstream_url=upstream_url,
         )
 
 

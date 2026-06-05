@@ -6,11 +6,10 @@ free-form ``body`` object when the operation carries a JSON body — and hand it
 ``model_json_schema()`` to the SDK as the tool ``inputSchema``. The annotation
 block from the manifest is emitted verbatim on every descriptor.
 
-The manifest does not carry a typed schema for request bodies (the autods-mcp
-generator only records *that* a body exists, not its shape), so ``body`` is
-modelled as an open object, matching the autods-mcp TS runtime's
-``z.record(z.any())``. Per-field schemas can be tightened later without changing
-this seam.
+When an operation carries a ``body_schema``, that JSON Schema is emitted verbatim
+as the ``body`` field's schema. Otherwise ``body`` is modelled as an open object
+(matching the autods-mcp TS runtime's ``z.record(z.any())``) — the generator only
+records *that* a body exists, not its shape, so un-modelled bodies stay open.
 """
 
 from typing import Any
@@ -35,9 +34,21 @@ _SCHEMA_TYPE_TO_PY: dict[SchemaType, Any] = {
 # violate it would be silently warned-and-kept by the SDK, so we surface it.
 _MAX_TOOL_NAME_LENGTH = 128
 
+# Body fields whose AutoDS values are integer enums (1=draft, 2=active, …). A
+# ``body_schema`` that types one of these as a string reintroduces the exact
+# string-vs-integer bug this carrier exists to prevent, so the boot lint rejects
+# it. Matched by property name anywhere in the body schema.
+_INTEGER_ENUM_BODY_FIELDS = frozenset(
+    {"product_status", "status", "region", "site_id", "buy_site_id", "inventory_status"}
+)
+
 
 class ToolAnnotationError(ValueError):
     """A registered operation is missing a required MCP annotation (D5)."""
+
+
+class BodySchemaError(ValueError):
+    """An operation's ``body_schema`` types a known integer-enum field as a string."""
 
 
 def build_input_model(operation: ManifestOperation) -> type[BaseModel]:
@@ -79,14 +90,28 @@ def _build_description(operation: ManifestOperation) -> str:
     return description or operation.operation_id
 
 
+def _build_input_schema(operation: ManifestOperation) -> dict[str, Any]:
+    """The tool ``inputSchema``: the param model's JSON schema, with the
+    ``body`` property replaced by ``operation.body_schema`` when present.
+
+    The pydantic model already places ``body`` in ``required`` iff the body is
+    required, so swapping only the property's subschema preserves required-ness:
+    a required body must now match the schema; an optional one must match *when
+    present*.
+    """
+    schema = build_input_model(operation).model_json_schema()
+    if operation.has_json_body and operation.body_schema is not None:
+        schema.setdefault("properties", {})["body"] = dict(operation.body_schema)
+    return schema
+
+
 def to_tool(operation: ManifestOperation) -> types.Tool:
     """Convert a manifest operation into an MCP ``Tool`` descriptor."""
-    model = build_input_model(operation)
     annotations = operation.annotations
     return types.Tool(
         name=operation.operation_id,
         description=_build_description(operation),
-        inputSchema=model.model_json_schema(),
+        inputSchema=_build_input_schema(operation),
         annotations=types.ToolAnnotations(
             title=annotations.title,
             readOnlyHint=annotations.read_only_hint,
@@ -117,7 +142,35 @@ def assert_valid_annotations(operations: list[ManifestOperation]) -> None:
             )
 
 
+def _assert_integer_enum_fields(operation: ManifestOperation) -> None:
+    """Reject a ``body_schema`` that types a known integer-enum field as a string.
+
+    Walks the schema recursively, so an enum field nested inside ``properties``
+    of an object or the ``items`` of an array is checked too. Raised at boot so a
+    string-typed ``product_status`` can never reach a client.
+    """
+    if operation.body_schema is None:
+        return
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        for name, subschema in (node.get("properties") or {}).items():
+            if name in _INTEGER_ENUM_BODY_FIELDS and isinstance(subschema, dict) and subschema.get("type") == "string":
+                raise BodySchemaError(
+                    f"Operation '{operation.operation_id}' body_schema types enum field "
+                    f"'{name}' as 'string'; AutoDS enum fields take integer values."
+                )
+        for child in (node.get("properties") or {}).values():
+            walk(child)
+        walk(node.get("items"))
+
+    walk(operation.body_schema)
+
+
 def build_tools(operations: list[ManifestOperation]) -> list[types.Tool]:
     """Lint, then convert every operation to an MCP tool descriptor."""
     assert_valid_annotations(operations)
+    for operation in operations:
+        _assert_integer_enum_fields(operation)
     return [to_tool(operation) for operation in operations]

@@ -21,7 +21,7 @@ dropped (``extra="ignore"``); leftover generator bookkeeping fields
 simply ignored.
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -70,6 +70,13 @@ class ManifestOperation(BaseModel):
     parameters: list[ManifestParameter] = Field(default_factory=list)
     has_json_body: bool = False
     request_body_required: bool = False
+    # Optional JSON Schema describing the request body. When set, the converter
+    # emits it verbatim as the ``body`` field's schema in the tool ``inputSchema``
+    # (instead of an open object), so clients/models see field names, types,
+    # integer ``enum`` constraints and required fields — and the SDK validates
+    # the body against it before the call reaches us. Omitted for operations
+    # whose body shape isn't modelled yet; those keep the open-object behaviour.
+    body_schema: dict[str, Any] | None = None
     notes: str | None = None
     # Whether the operation is side-effect-free is advertised to clients via
     # ``annotations.read_only_hint`` (the MCP-canonical signal), so the

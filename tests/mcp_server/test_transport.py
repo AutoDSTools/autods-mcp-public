@@ -75,10 +75,11 @@ async def test_tool_call_forwards_bearer_to_upstream(
     settings = mcp_settings(manifest_dir=bundled_manifest_dir)
     app, runtime = make_mcp_app(settings, upstream_handler=upstream)
 
+    body = {"region": 1, "status": 1, "buy_site_id": 1, "new_products": [{"asin": "B0X"}]}
     async with mcp_client_session(app, runtime, token=access_token) as session:
         result = await session.call_tool(
             "upload_products",
-            {"store_ids": "store-1", "body": {"title": "Widget"}},
+            {"store_ids": "store-1", "body": body},
         )
 
     assert result.isError is False
@@ -90,7 +91,8 @@ async def test_tool_call_forwards_bearer_to_upstream(
     }
     assert captured["url"] == "https://autods-api.test/products/store-1/"
     assert captured["auth"] == f"Bearer {access_token}"
-    assert captured["body"] == '{"title":"Widget"}'
+    # The validated body is forwarded verbatim to the upstream.
+    assert captured["body"] == '{"region":1,"status":1,"buy_site_id":1,"new_products":[{"asin":"B0X"}]}'
 
 
 async def test_tool_call_without_auth_context_is_error(mcp_settings, make_mcp_app, empty_manifest_dir) -> None:

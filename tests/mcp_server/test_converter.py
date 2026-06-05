@@ -7,9 +7,11 @@ block, plus the type mapping for the full ``schema_type`` vocabulary.
 
 from pathlib import Path
 
+import pytest
+
 from autods_mcp_server.manifests import build_registry
 from autods_mcp_server.manifests.schema import ManifestOperation
-from autods_mcp_server.tools import build_input_model, to_tool
+from autods_mcp_server.tools import BodySchemaError, build_input_model, build_tools, to_tool
 
 
 def test_readonly_with_path_params(bundled_manifest_dir: Path) -> None:
@@ -33,9 +35,90 @@ def test_post_with_required_body(bundled_manifest_dir: Path) -> None:
     # A required path param plus the required JSON body.
     assert tool.inputSchema["properties"].keys() == {"store_ids", "body"}
     assert set(tool.inputSchema["required"]) == {"store_ids", "body"}
-    # The body is modelled as an open object (no inline body schema upstream).
-    assert tool.inputSchema["properties"]["body"]["type"] == "object"
+    # The body now carries its typed schema: required integer enums, modelled
+    # as integers (never strings) so a string value is invalid by construction.
+    body = tool.inputSchema["properties"]["body"]
+    assert body["type"] == "object"
+    assert set(body["required"]) == {"region", "status", "buy_site_id"}
+    assert body["properties"]["status"]["type"] == "integer"
+    assert body["properties"]["status"]["enum"] == [1, 2, 3, 4, 5, 6]
     assert tool.annotations.readOnlyHint is False
+
+
+def test_body_schema_is_emitted_verbatim() -> None:
+    """When an operation declares a body_schema, the tool's body property is
+    exactly that schema, and ``body`` stays required per request_body_required."""
+    body_schema = {
+        "type": "object",
+        "properties": {"product_status": {"type": "integer", "enum": [1, 2]}},
+        "required": ["product_status"],
+    }
+    operation = ManifestOperation.model_validate(
+        {
+            "operation_id": "schema_op",
+            "method": "POST",
+            "path": "/x",
+            "has_json_body": True,
+            "request_body_required": True,
+            "body_schema": body_schema,
+            "annotations": {"title": "Schema Op", "readOnlyHint": True},
+        }
+    )
+    tool = to_tool(operation)
+
+    assert tool.inputSchema["properties"]["body"] == body_schema
+    assert "body" in tool.inputSchema["required"]
+
+
+def test_body_stays_open_without_body_schema() -> None:
+    """Regression: an operation with a JSON body but no body_schema keeps the
+    open-object body (unchanged pre-RD-58 behaviour)."""
+    operation = ManifestOperation.model_validate(
+        {
+            "operation_id": "open_body_op",
+            "method": "POST",
+            "path": "/x",
+            "has_json_body": True,
+            "request_body_required": False,
+            "annotations": {"title": "Open", "readOnlyHint": True},
+        }
+    )
+    tool = to_tool(operation)
+    body = tool.inputSchema["properties"]["body"]
+
+    # Optional open body: not required, with no constraining keys.
+    assert "body" not in tool.inputSchema.get("required", [])
+    assert "enum" not in body and "required" not in body
+
+
+def test_list_products_status_is_integer_enum(bundled_manifest_dir: Path) -> None:
+    registry = build_registry(bundled_manifest_dir)
+    tool = to_tool(registry.get("list_products"))
+    status = tool.inputSchema["properties"]["body"]["properties"]["product_status"]
+
+    assert status["type"] == "integer"
+    assert status["enum"] == [1, 2, 3, 4, 5, 6]
+
+
+def test_build_tools_rejects_string_typed_enum_field() -> None:
+    """The boot lint refuses a body_schema that types a known enum field as a
+    string — the exact string-vs-integer drift the carrier exists to prevent."""
+    operation = ManifestOperation.model_validate(
+        {
+            "operation_id": "bad_enum_op",
+            "method": "POST",
+            "path": "/x",
+            "has_json_body": True,
+            "request_body_required": True,
+            "body_schema": {
+                "type": "object",
+                "properties": {"product_status": {"type": "string"}},
+            },
+            "annotations": {"title": "Bad", "readOnlyHint": False, "destructiveHint": False},
+        }
+    )
+    with pytest.raises(BodySchemaError, match="product_status"):
+        build_tools([operation])
 
 
 def test_delete_is_destructive() -> None:

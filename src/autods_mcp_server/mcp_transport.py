@@ -38,6 +38,8 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import Depends, FastAPI, Request, Response
+from jsonschema.protocols import Validator
+from jsonschema.validators import validator_for
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -119,16 +121,54 @@ def _emit_audit(
     _audit_logger.info("tool_call", **fields)
 
 
+def _build_validators(tools: list[types.Tool]) -> dict[str, Validator]:
+    """Compile one reusable jsonschema validator per tool ``inputSchema``.
+
+    Built once at boot so the per-request path only matches the instance — the
+    convenience ``jsonschema.validate`` would otherwise recompile the validator
+    and re-check the schema against its meta-schema on every call. ``check_schema``
+    runs here too, so a structurally invalid authored schema fails at boot
+    (alongside the D5 lint) rather than as a per-request 500.
+    """
+    validators: dict[str, Validator] = {}
+    for tool in tools:
+        cls = validator_for(tool.inputSchema)
+        cls.check_schema(tool.inputSchema)
+        validators[tool.name] = cls(tool.inputSchema)
+    return validators
+
+
+def _validate_arguments(arguments: dict[str, Any], validator: Validator) -> str | None:
+    """Validate ``arguments`` against a tool's compiled ``inputSchema`` validator.
+
+    Returns a short, safe error message naming the offending field, or ``None``
+    when the arguments are valid. The jsonschema message echoes only the bad
+    value and the violated constraint (e.g. ``'active' is not of type
+    'integer'``) — no internal detail — so it's safe to surface to the client.
+    """
+    error = next(iter(validator.iter_errors(arguments)), None)
+    if error is None:
+        return None
+    field = "/".join(str(part) for part in error.absolute_path) or "(root)"
+    return f"Invalid value for '{field}': {error.message}"
+
+
 def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, rate_limiter: RateLimiter) -> Server:
     """Create the low-level MCP server with tool list/call handlers."""
     server: Server = Server("autods-mcp-server")
     tools = build_tools(registry.list_operations())  # D5 lint runs here.
+    validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
         return tools
 
-    @server.call_tool()
+    # ``validate_input=False``: the SDK would validate ``arguments`` against the
+    # tool's ``inputSchema`` and return a generic "Input validation error". We
+    # validate ourselves instead so a bad body becomes our typed
+    # ``invalid_arguments`` error (consistent with the rest of this module) and
+    # is recorded in the audit log — still rejected before any upstream call.
+    @server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any] | types.CallToolResult:
         request = server.request_context.request
         user_context: UserContext | None = None
@@ -152,6 +192,24 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
                 error_type=ERROR_RATE_LIMITED,
             )
             return rate_limited_result(decision.retry_after)
+
+        # Validate arguments (incl. the typed request body) against the tool's
+        # inputSchema before any upstream work — a malformed body is rejected
+        # here, never forwarded as an opaque upstream 4xx.
+        validator = validator_by_name.get(name)
+        if validator is not None:
+            validation_error = _validate_arguments(arguments, validator)
+            if validation_error is not None:
+                _emit_audit(
+                    tool_name=name,
+                    op_id=name,
+                    user_sub=user_context.sub,
+                    upstream_url=None,
+                    upstream_status=None,
+                    latency_ms=0.0,
+                    error_type=ERROR_INVALID_ARGUMENTS,
+                )
+                return error_result(ERROR_INVALID_ARGUMENTS, validation_error)
 
         start = time.perf_counter()
         try:

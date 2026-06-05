@@ -31,6 +31,12 @@ def _ok_upstream(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"task_id": "abc"})
 
 
+# A request body that satisfies upload_products' body_schema (required integer
+# enums + one product source). The mocked upstream ignores the content; it just
+# has to pass input validation so these tests reach the dispatcher.
+_VALID_UPLOAD_BODY = {"region": 1, "status": 1, "buy_site_id": 1, "new_products": [{"asin": "B0TEST123"}]}
+
+
 # --- F0: stateless transport ------------------------------------------------
 
 
@@ -43,7 +49,7 @@ async def test_transport_is_stateless_and_retains_no_sessions(
     assert runtime.session_manager.stateless is True
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        await session.call_tool("upload_products", {"store_ids": "s1", "body": {"t": "x"}})
+        await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
     # Nothing is kept between requests — the dict that pins stateful sessions
     # to a worker stays empty, so any replica/worker can serve any request.
@@ -62,8 +68,8 @@ async def test_rate_limit_blocks_after_capacity(
     app, runtime = make_mcp_app(settings, upstream_handler=_ok_upstream, rate_limiter=limiter)
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        first = await session.call_tool("upload_products", {"store_ids": "s1", "body": {"t": "x"}})
-        second = await session.call_tool("upload_products", {"store_ids": "s1", "body": {"t": "x"}})
+        first = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
+        second = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
     assert first.isError is False
     assert second.isError is True
@@ -85,7 +91,9 @@ async def test_successful_call_emits_one_audit_line(
         # cached bound logger from an earlier test).
         monkeypatch.setattr(mcp_transport, "_audit_logger", structlog.get_logger("audit-test"))
         async with mcp_client_session(app, runtime, token=access_token) as session:
-            await session.call_tool("upload_products", {"store_ids": "s1", "body": {"secret": "x"}})
+            await session.call_tool(
+                "upload_products", {"store_ids": "s1", "body": {**_VALID_UPLOAD_BODY, "secret": "x"}}
+            )
 
     audit = [line for line in logs if line.get("event") == "tool_call"]
     assert len(audit) == 1
@@ -160,7 +168,7 @@ async def test_upstream_5xx_audit_records_detail_separately(
     with capture_logs() as logs:
         monkeypatch.setattr(mcp_transport, "_audit_logger", structlog.get_logger("audit-test2"))
         async with mcp_client_session(app, runtime, token=access_token) as session:
-            result = await session.call_tool("upload_products", {"store_ids": "s1", "body": {"t": "x"}})
+            result = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
     # User sees a generic error; internal hostname is not leaked.
     assert result.isError is True
@@ -196,7 +204,7 @@ async def test_upstream_client_errors_map_to_typed_results(
     app, runtime = make_mcp_app(settings, upstream_handler=upstream)
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        result = await session.call_tool("upload_products", {"store_ids": "s1", "body": {"t": "x"}})
+        result = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
     assert result.isError is True
     assert result.content[0].text.startswith(prefix)
@@ -212,6 +220,54 @@ async def test_upstream_4xx_forwards_sanitized_detail(
     app, runtime = make_mcp_app(settings, upstream_handler=upstream)
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        result = await session.call_tool("upload_products", {"store_ids": "s1", "body": {"t": "x"}})
+        result = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
     assert "store_id is required" in result.content[0].text
+
+
+# --- Body-schema validation (RD-58) -----------------------------------------
+
+
+async def test_invalid_body_is_rejected_locally_without_upstream_call(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """A body that violates the typed body_schema (here ``product_status`` as a
+    string instead of the integer enum) is rejected with a typed
+    ``invalid_arguments`` error and never reaches the upstream."""
+    upstream_calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool("list_products", {"store_ids": "s1", "body": {"product_status": "active"}})
+
+    assert result.isError is True
+    assert result.content[0].text.startswith("invalid_arguments: ")
+    assert "product_status" in result.content[0].text
+    # The malformed call short-circuits before any upstream request.
+    assert upstream_calls == []
+
+
+async def test_valid_integer_enum_body_passes_validation(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """The integer form of the same field validates and reaches the upstream."""
+    upstream_calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(str(request.url))
+        return httpx.Response(200, json={"results": []})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool("list_products", {"store_ids": "s1", "body": {"product_status": 2}})
+
+    assert result.isError is False
+    assert len(upstream_calls) == 1

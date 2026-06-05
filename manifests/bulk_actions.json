@@ -12,7 +12,7 @@
       "path": "/bulk_actions/{store_ids}/list/{bulk_action_id}",
       "summary": "Get the items (and their statuses) of a single bulk action.",
       "description": "",
-      "notes": "Read-only POST. Returns the per-item results of a bulk action so you can track upload/import progress. Path params: store_ids (comma-separated AutoDS store IDs), bulk_action_id (the integer id from the bulk_action object returned when the job was started, e.g. by upload_products). Body follows BulkActionItemLisSchema, all fields optional: search_term (string), status (bulk_status INTEGER value, NOT a name — e.g. 1=created, 2=in_progress, 3=finished, 4=canceled, 99=error), limit (int, default 10), offset (int, default 0). Response: {results: [...], total_results: int}.",
+      "notes": "Read-only POST. Returns the per-item results of a bulk action so you can track upload/import progress. Path params: store_ids (comma-separated AutoDS store IDs), bulk_action_id (the integer id from the bulk_action object returned when the job was started, e.g. by upload_products). Body holds optional filter/pagination. Response: {results: [...], total_results: int}.",
       "tags": [
         "bulk_actions"
       ],
@@ -40,6 +40,35 @@
         "title": "Get Bulk Action Items",
         "readOnlyHint": true,
         "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "search_term": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3,
+              4,
+              99
+            ],
+            "description": "bulk_status: 1=created, 2=in_progress, 3=finished, 4=canceled, 99=error."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          }
+        }
       }
     }
   ],

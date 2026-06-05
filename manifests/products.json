@@ -12,7 +12,7 @@
       "path": "/products/{store_ids}/",
       "summary": "Bulk-upload products to one or more stores from supplier products, a file, or finder categories.",
       "description": "",
-      "notes": "Body follows ProductUploadSchema. Uploads many products in a single async operation. store_ids is a path parameter (comma-separated string of AutoDS store IDs). Provide at least ONE source: new_products (list of {asin: supplier product id/URL (required), title, price, channel_specific}). The asin is the product ID unique to a given supplier and is usually embedded in the product URL — e.g. for Amazon it looks like B0D8HR6M4B (found in .../dp/B0D8HR6M4B/...), so extract that ID from the URL rather than passing a search/category/deals landing page. You may pass either the bare ID or the full product URL. Alternatively, provide file_url (string: a file/CSV of products to import), or finder_categories (list of {category_id: int (required), amount_of_products: int >=1 (required)}). Required enums, passed as INTEGER values (NOT names — the upstream EnumField deserializes by value): region (e.g. 1=us, 2=uk, 3=de - see the region table in instructions), status (1=draft, 2=active, 3=ended, 4=untracked, 5=scheduled, 6=pre_draft), buy_site_id (the supplier site, e.g. 1=amazon, 2=aliexpress, 4=walmart - see the buy sites table). Optional: action_source (integer enum value); supplier_settings (partial store-settings object); upload_settings ({tag: list[str], collection: list[str], min_price_range: float, max_price_range: float, disable_auto_order: bool, disable_stock_monitoring: bool, disable_price_monitoring: bool, scheduled_datetime: ISO 8601 datetime}). If status=5 (scheduled), upload_settings.scheduled_datetime is required and must be a future, timezone-aware time. Async: fires a Celery bulk task and returns immediately with {\"status\": \"Product uploading started\", \"bulk_action\": {...}}. Poll progress by passing bulk_action.id to get_bulk_action_items (autods-bulk-actions manifest).",
+      "notes": "Bulk-upload products to one or more stores. Async: fires a Celery bulk task and returns immediately with {\"status\": \"Product uploading started\", \"bulk_action\": {...}}; poll progress by passing bulk_action.id to get_bulk_action_items (autods-bulk-actions manifest). Provide at least ONE product source in the body: new_products, file_url, or finder_categories. The asin in new_products is the supplier's product id, usually embedded in the product URL (e.g. Amazon B0D8HR6M4B from .../dp/B0D8HR6M4B/...) — pass the bare id or the full product URL, not a search/category landing page. If status=5 (scheduled), upload_settings.scheduled_datetime is required and must be a future, timezone-aware time. See the enum tables in the server instructions for region/status/buy_site_id values.",
       "tags": [
         "products"
       ],
@@ -32,6 +32,146 @@
         "title": "Upload Products",
         "readOnlyHint": false,
         "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "description": "Provide at least one product source: new_products, file_url, or finder_categories.",
+        "properties": {
+          "region": {
+            "type": "integer",
+            "description": "Region enum value, e.g. 1=us, 2=uk, 3=de (see region table in server instructions)."
+          },
+          "status": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "description": "Initial product status: 1=draft, 2=active, 3=ended, 4=untracked, 5=scheduled, 6=pre_draft."
+          },
+          "buy_site_id": {
+            "type": "integer",
+            "description": "Supplier site enum value, e.g. 1=amazon, 2=aliexpress, 4=walmart (see buy sites table in server instructions)."
+          },
+          "new_products": {
+            "type": "array",
+            "description": "Supplier products to upload.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "asin": {
+                  "type": "string",
+                  "description": "Supplier product id or full product URL (required)."
+                },
+                "title": {
+                  "type": "string"
+                },
+                "price": {
+                  "type": "number"
+                },
+                "channel_specific": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "asin"
+              ]
+            }
+          },
+          "file_url": {
+            "type": "string",
+            "description": "URL of a file/CSV of products to import."
+          },
+          "finder_categories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category_id": {
+                  "type": "integer"
+                },
+                "amount_of_products": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "category_id",
+                "amount_of_products"
+              ]
+            }
+          },
+          "action_source": {
+            "type": "integer",
+            "description": "Optional action-source enum value."
+          },
+          "supplier_settings": {
+            "type": "object",
+            "description": "Partial store-settings object."
+          },
+          "upload_settings": {
+            "type": "object",
+            "properties": {
+              "tag": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "collection": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "min_price_range": {
+                "type": "number"
+              },
+              "max_price_range": {
+                "type": "number"
+              },
+              "disable_auto_order": {
+                "type": "boolean"
+              },
+              "disable_stock_monitoring": {
+                "type": "boolean"
+              },
+              "disable_price_monitoring": {
+                "type": "boolean"
+              },
+              "scheduled_datetime": {
+                "type": "string",
+                "description": "ISO 8601 datetime; required when status=5 (scheduled), must be future & timezone-aware."
+              }
+            }
+          }
+        },
+        "required": [
+          "region",
+          "status",
+          "buy_site_id"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "new_products"
+            ]
+          },
+          {
+            "required": [
+              "file_url"
+            ]
+          },
+          {
+            "required": [
+              "finder_categories"
+            ]
+          }
+        ]
       }
     },
     {
@@ -55,11 +195,108 @@
       "has_json_body": true,
       "request_body_required": true,
       "is_top_typed_tool": false,
-      "notes": "Imports draft products to the marketplace in bulk. Async: fires Celery task upload_product_to_marketplace_bulk and returns immediately with {\"status\": ..., \"bulk_action\": {...}}; poll bulk_action.id via get_bulk_action_items (autods-bulk-actions manifest). Pushes drafts to the selling channel (eBay, Shopify, etc.). Body follows ProductBulkUploadSchema: product_status (required INTEGER enum value, e.g. 1=draft - selects which products to act on; passed by value, NOT name); condition (\"and\"/\"or\", default \"and\"); filters (array selecting which products - OMIT to import ALL products of that status, which is rarely what you want). Each filter: {name, op, value_type, and either value (single string) OR value_list (list of strings)}. To target specific products, filter by id: {\"name\": \"id\", \"op\": \"in\", \"value_type\": \"list\", \"value_list\": [\"<mongo product id>\", ...]} for several, or {\"name\": \"id\", \"op\": \"=\", \"value\": \"<mongo product id>\", \"value_type\": \"object_id\"} for one (the upstream maps id->_id and casts each value to ObjectId). Optional: scheduled_datetime_min, scheduled_datetime_max (ISO 8601).",
+      "notes": "Imports draft products to the marketplace (the selling channel — eBay, Shopify, etc.) in bulk. Async: fires Celery task upload_product_to_marketplace_bulk and returns immediately with {\"status\": ..., \"bulk_action\": {...}}; poll bulk_action.id via get_bulk_action_items (autods-bulk-actions manifest). product_status selects which products to act on. OMIT `filters` to import ALL products of that status (rarely intended); to target specific products filter by id ({\"name\": \"id\", \"op\": \"in\", \"value_type\": \"list\", \"value_list\": [...]}, or op \"=\" with value_type \"object_id\" for one). See the enum tables in the server instructions.",
       "annotations": {
         "title": "Publish Drafts To Marketplace",
         "readOnlyHint": false,
         "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "product_status": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "description": "Selects which products to act on: 1=draft, 2=active, 3=ended, 4=untracked, 5=scheduled, 6=pre_draft."
+          },
+          "condition": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or"
+            ],
+            "default": "and"
+          },
+          "filters": {
+            "type": "array",
+            "description": "Selects which products to import. Omit to import ALL products of that status.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Filterable field name. `id` maps to `_id` upstream and casts each value to ObjectId."
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "=",
+                    "ne",
+                    "<",
+                    "<=",
+                    ">",
+                    ">=",
+                    "in",
+                    "not_in",
+                    "like",
+                    "not_like",
+                    "has",
+                    "any",
+                    "starts_with",
+                    "ends_with",
+                    "exists",
+                    "exact_date",
+                    "between"
+                  ]
+                },
+                "value_type": {
+                  "type": "string",
+                  "enum": [
+                    "integer",
+                    "float",
+                    "bool",
+                    "string",
+                    "list",
+                    "list_int",
+                    "datetime",
+                    "object_id"
+                  ]
+                },
+                "value": {
+                  "description": "Single-value operand. Enum-valued fields take their INTEGER value, not the name."
+                },
+                "value_list": {
+                  "type": "array",
+                  "items": {},
+                  "description": "Multi-value operand; REQUIRED for in/not_in and for value_type list/list_int."
+                }
+              },
+              "required": [
+                "name",
+                "op",
+                "value_type"
+              ]
+            }
+          },
+          "scheduled_datetime_min": {
+            "type": "string",
+            "description": "ISO 8601."
+          },
+          "scheduled_datetime_max": {
+            "type": "string",
+            "description": "ISO 8601."
+          }
+        },
+        "required": [
+          "product_status"
+        ]
       }
     },
     {
@@ -83,12 +320,137 @@
       "has_json_body": true,
       "request_body_required": true,
       "is_top_typed_tool": false,
-      "notes": "Read-only POST. Queries products by filter from MongoDB. Body: product_status (required enum), filters (array of {name, value, op, value_type}), condition (\"and\"/\"or\"), limit (1-1000, default 100), offset (min 0), order_by ({name, direction}), projection (list of field names). Filterable fields include: title, tags, status, variations.price, variations.active_buy_item.price/site_id/region, created_date, upload_date, etc.",
+      "notes": "Read-only POST. Queries products by filter from MongoDB and returns {results: [...]}. Filterable fields include title, tags, status, variations.price, variations.active_buy_item.price/site_id/region, created_date, upload_date, etc. Enum-valued filter values (status, region, variations.inventory_status, variations.active_buy_item.site_id) take their INTEGER value, not the name. The filter name `id` maps to `_id` upstream and casts each value to ObjectId; multi-value ops (in/not_in) and value_type list/list_int put their values in `value_list`. See the enum tables in the server instructions for the full mappings. Product objects are LARGE (variations, images, description, item_specifics): for listing/summary use cases ALWAYS pass `projection` (e.g. [\"title\",\"variations.price\",\"amount_of_variations\",\"total_sold_count\",\"item_id_on_site\",\"upload_date\"]) and/or a small `limit` — a full-object page of 100 can exceed ~80 KB and overflow response token limits.",
       "safe": true,
       "annotations": {
         "title": "List Products",
         "readOnlyHint": true,
         "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "product_status": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "description": "Required INTEGER enum value (NOT the name — sending a string like \"active\" returns HTTP 422): 1=draft, 2=active, 3=ended, 4=untracked, 5=scheduled, 6=pre_draft."
+          },
+          "filters": {
+            "type": "array",
+            "description": "Filter conditions, combined per `condition`.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Filterable field name. `id` maps to `_id` upstream and casts each value to ObjectId."
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "=",
+                    "ne",
+                    "<",
+                    "<=",
+                    ">",
+                    ">=",
+                    "in",
+                    "not_in",
+                    "like",
+                    "not_like",
+                    "has",
+                    "any",
+                    "starts_with",
+                    "ends_with",
+                    "exists",
+                    "exact_date",
+                    "between"
+                  ]
+                },
+                "value_type": {
+                  "type": "string",
+                  "enum": [
+                    "integer",
+                    "float",
+                    "bool",
+                    "string",
+                    "list",
+                    "list_int",
+                    "datetime",
+                    "object_id"
+                  ]
+                },
+                "value": {
+                  "description": "Single-value operand. Enum-valued fields take their INTEGER value, not the name."
+                },
+                "value_list": {
+                  "type": "array",
+                  "items": {},
+                  "description": "Multi-value operand; REQUIRED for in/not_in and for value_type list/list_int."
+                }
+              },
+              "required": [
+                "name",
+                "op",
+                "value_type"
+              ]
+            }
+          },
+          "condition": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or"
+            ],
+            "default": "and"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "order_by": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "asc",
+                  "desc"
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "projection": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Field names to return."
+          }
+        },
+        "required": [
+          "product_status"
+        ]
       }
     }
   ],

@@ -98,7 +98,7 @@ async def test_successful_call_emits_one_audit_line(
     audit = [line for line in logs if line.get("event") == "tool_call"]
     assert len(audit) == 1
     line = audit[0]
-    assert line["user_sub"] == "user-1"
+    assert line["cognito_username"] == "user-1"
     assert line["tool_name"] == "upload_products"
     assert line["op_id"] == "upload_products"
     assert line["upstream_url"] == "https://autods-api.test/products/s1/"
@@ -131,7 +131,7 @@ def test_audit_line_carries_request_id_and_timestamp(env, capsys) -> None:
         # Unique name → fresh proxy → binds to the JSON config just set.
         structlog.get_logger("autods_mcp_server.audit.contract").info(
             "tool_call",
-            user_sub="u",
+            cognito_username="u",
             tool_name="t",
             op_id="t",
             upstream_url="https://x",
@@ -145,7 +145,7 @@ def test_audit_line_carries_request_id_and_timestamp(env, capsys) -> None:
     for field in (
         "request_id",
         "timestamp",
-        "user_sub",
+        "cognito_username",
         "tool_name",
         "op_id",
         "upstream_url",

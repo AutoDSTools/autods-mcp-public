@@ -95,7 +95,7 @@ def _emit_audit(
     *,
     tool_name: str,
     op_id: str,
-    user_sub: str,
+    cognito_username: str,
     upstream_url: str | None,
     upstream_status: int | None,
     latency_ms: float,
@@ -109,7 +109,7 @@ def _emit_audit(
     logged (PII risk).
     """
     fields: dict[str, Any] = {
-        "user_sub": user_sub,
+        "cognito_username": cognito_username,
         "tool_name": tool_name,
         "op_id": op_id,
         "upstream_url": upstream_url,
@@ -185,7 +185,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             _emit_audit(
                 tool_name=name,
                 op_id=name,
-                user_sub=user_context.sub,
+                cognito_username=user_context.sub,
                 upstream_url=None,
                 upstream_status=None,
                 latency_ms=0.0,
@@ -203,7 +203,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
                 _emit_audit(
                     tool_name=name,
                     op_id=name,
-                    user_sub=user_context.sub,
+                    cognito_username=user_context.sub,
                     upstream_url=None,
                     upstream_status=None,
                     latency_ms=0.0,
@@ -219,7 +219,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             _emit_audit(
                 tool_name=name,
                 op_id=name,
-                user_sub=user_context.sub,
+                cognito_username=user_context.sub,
                 upstream_url=None,
                 upstream_status=None,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
@@ -231,7 +231,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             _emit_audit(
                 tool_name=name,
                 op_id=name,
-                user_sub=user_context.sub,
+                cognito_username=user_context.sub,
                 upstream_url=exc.upstream_url or None,
                 upstream_status=None,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
@@ -247,7 +247,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             _emit_audit(
                 tool_name=name,
                 op_id=name,
-                user_sub=user_context.sub,
+                cognito_username=user_context.sub,
                 upstream_url=None,
                 upstream_status=None,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
@@ -261,7 +261,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             _emit_audit(
                 tool_name=name,
                 op_id=name,
-                user_sub=user_context.sub,
+                cognito_username=user_context.sub,
                 upstream_url=result.upstream_url or None,
                 upstream_status=result.status,
                 latency_ms=latency_ms,
@@ -273,7 +273,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
         _emit_audit(
             tool_name=name,
             op_id=name,
-            user_sub=user_context.sub,
+            cognito_username=user_context.sub,
             upstream_url=result.upstream_url or None,
             upstream_status=result.status,
             latency_ms=latency_ms,

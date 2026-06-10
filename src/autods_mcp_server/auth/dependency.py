@@ -182,6 +182,11 @@ async def get_current_user(
             description="Token validation failed.",
         ) from exc
 
+    # Surface the authenticated subject to RequestContextMiddleware, which runs
+    # upstream of auth and reads it back off request.state (the shared ASGI
+    # scope) after the response is produced, to tag the access log line.
+    request.state.cognito_username = claims.sub
+
     return UserContext(
         sub=claims.sub,
         email=claims.email,

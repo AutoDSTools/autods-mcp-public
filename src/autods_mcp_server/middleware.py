@@ -62,9 +62,18 @@ def _host_from_header(host_header: str) -> str:
 class RequestContextMiddleware(BaseHTTPMiddleware):
     """Bind request_id / path / method to structlog context and log access."""
 
-    def __init__(self, app: ASGIApp, logger_name: str = "autods_mcp_server.access") -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        logger_name: str = "autods_mcp_server.access",
+        quiet_paths: Iterable[str] = (),
+    ) -> None:
         super().__init__(app)
         self._logger = structlog.get_logger(logger_name)
+        # Paths whose successful access log is suppressed (e.g. /health probes,
+        # which would otherwise flood the log on every ALB/k8s liveness check).
+        # Failures are still logged below regardless of this set.
+        self._quiet_paths = frozenset(quiet_paths)
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
@@ -73,6 +82,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
             method=request.method,
         )
+        # Declare the access-log field here, where it's emitted. The auth
+        # dependency (running downstream) overwrites it with the token subject
+        # on success; it stays None for unauthenticated routes or requests that
+        # fail before/at auth. request.state is backed by the shared ASGI scope,
+        # so the dependency's write is visible here after call_next.
+        request.state.cognito_username = None
         start = time.perf_counter()
         try:
             response: Response = await call_next(request)
@@ -82,14 +97,17 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 "request_failed",
                 status_code=500,
                 duration_ms=duration_ms,
+                cognito_username=request.state.cognito_username,
             )
             raise
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        self._logger.info(
-            "request",
-            status_code=response.status_code,
-            duration_ms=duration_ms,
-        )
+        if request.url.path not in self._quiet_paths:
+            self._logger.info(
+                "request",
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+                cognito_username=request.state.cognito_username,
+            )
         response.headers["X-Request-ID"] = request_id
         return response
 

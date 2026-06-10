@@ -1,0 +1,44 @@
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: autods-mcp-public
+  description: Public MCP server exposing curated AutoDSApi / ProductsResearch operations to MCP clients (Claude, Cursor) over Streamable HTTP, acting as an OAuth resource server in front of Cognito
+  annotations:
+    github.com/project-slug: AutoDSTools/autods-mcp-public
+    backstage.io/kubernetes-id: autods-mcp
+    backstage.io/kubernetes-namespace: prod
+    backstage.io/source-location: url:https://github.com/AutoDSTools/autods-mcp-public/tree/main/
+  tags:
+    - python
+    - mcp
+    - api
+    - oauth
+spec:
+  type: service
+  lifecycle: production
+  owner: squad-cto-office
+
+  # Components/resources this service depends on at runtime.
+  #   - autods-api — the upstream REST service this server proxies (declared by
+  #     AutoDSTools/AutoDSApi's catalog-info.yaml).
+  # Not yet declared in the catalog, add when their entities exist:
+  #   - the ProductsResearch service (second upstream),
+  #   - the Cognito user pool and Redis (resource: entities) — both hard runtime
+  #     dependencies (auth + rate limiter; the server refuses to boot without them
+  #     in staging/prod).
+  dependsOn:
+    - component:autods-api
+
+  # APIs that this service EXPOSES to others.
+  # The MCP transport at /mcp is not a standard Backstage API type
+  # (openapi/asyncapi/graphql/grpc), so it is documented in the README rather
+  # than declared as an API entity here.
+
+  # APIs that this service CONSUMES from other components.
+  # The server forwards each caller's bearer token upstream to:
+  #   - autods-platform-rest — declared by AutoDSTools/AutoDSApi's catalog-info.yaml
+  #   - the ProductsResearch read API — not yet in the catalog; add it here once
+  #     ProductsResearch is onboarded with its own catalog-info.yaml.
+  consumesApis:
+    - autods-platform-rest

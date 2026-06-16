@@ -88,6 +88,60 @@ client:
   `site_id`, `buy_site_id`, `inventory_status`) **must** be typed as integers, never
   strings.
 
+## Python conventions
+
+- Do **not** use `from __future__ import annotations`.
+- Keep imports at module level. Function-level (local) imports are tolerated
+  only when required by code logic (e.g. breaking a circular import, or an
+  optional/heavy dependency that must be lazily loaded).
+
+## Versioning
+
+The `__version__` lives in `src/autods_mcp_server/__init__.py`. Bump it on
+every commit:
+
+- **Patch** (`x.y.Z`) — fixes, logging, analytics, and other technical changes.
+- **Minor** (`x.Y.0`) — new business logic, or new endpoints added in manifests.
+
+Amending a commit that already bumped the version does **not** require a
+further bump.
+
+## Commit message format
+
+Commits are multiline: a subject line, a blank line, then a body.
+
+**Subject line:**
+
+```
+<JIRA-KEY> :: <Short description> :: [Task URL](https://autods.atlassian.net/browse/<JIRA-KEY>)
+```
+
+- `<JIRA-KEY>` is the ticket, e.g. `RD-55`. Segments are separated by ` :: `
+  (space-colon-colon-space), and the line ends with ` ::` or the Task URL.
+- The `[Task URL](...)` may sit on the subject line, or be moved to the first
+  line of the body instead (in which case the subject just ends with ` ::`).
+
+**Body:**
+
+- Explains *what* changed and *why*. A short commit gets a sentence; otherwise
+  use a plain bullet-point list of the changes.
+- End with the `Co-Authored-By:` trailer when an agent contributed.
+
+Example:
+
+```
+RD-50 :: Logging cleanup ::
+
+[Task URL](https://autods.atlassian.net/browse/RD-50)
+* Including cognito username into log entries.
+* Excluding log entries from third-party libraries.
+* Suppressing "/health" log calls.
+```
+
+> Note: some early commits group the body into labelled sections (e.g.
+> `F0 — ...`, `E2 — ...`). That was specific to the initial phased
+> implementation tickets; for a normal ticket, just use a bullet-point list.
+
 ## Conventions
 
 - **Error mapping** (`errors.py`): upstream `401 → unauthenticated`, `403 → forbidden`,

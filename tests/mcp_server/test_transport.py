@@ -55,13 +55,15 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 5 AutoDSApi ops + 5 ProductsResearch ops.
-    assert len(by_name) == 10
+    # 5 AutoDSApi ops + 5 ProductsResearch ops + 1 users op (get_current_user).
+    assert len(by_name) == 11
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.readOnlyHint is False
     # A ProductsResearch read endpoint is advertised read-only.
     assert by_name["get_winning_products"].annotations.readOnlyHint is True
+    # The RD-68 self-identity op is advertised read-only.
+    assert by_name["get_current_user"].annotations.readOnlyHint is True
 
 
 async def test_tool_call_forwards_bearer_to_upstream(

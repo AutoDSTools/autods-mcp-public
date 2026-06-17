@@ -63,6 +63,7 @@ from autods_mcp_server.errors import (
     map_upstream_error,
     rate_limited_result,
 )
+from autods_mcp_server.identity import SelfIdentityResolver
 from autods_mcp_server.logging import get_logger
 from autods_mcp_server.manifests import ManifestRegistry, build_registry
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
@@ -89,6 +90,7 @@ class McpRuntime:
     http_client: httpx.AsyncClient
     rate_limiter: RateLimiter
     redis: Redis | None
+    self_identity_resolver: SelfIdentityResolver
 
 
 def _emit_audit(
@@ -318,6 +320,9 @@ def build_runtime(
     redis = redis if redis is not None else create_redis(settings)
     rate_limiter = rate_limiter or build_rate_limiter(settings, redis)
     dispatcher = OperationDispatcher(registry, settings, http_client)
+    # RD-68: resolves the caller's own id/name/email via AutoDSApi's
+    # ``get_current_user`` operation (the forwarded token, no privileged creds).
+    self_identity_resolver = SelfIdentityResolver(dispatcher)
     server = _build_server(registry, dispatcher, rate_limiter)
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
@@ -332,6 +337,7 @@ def build_runtime(
         http_client=http_client,
         rate_limiter=rate_limiter,
         redis=redis,
+        self_identity_resolver=self_identity_resolver,
     )
 
 
@@ -367,6 +373,10 @@ async def mcp_lifespan(runtime: McpRuntime) -> AsyncIterator[None]:
 
 def mount_mcp(app: FastAPI, runtime: McpRuntime) -> None:
     """Mount the authenticated ``/mcp`` transport route on ``app``."""
+
+    # Expose the self-identity resolver on app.state so the auth dependency /
+    # downstream consumers can resolve the caller's id/name/email (RD-68).
+    app.state.self_identity_resolver = runtime.self_identity_resolver
 
     @app.api_route(
         MCP_PATH,

@@ -188,6 +188,17 @@ flags, `annotations` (`title` + at least one hint), and `base_url_key`. The
 server's D5 startup lint refuses to boot if any operation is missing its
 annotations, so a malformed manifest can't reach a client.
 
+### Self-identity (RD-68)
+
+The caller's own AutoDS identity (`id`, `name`, `email`) is resolved by the
+`get_current_user` tool (`manifests/users.json`, AutoDSApi `GET /users/list/` —
+which returns just the authenticated user). `SelfIdentityResolver`
+(`identity.py`) dispatches this operation with the caller's already-forwarded
+bearer token — no privileged credentials — and is exposed on `app.state` for
+downstream consumers (e.g. log/analytics enrichment). It **fails open**: any
+dispatch error, non-2xx, or unparseable payload resolves to `None` and never
+breaks auth or a tool call.
+
 ### Manifest → upstream call flow
 
 1. Client lists tools via `tools/list`; each descriptor carries the

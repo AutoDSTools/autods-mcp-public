@@ -1,0 +1,27 @@
+{
+  "server_name": "autods-users",
+  "domain": "users",
+  "base_url_key": "autods_api",
+  "instructions": "## AutoDS Users API — Agent Reference\n\nIdentity for the **currently authenticated user** (the caller).\n\n- `get_current_user` (GET /users/list/) returns the caller's own user record — id, name, email, and account status. Despite the upstream path name, it resolves only the authenticated user from the bearer token, not a list of other users.\n",
+  "operations": [
+    {
+      "operation_id": "get_current_user",
+      "method": "GET",
+      "path": "/users/list/",
+      "summary": "Get the current authenticated user",
+      "description": "Return the caller's own AutoDS identity, resolved from the authenticated bearer token. Use ONLY these fields: `id` (the stable AutoDS user id), `name`, and `email`. The upstream endpoint is named '/users/list/' but returns only the current user.",
+      "tags": [
+        "users"
+      ],
+      "parameters": [],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Resolves the current user only (not other users). The response is a single-element list with the caller's user record. Consume only `id`, `name`, and `email`. All other fields (account status, onboarding/feature flags, store ids, timestamps, etc.) are internal service attributes — do not rely on, reason about, or surface them; they may change without notice.",
+      "annotations": {
+        "title": "Get Current User",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

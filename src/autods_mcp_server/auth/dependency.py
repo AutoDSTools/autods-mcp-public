@@ -46,6 +46,9 @@ class UserContext(BaseModel):
     email: str | None = None
     groups: list[str] = Field(default_factory=list)
     raw_token: SecretStr
+    # Resolved server-side from AutoDSApi (RD-63/RD-68); ``None`` when unresolved
+    # (lookup failed, account not resolvable, or the resolver is disabled).
+    autods_user_id: str | None = None
 
 
 # Error codes follow RFC 6750 §3.1.
@@ -182,14 +185,33 @@ async def get_current_user(
             description="Token validation failed.",
         ) from exc
 
-    # Surface the authenticated subject to RequestContextMiddleware, which runs
-    # upstream of auth and reads it back off request.state (the shared ASGI
-    # scope) after the response is produced, to tag the access log line.
-    request.state.cognito_username = claims.sub
-
-    return UserContext(
+    # The verified context. The identity resolver needs the forwarded token — it
+    # resolves the caller's own AutoDS identity by calling AutoDSApi's
+    # ``get_current_user`` on the caller's behalf (no privileged credentials).
+    user_context = UserContext(
         sub=claims.sub,
         email=claims.email,
         groups=list(claims.groups),
         raw_token=SecretStr(token),
     )
+
+    # Resolve the stable AutoDS identity (autods_user_id + email) from AutoDSApi,
+    # cached (RD-63/RD-68). Fails open: a lookup failure leaves autods_user_id
+    # None and never blocks auth. The resolver is stashed on app.state by
+    # mount_mcp; absent (e.g. bare auth-only test apps) → identity unresolved.
+    resolver = getattr(request.app.state, "identity_resolver", None)
+    identity = await resolver.resolve(user_context) if resolver is not None else None
+    if identity is not None:
+        user_context.autods_user_id = identity.user_id
+        # The cached email (when present) supersedes any email claim.
+        if identity.email:
+            user_context.email = identity.email
+
+    # Surface the authenticated identity to RequestContextMiddleware, which runs
+    # upstream of auth and reads it back off request.state (the shared ASGI
+    # scope) after the response is produced, to tag the access log line.
+    request.state.cognito_username = claims.sub
+    request.state.autods_user_id = user_context.autods_user_id
+    request.state.email = user_context.email
+
+    return user_context

@@ -136,6 +136,30 @@ class Settings(BaseSettings):
     # point it at an empty dir to run the transport with zero tools.
     mcp_manifest_dir: Path = Field(default=_DEFAULT_MANIFEST_DIR, validation_alias="MCP_MANIFEST_DIR")
 
+    # Mixpanel project token. Unset → the analytics integration is a no-op (the
+    # local default), so the server boots and runs with tracking disabled and no
+    # token required. Set in staging/prod to emit the auth + tool-call events.
+    mixpanel_token: str | None = Field(default=None, validation_alias="MIXPANEL_TOKEN")
+
+    # TTL for *negative* entries in the Cognito attribute cache (a user whose
+    # ``custom:autods_user_id`` couldn't be resolved, or a transient lookup
+    # failure). Negatives expire so not-yet-backfilled users and transient errors
+    # get retried. Default 6h.
+    cognito_attr_negative_cache_ttl_seconds: int = Field(
+        default=21600,
+        validation_alias="COGNITO_ATTR_NEGATIVE_CACHE_TTL_SECONDS",
+    )
+
+    # TTL for *positive* entries in the Cognito attribute cache. The
+    # cognito-subject → autods_user_id mapping is immutable, but the cached
+    # ``email`` is not (a user can change it), so positives expire and refresh
+    # rather than being cached forever — bounding how stale a logged email can
+    # be. Default 24h.
+    cognito_attr_positive_cache_ttl_seconds: int = Field(
+        default=86400,
+        validation_alias="COGNITO_ATTR_POSITIVE_CACHE_TTL_SECONDS",
+    )
+
     def upstream_base_url(self, base_url_key: str) -> str:
         """Resolve a manifest ``base_url_key`` to the upstream's base URL (D6).
 

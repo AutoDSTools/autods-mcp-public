@@ -45,6 +45,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from redis.asyncio import Redis
 
+from autods_mcp_server.analytics import MixpanelClient, build_mixpanel
 from autods_mcp_server.auth import UserContext, get_current_user
 from autods_mcp_server.dispatch import (
     DispatchError,
@@ -63,7 +64,11 @@ from autods_mcp_server.errors import (
     map_upstream_error,
     rate_limited_result,
 )
-from autods_mcp_server.identity import SelfIdentityResolver
+from autods_mcp_server.identity import (
+    CachedIdentityResolver,
+    SelfIdentityResolver,
+    build_identity_resolver,
+)
 from autods_mcp_server.logging import get_logger
 from autods_mcp_server.manifests import ManifestRegistry, build_registry
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
@@ -90,7 +95,11 @@ class McpRuntime:
     http_client: httpx.AsyncClient
     rate_limiter: RateLimiter
     redis: Redis | None
+    mixpanel: MixpanelClient
+    # Uncached self-identity lookup (RD-68) + the cached resolver (RD-63) that
+    # wraps it; the auth dependency uses the cached one.
     self_identity_resolver: SelfIdentityResolver
+    identity_resolver: CachedIdentityResolver
 
 
 def _emit_audit(
@@ -98,6 +107,8 @@ def _emit_audit(
     tool_name: str,
     op_id: str,
     cognito_username: str,
+    autods_user_id: str | None,
+    email: str | None,
     upstream_url: str | None,
     upstream_status: int | None,
     latency_ms: float,
@@ -112,6 +123,8 @@ def _emit_audit(
     """
     fields: dict[str, Any] = {
         "cognito_username": cognito_username,
+        "autods_user_id": autods_user_id,
+        "email": email,
         "tool_name": tool_name,
         "op_id": op_id,
         "upstream_url": upstream_url,
@@ -155,7 +168,26 @@ def _validate_arguments(arguments: dict[str, Any], validator: Validator) -> str 
     return f"Invalid value for '{field}': {error.message}"
 
 
-def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, rate_limiter: RateLimiter) -> Server:
+def _remote_endpoint(registry: ManifestRegistry, op_id: str) -> str:
+    """The upstream endpoint a tool forwards to, for the "MCP Call Received" event.
+
+    The *templated* ``base_url_key METHOD /path`` (e.g.
+    ``autods_api POST /products/{store_ids}/``) — never the substituted URL,
+    which would embed store ids / query values (high cardinality + request
+    data). Falls back to the tool name if the op can't be resolved.
+    """
+    operation = registry.get(op_id)
+    if operation is None:
+        return op_id
+    return f"{operation.base_url_key} {operation.method.upper()} {operation.path}"
+
+
+def _build_server(
+    registry: ManifestRegistry,
+    dispatcher: OperationDispatcher,
+    rate_limiter: RateLimiter,
+    mixpanel: MixpanelClient,
+) -> Server:
     """Create the low-level MCP server with tool list/call handlers."""
     server: Server = Server("autods-mcp-server")
     tools = build_tools(registry.list_operations())  # D5 lint runs here.
@@ -181,19 +213,45 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             # was driven without the auth seam — treat as an internal error.
             return error_result(ERROR_INTERNAL, f"No authenticated user context for tool '{name}'.")
 
-        # F1 — per-user rate limit, enforced before any upstream work.
-        decision = await rate_limiter.acquire(user_context.sub)
-        if not decision.allowed:
+        def emit(
+            *,
+            upstream_url: str | None,
+            upstream_status: int | None,
+            latency_ms: float,
+            error_type: str | None = None,
+        ) -> None:
             _emit_audit(
                 tool_name=name,
                 op_id=name,
                 cognito_username=user_context.sub,
+                autods_user_id=user_context.autods_user_id,
+                email=user_context.email,
+                upstream_url=upstream_url,
+                upstream_status=upstream_status,
+                latency_ms=latency_ms,
+                error_type=error_type,
+            )
+
+        # F1 — per-user rate limit, enforced before any upstream work.
+        decision = await rate_limiter.acquire(user_context.sub)
+        if not decision.allowed:
+            emit(
                 upstream_url=None,
                 upstream_status=None,
                 latency_ms=0.0,
                 error_type=ERROR_RATE_LIMITED,
             )
             return rate_limited_result(decision.retry_after)
+
+        # "MCP Call Received" — fires once the call clears the rate limiter (RD-63),
+        # so a rate-limited / abusive caller can't drive unbounded tracking work.
+        # The event is keyed on the AutoDS user id; if that's unresolved we skip
+        # tracking entirely rather than emit an event keyed on the Cognito sub.
+        if user_context.autods_user_id is not None:
+            mixpanel.track_mcp_call_received(
+                user_context.autods_user_id,
+                remote_endpoint=_remote_endpoint(registry, name),
+            )
 
         # Validate arguments (incl. the typed request body) against the tool's
         # inputSchema before any upstream work — a malformed body is rejected
@@ -202,10 +260,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
         if validator is not None:
             validation_error = _validate_arguments(arguments, validator)
             if validation_error is not None:
-                _emit_audit(
-                    tool_name=name,
-                    op_id=name,
-                    cognito_username=user_context.sub,
+                emit(
                     upstream_url=None,
                     upstream_status=None,
                     latency_ms=0.0,
@@ -218,10 +273,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             result = await dispatcher.dispatch(name, arguments, user_context)
         except MissingArgumentError as exc:
             # Our own input validation — the message is safe to surface.
-            _emit_audit(
-                tool_name=name,
-                op_id=name,
-                cognito_username=user_context.sub,
+            emit(
                 upstream_url=None,
                 upstream_status=None,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
@@ -230,10 +282,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
             return error_result(ERROR_INVALID_ARGUMENTS, str(exc))
         except UpstreamRequestError as exc:
             # Transport-level failure (timeout, connection) — no response body.
-            _emit_audit(
-                tool_name=name,
-                op_id=name,
-                cognito_username=user_context.sub,
+            emit(
                 upstream_url=exc.upstream_url or None,
                 upstream_status=None,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
@@ -246,10 +295,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
         except (UnknownOperationError, DispatchError) as exc:
             # UnknownOperationError shouldn't happen (the SDK validated the tool
             # name), so it's an internal inconsistency, not a user error.
-            _emit_audit(
-                tool_name=name,
-                op_id=name,
-                cognito_username=user_context.sub,
+            emit(
                 upstream_url=None,
                 upstream_status=None,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
@@ -260,10 +306,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
         if result.ok:
-            _emit_audit(
-                tool_name=name,
-                op_id=name,
-                cognito_username=user_context.sub,
+            emit(
                 upstream_url=result.upstream_url or None,
                 upstream_status=result.status,
                 latency_ms=latency_ms,
@@ -272,10 +315,7 @@ def _build_server(registry: ManifestRegistry, dispatcher: OperationDispatcher, r
 
         # F3 — map an upstream non-2xx to a safe, typed MCP error.
         mapped = map_upstream_error(result.status, result.data)
-        _emit_audit(
-            tool_name=name,
-            op_id=name,
-            cognito_username=user_context.sub,
+        emit(
             upstream_url=result.upstream_url or None,
             upstream_status=result.status,
             latency_ms=latency_ms,
@@ -302,6 +342,8 @@ def build_runtime(
     http_client: httpx.AsyncClient | None = None,
     redis: Redis | None = None,
     rate_limiter: RateLimiter | None = None,
+    mixpanel: MixpanelClient | None = None,
+    identity_resolver: CachedIdentityResolver | None = None,
 ) -> McpRuntime:
     """Assemble the MCP runtime for ``settings`` (manifests, server, dispatcher).
 
@@ -309,7 +351,10 @@ def build_runtime(
     mock transport; production passes ``None`` and gets the default client.
     ``redis`` / ``rate_limiter`` are likewise injectable for tests — production
     passes ``None`` and the limiter is built from ``settings`` (Redis-backed
-    when ``REDIS_URL`` is set, in-process otherwise).
+    when ``REDIS_URL`` is set, in-process otherwise). ``mixpanel`` /
+    ``identity_resolver`` (RD-63) are injectable too — production passes ``None``
+    and they're built from ``settings`` (Mixpanel a no-op without a token; the
+    cached identity resolver's L2 sharing the runtime's Redis).
 
     Raises:
         ToolAnnotationError: if any manifest operation fails the D5 lint — this
@@ -320,10 +365,20 @@ def build_runtime(
     redis = redis if redis is not None else create_redis(settings)
     rate_limiter = rate_limiter or build_rate_limiter(settings, redis)
     dispatcher = OperationDispatcher(registry, settings, http_client)
-    # RD-68: resolves the caller's own id/name/email via AutoDSApi's
+    # RD-68: resolve the caller's own id/name/email via AutoDSApi's
     # ``get_current_user`` operation (the forwarded token, no privileged creds).
     self_identity_resolver = SelfIdentityResolver(dispatcher)
-    server = _build_server(registry, dispatcher, rate_limiter)
+    # RD-63: Mixpanel analytics (no-op without a token) + the cached identity
+    # resolver (L2 shares the runtime's Redis), wrapping the RD-68 lookup. The
+    # cached resolver is stashed on app.state by mount_mcp so the auth dependency
+    # can reach it.
+    mixpanel = mixpanel if mixpanel is not None else build_mixpanel(settings)
+    identity_resolver = (
+        identity_resolver
+        if identity_resolver is not None
+        else build_identity_resolver(settings, redis, self_identity_resolver)
+    )
+    server = _build_server(registry, dispatcher, rate_limiter, mixpanel)
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
     # stays off so the spec's SSE framing is still used for the single
@@ -337,7 +392,9 @@ def build_runtime(
         http_client=http_client,
         rate_limiter=rate_limiter,
         redis=redis,
+        mixpanel=mixpanel,
         self_identity_resolver=self_identity_resolver,
+        identity_resolver=identity_resolver,
     )
 
 
@@ -366,6 +423,7 @@ async def mcp_lifespan(runtime: McpRuntime) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            await runtime.mixpanel.drain()  # flush in-flight tracking (best effort)
             await runtime.http_client.aclose()
             if runtime.redis is not None:
                 await runtime.redis.aclose()
@@ -374,8 +432,11 @@ async def mcp_lifespan(runtime: McpRuntime) -> AsyncIterator[None]:
 def mount_mcp(app: FastAPI, runtime: McpRuntime) -> None:
     """Mount the authenticated ``/mcp`` transport route on ``app``."""
 
-    # Expose the self-identity resolver on app.state so the auth dependency /
-    # downstream consumers can resolve the caller's id/name/email (RD-68).
+    # The auth dependency (get_current_user) reads the cached identity resolver
+    # off request.app.state to resolve the AutoDS identity (autods_user_id +
+    # email) for the audit log and the "MCP Call Received" event (RD-63). The
+    # uncached lookup is exposed too for any direct consumer (RD-68).
+    app.state.identity_resolver = runtime.identity_resolver
     app.state.self_identity_resolver = runtime.self_identity_resolver
 
     @app.api_route(

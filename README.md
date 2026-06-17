@@ -82,9 +82,21 @@ All settings come from environment variables. See
 | `REDIS_URL` | yes in non-local | Shared Redis backing the per-user rate limiter (`redis://` / `rediss://`). Unset in local falls back to an in-process limiter |
 | `RATE_LIMIT_PER_MINUTE` | no (default `60`) | Per-user token-bucket ceiling; `0` disables this bucket |
 | `RATE_LIMIT_PER_HOUR` | no (default `1000`) | Per-user token-bucket ceiling; `0` disables this bucket |
+| `MIXPANEL_TOKEN` | no | Mixpanel project token for the tool-call event. Unset → analytics disabled (the local default) |
+| `COGNITO_ATTR_NEGATIVE_CACHE_TTL_SECONDS` | no (default `21600`) | TTL for *negative* identity-cache entries (6h) |
+| `COGNITO_ATTR_POSITIVE_CACHE_TTL_SECONDS` | no (default `86400`) | TTL for *positive* identity-cache entries (24h); the id is immutable but the cached `email`/`name` can change, so positives expire and refresh |
 
 Non-local environments enforce HTTPS via `X-Forwarded-Proto` and refuse
 to boot without `FORCE_HTTPS=true`, `PUBLIC_HOSTNAME`, and `REDIS_URL` set.
+
+Product analytics (RD-63): on each tool call the server emits a **MCP Call
+Received** Mixpanel event, keyed by the stable `autods_user_id`. The identity is
+resolved from AutoDSApi (the `get_current_user` lookup — see *Self-identity*
+below) and cached in-process + Redis; no AWS/Cognito-admin credentials are
+needed. Tracking is fire-and-forget and fails open, and the event is skipped
+when the identity is unresolved (never keyed on the Cognito `sub`). Logs
+(`request` access line + `tool_call` audit line) carry `autods_user_id` +
+`email` alongside `cognito_username`.
 
 ## Authentication (Phase B)
 

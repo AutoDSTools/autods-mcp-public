@@ -144,6 +144,14 @@ def write_manifest(tmp_path: Path) -> Callable[..., Path]:
     return _make
 
 
+class _NoopIdentityResolver:
+    """A do-nothing identity resolver: resolves to ``None`` without any upstream
+    call. The default for transport tests, which don't exercise resolution."""
+
+    async def resolve(self, _user_context: object) -> None:
+        return None
+
+
 @pytest.fixture
 def make_mcp_app(jwks_client: JWKSClient) -> Callable[..., tuple[FastAPI, McpRuntime]]:
     """Build a FastAPI app with the MCP transport mounted and auth wired.
@@ -156,11 +164,21 @@ def make_mcp_app(jwks_client: JWKSClient) -> Callable[..., tuple[FastAPI, McpRun
         settings: Settings,
         upstream_handler: Callable[[httpx.Request], httpx.Response] | None = None,
         rate_limiter: RateLimiter | None = None,
+        identity_resolver: object | None = None,
     ) -> tuple[FastAPI, McpRuntime]:
         client = (
             httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler)) if upstream_handler is not None else None
         )
-        runtime = build_runtime(settings, http_client=client, rate_limiter=rate_limiter)
+        # Identity resolution (RD-63) is orthogonal to the transport tests, so it
+        # defaults to a no-op resolver here — it must not issue its own upstream
+        # ``get_current_user`` call and skew per-test upstream-call assertions.
+        # Tests that exercise resolution inject their own or use build_runtime.
+        runtime = build_runtime(
+            settings,
+            http_client=client,
+            rate_limiter=rate_limiter,
+            identity_resolver=identity_resolver or _NoopIdentityResolver(),  # type: ignore[arg-type]
+        )
         app = FastAPI()
         mount_mcp(app, runtime)
         app.dependency_overrides[jwks_dependency] = lambda: jwks_client

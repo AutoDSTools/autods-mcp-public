@@ -82,12 +82,15 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
             method=request.method,
         )
-        # Declare the access-log field here, where it's emitted. The auth
-        # dependency (running downstream) overwrites it with the token subject
-        # on success; it stays None for unauthenticated routes or requests that
-        # fail before/at auth. request.state is backed by the shared ASGI scope,
-        # so the dependency's write is visible here after call_next.
+        # Declare the access-log fields here, where they're emitted. The auth
+        # dependency (running downstream) overwrites them with the token subject
+        # + resolved AutoDS identity on success; they stay None for
+        # unauthenticated routes or requests that fail before/at auth.
+        # request.state is backed by the shared ASGI scope, so the dependency's
+        # write is visible here after call_next.
         request.state.cognito_username = None
+        request.state.autods_user_id = None
+        request.state.email = None
         start = time.perf_counter()
         try:
             response: Response = await call_next(request)
@@ -98,6 +101,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 duration_ms=duration_ms,
                 cognito_username=request.state.cognito_username,
+                autods_user_id=request.state.autods_user_id,
+                email=request.state.email,
             )
             raise
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -107,6 +112,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 status_code=response.status_code,
                 duration_ms=duration_ms,
                 cognito_username=request.state.cognito_username,
+                autods_user_id=request.state.autods_user_id,
+                email=request.state.email,
             )
         response.headers["X-Request-ID"] = request_id
         return response

@@ -2,7 +2,7 @@
   "server_name": "autods-products-research",
   "domain": "products_research",
   "operations_count": 5,
-  "instructions": "## AutoDS Products Research API — Agent Reference\n\nRead-only product-discovery endpoints backed by the ProductsResearch service (Elasticsearch + MongoDB). Every operation here is side-effect-free.\n\n### Common patterns\n- `product_id` in a URL is the MongoDB ObjectId string of a research/winning product (e.g. obtained from `get_winning_products`).\n- The caller's currency and region are resolved server-side from the user's settings — request bodies/params do NOT need (and cannot override) `region`.\n- Pagination is `offset` (>=0) + `limit`; `get_winning_products` caps `limit` at 100.\n- `get_product_by_id` may return HTTP 307 with a redirect message when the product is a winning product the user lacks the Product Finding Hub add-on to view — this is a documented business response, not a failure.\n\n### Search filters (search_products body)\n`filters` is a list of `{name, value, value_type, op}` objects (all four fields required, all strings). `order_by` is `{name, direction}` and is required by the upstream. Useful filter ops: `=`, `ne`, `in`, `between`, `>`, `<`, `search`. Example free-text search: `{\"name\": \"search_query\", \"value\": \"wireless earbuds\", \"value_type\": \"string\", \"op\": \"search\"}`.\n\n### Winning-products query\n- `sort` is a field name; prefix with `-` for descending (e.g. `-created_at` for newest first, `-orders_count`).\n- `profit` / `item_cost` are range buckets (e.g. `10-20`, `100-` for 100+); `created_date` is a day-window enum (0=today, 1=yesterday, 7, 14, 30).\n- `ads` filters by advertising platform name (e.g. `Facebook`, `TikTok`); comma-separated for multiple.",
+  "instructions": "## AutoDS Products Research API — Agent Reference\n\nRead-only product-discovery endpoints. Every operation here is side-effect-free.\n\n### Common patterns\n- `product_id` in a URL is the 24-character hex id string of a research/winning product (e.g. obtained from `get_winning_products`).\n- The caller's currency and region are resolved server-side from the user's settings — request bodies/params do NOT need (and cannot override) `region`.\n- Pagination is `offset` (>=0) + `limit`; `get_winning_products` caps `limit` at 100.\n- `get_product_by_id` may return HTTP 307 with a redirect message when the product is a winning product the user lacks the Product Finding Hub add-on to view — this is a documented business response, not a failure.\n\n### Search filters (search_products body)\n`filters` is a list of `{name, value, value_type, op}` objects (all four fields required, all strings). `order_by` is `{name, direction}` and is required by the upstream. Useful filter ops: `=`, `ne`, `in`, `between`, `>`, `<`, `search`. Example free-text search: `{\"name\": \"search_query\", \"value\": \"wireless earbuds\", \"value_type\": \"string\", \"op\": \"search\"}`.\n\n### Winning-products query\n- `sort` is a field name; prefix with `-` for descending (e.g. `-created_at` for newest first, `-orders_count`).\n- `profit` / `item_cost` are range buckets (e.g. `10-20`, `100-` for 100+); `created_date` is a day-window enum (0=today, 1=yesterday, 7, 14, 30).\n- `ads` filters by advertising platform name (e.g. `Facebook`, `TikTok`); comma-separated for multiple.",
   "operations": [
     {
       "operation_id": "search_products",
@@ -10,7 +10,7 @@
       "path": "/products/",
       "summary": "Search the product-research catalog by filter.",
       "description": "",
-      "notes": "Read-only POST. Searches the ProductsResearch catalog (Elasticsearch) and returns {results: [...], currency, region}. Winning products and deleted products are excluded automatically. The body is a filter object: `order_by` ({name, direction}) is REQUIRED; `filters` is an optional list of {name, value, value_type, op}. Free-text search is a filter with name=search_query, op=search, value_type=string. `region` is resolved from the user's settings server-side and is ignored if sent. Use `offset`/`limit` for pagination (default limit 10).",
+      "notes": "Read-only POST. Searches the product-research catalog and returns {results: [...], currency, region}. Winning products and deleted products are excluded automatically. The body is a filter object: `order_by` ({name, direction}) is REQUIRED; `filters` is an optional list of {name, value, value_type, op}. Free-text search is a filter with name=search_query, op=search, value_type=string. `region` is resolved from the user's settings server-side and is ignored if sent. Use `offset`/`limit` for pagination (default limit 10).",
       "tags": [
         "products"
       ],
@@ -125,7 +125,7 @@
       "path": "/products/winning",
       "summary": "List winning products with optional discovery filters.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (mongo id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set.",
+      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (24-character hex id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set.",
       "tags": [
         "products"
       ],
@@ -156,7 +156,7 @@
           "in": "query",
           "required": false,
           "schema_type": "str",
-          "description": "Category id (mongo ObjectId)."
+          "description": "Category id (24-character hex string)."
         },
         {
           "name": "ads",
@@ -215,7 +215,7 @@
       "path": "/products/{product_id}",
       "summary": "Get a single product by its id.",
       "description": "",
-      "notes": "Read-only. Returns the full product document for the given MongoDB ObjectId, with prices/region normalised to the user's settings. May return HTTP 307 with a message when the product is a winning product the user can't view without the Product Finding Hub add-on — a documented business response.",
+      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices/region normalised to the user's settings. May return HTTP 307 with a message when the product is a winning product the user can't view without the Product Finding Hub add-on — a documented business response.",
       "tags": [
         "products"
       ],
@@ -225,7 +225,7 @@
           "in": "path",
           "required": true,
           "schema_type": "str",
-          "description": "Product MongoDB ObjectId."
+          "description": "Product id (24-character hex string)."
         }
       ],
       "has_json_body": false,
@@ -252,7 +252,7 @@
           "in": "path",
           "required": true,
           "schema_type": "str",
-          "description": "Product MongoDB ObjectId to find similar products for."
+          "description": "Product id (24-character hex string) to find similar products for."
         }
       ],
       "has_json_body": false,
@@ -279,7 +279,7 @@
           "in": "path",
           "required": true,
           "schema_type": "str",
-          "description": "Product MongoDB ObjectId to base recommendations on."
+          "description": "Product id (24-character hex string) to base recommendations on."
         },
         {
           "name": "offset",

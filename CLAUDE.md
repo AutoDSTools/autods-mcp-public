@@ -88,6 +88,25 @@ client:
   `site_id`, `buy_site_id`, `inventory_status`) **must** be typed as integers, never
   strings.
 
+### Keep descriptions implementation-agnostic
+
+`instructions`, `notes`, `summary`, and `description` strings ship to MCP clients as the
+text the model reads — so they are public. Describe the **observable contract** (sync vs
+async, what to poll, input format, output shape), never **how AutoDS is built**.
+
+Do not name internal frameworks, datastores, services, or symbols. In particular:
+
+- ❌ "fires a Celery task" / the task function name → ✅ "starts an asynchronous bulk job"
+- ❌ "queries MongoDB" / "ProductsResearch service (Elasticsearch + MongoDB)" → ✅ "queries
+  products by filter" / "the product-research catalog"
+- ❌ "MongoDB ObjectId" / "`id` maps to `_id` upstream and casts to ObjectId" → ✅ "24-character
+  hex id string" / "filter by `id` with value_type `object_id`"
+
+Keep the parts the caller genuinely needs (id format, how to filter, async-then-poll
+semantics); drop only the implementation framing. The `value_type: "objectId"` enum value
+in a `body_schema` is part of the wire contract — that stays. See `users.json` for the same
+instinct applied to a response payload (internal fields told to clients as "do not surface").
+
 ## Python conventions
 
 - Do **not** use `from __future__ import annotations`.

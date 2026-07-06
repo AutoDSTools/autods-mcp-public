@@ -25,6 +25,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
+from autods_mcp_server.sentry import set_request_id
 from autods_mcp_server.settings import Settings
 
 DEFAULT_PROTECTED_PATTERNS: Final[tuple[str, ...]] = (
@@ -82,6 +83,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
             method=request.method,
         )
+        # Correlate Sentry events with the access log (both keyed on request_id).
+        set_request_id(request_id)
         # Declare the access-log fields here, where they're emitted. The auth
         # dependency (running downstream) overwrites them with the token subject
         # + resolved AutoDS identity on success; they stay None for

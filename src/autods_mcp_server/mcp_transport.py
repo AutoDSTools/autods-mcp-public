@@ -73,6 +73,11 @@ from autods_mcp_server.logging import get_logger
 from autods_mcp_server.manifests import ManifestRegistry, build_registry
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
 from autods_mcp_server.redis_client import create_redis
+from autods_mcp_server.sentry import (
+    capture_tool_error,
+    capture_tool_exception,
+    set_tool_context,
+)
 from autods_mcp_server.settings import Settings
 from autods_mcp_server.tools import build_tools
 from autods_mcp_server.urls import MCP_PATH
@@ -213,6 +218,11 @@ def _build_server(
             # was driven without the auth seam — treat as an internal error.
             return error_result(ERROR_INTERNAL, f"No authenticated user context for tool '{name}'.")
 
+        # Record the tool call ("the request the client was making") on the
+        # Sentry scope. The single POST /mcp handler dispatches every tool, so the
+        # Starlette/FastAPI integrations can't attribute it automatically.
+        set_tool_context(tool_name=name, operation_id=name, arguments=arguments)
+
         def emit(
             *,
             upstream_url: str | None,
@@ -288,6 +298,12 @@ def _build_server(
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
                 error_type=ERROR_UPSTREAM_UNREACHABLE,
             )
+            capture_tool_exception(
+                exc,
+                error_type=ERROR_UPSTREAM_UNREACHABLE,
+                tool_name=name,
+                upstream_url=exc.upstream_url or None,
+            )
             return error_result(
                 ERROR_UPSTREAM_UNREACHABLE,
                 "The upstream service could not be reached. Please try again later.",
@@ -301,6 +317,7 @@ def _build_server(
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
                 error_type=ERROR_INTERNAL,
             )
+            capture_tool_exception(exc, error_type=ERROR_INTERNAL, tool_name=name)
             return error_result(ERROR_INTERNAL, str(exc))
 
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -322,11 +339,20 @@ def _build_server(
             error_type=mapped.error_type,
         )
         if mapped.log_full is not None:
-            # 5xx: the user message is generic, so record the full upstream
-            # detail server-side for debugging (still no request payload).
+            # 5xx / unexpected 3xx: the user message is generic, so record the
+            # full upstream detail server-side for debugging (still no request
+            # payload).
             _audit_logger.warning(
                 "upstream_error_detail",
                 op_id=name,
+                upstream_url=result.upstream_url or None,
+                upstream_status=result.status,
+                detail=mapped.log_full,
+            )
+            capture_tool_error(
+                f"{mapped.error_type}: upstream returned HTTP {result.status} for tool '{name}'",
+                error_type=mapped.error_type,
+                tool_name=name,
                 upstream_url=result.upstream_url or None,
                 upstream_status=result.status,
                 detail=mapped.log_full,

@@ -19,12 +19,14 @@ from autods_mcp_server.logging import configure_logging, resolve_level
 from autods_mcp_server.mcp_transport import build_runtime, mcp_lifespan, mount_mcp
 from autods_mcp_server.middleware import OriginAllowlistMiddleware, RequestContextMiddleware
 from autods_mcp_server.oauth import router as oauth_router
+from autods_mcp_server.sentry import init_sentry
 from autods_mcp_server.settings import get_settings
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings)
+    init_sentry(settings)
 
     # Build the MCP runtime up front: loading manifests runs the D5 annotation
     # lint, so a mis-annotated manifest fails create_app() — i.e. boot — rather

@@ -160,6 +160,17 @@ class Settings(BaseSettings):
         validation_alias="COGNITO_ATTR_POSITIVE_CACHE_TTL_SECONDS",
     )
 
+    # Self-hosted Sentry DSN (``https://<key>@sentry.autods.com/<id>``),
+    # delivered via External Secrets in staging/prod and unset locally. Kept
+    # deliberately optional — no boot-time validator — so a missing DSN (or a
+    # local run) makes ``init_sentry`` a no-op instead of failing startup.
+    sentry_url: str | None = Field(default=None, validation_alias="SENTRY_URL")
+    # Sentry environment tag (prod/staging). Defaults to ``mcp_env`` when unset
+    # (see the validator below); staging/prod set it explicitly via the chart.
+    # The release is derived from ``__version__`` in ``init_sentry`` — not an env
+    # var — so it always matches the deployed code.
+    sentry_environment: str | None = Field(default=None, validation_alias="SENTRY_ENVIRONMENT")
+
     def upstream_base_url(self, base_url_key: str) -> str:
         """Resolve a manifest ``base_url_key`` to the upstream's base URL (D6).
 
@@ -266,6 +277,18 @@ class Settings(BaseSettings):
                 f"MCP_ENV={self.mcp_env.value} requires REDIS_URL "
                 "(the rate limiter is shared across replicas via Redis)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _default_sentry_environment(self) -> Self:
+        """RD-66: default the Sentry environment tag to the deployment env.
+
+        When ``SENTRY_ENVIRONMENT`` isn't set explicitly (staging/prod set it via
+        the chart), fall back to ``mcp_env`` so any event carries a meaningful
+        environment rather than an empty string.
+        """
+        if not self.sentry_environment:
+            self.sentry_environment = self.mcp_env.value
         return self
 
     @model_validator(mode="after")

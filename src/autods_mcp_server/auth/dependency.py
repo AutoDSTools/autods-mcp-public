@@ -214,4 +214,11 @@ async def get_current_user(
     request.state.autods_user_id = user_context.autods_user_id
     request.state.email = user_context.email
 
+    # RD-66: attach the caller's identity to the Sentry scope so this request's
+    # events carry who made the call (never the bearer token). Imported locally
+    # to break the auth ⇄ sentry import cycle (sentry needs UserContext).
+    from autods_mcp_server.sentry import identify_user
+
+    identify_user(user_context, client_id=claims.client_id)
+
     return user_context

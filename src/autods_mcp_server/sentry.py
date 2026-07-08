@@ -32,7 +32,9 @@ import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from sentry_sdk.scrubber import EventScrubber
+from sentry_sdk.types import Event, Hint
 from sentry_sdk.utils import AnnotatedValue
+from starlette.requests import ClientDisconnect
 
 from autods_mcp_server import __version__
 from autods_mcp_server.auth import UserContext
@@ -94,6 +96,57 @@ class _SensitiveDataScrubber(EventScrubber):
 _SCRUBBER = _SensitiveDataScrubber(recursive=True)
 
 
+# The MCP SDK (mcp.server) logs a client abort of a ``POST /mcp`` as two ERROR
+# records, both of which the SDK's default LoggingIntegration would otherwise
+# turn into events. They are not actionable — the client simply went away — so
+# ``_drop_client_disconnect_noise`` filters both. See RD-71.
+#
+# 1. ``mcp.server.streamable_http`` calls ``logger.exception("Error handling POST
+#    request")`` with a live ``ClientDisconnect`` — matched on the exception type
+#    (walking the cause/context chain in case it's ever wrapped).
+# 2. ``mcp.server.lowlevel.server`` re-logs the same abort via
+#    ``logger.error("Received exception from stream: ...")`` with NO ``exc_info``,
+#    so there's nothing to type-match — matched on logger name + message prefix.
+_MCP_STREAM_LOGGER = "mcp.server.lowlevel.server"
+_MCP_STREAM_MESSAGE_PREFIX = "Received exception from stream"
+
+
+def _is_client_disconnect(exc: BaseException | None) -> bool:
+    """True if ``exc`` — or anything in its cause/context chain — is a client
+    disconnect. Guards against a cycle in the chain (self-referential
+    ``__context__``) with a seen-set."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, ClientDisconnect):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _drop_client_disconnect_noise(event: Event, hint: Hint) -> Event | None:
+    """``before_send`` hook: drop the two benign client-disconnect events the MCP
+    SDK emits for aborted ``POST /mcp`` requests (RD-71), letting every other
+    event — including genuine errors from the same loggers — through untouched.
+
+    Deliberately narrow: it matches the disconnect exception (case 1) or the
+    exact logger+message the SDK re-logs without an exception (case 2). It never
+    filters by logger alone."""
+    exc_info = hint.get("exc_info")
+    if exc_info and _is_client_disconnect(exc_info[1]):
+        return None
+
+    record = hint.get("log_record")
+    if (
+        record is not None
+        and record.name == _MCP_STREAM_LOGGER
+        and record.getMessage().startswith(_MCP_STREAM_MESSAGE_PREFIX)
+    ):
+        return None
+
+    return event
+
+
 def init_sentry(settings: Settings) -> None:
     """Initialise the Sentry SDK for a deployed environment.
 
@@ -118,6 +171,8 @@ def init_sentry(settings: Settings) -> None:
         # Substring-matching scrubber (see _SensitiveDataScrubber) so sensitive
         # keys are redacted even when nested or compound (e.g. access_token).
         event_scrubber=_SCRUBBER,
+        # Drop the benign MCP client-disconnect noise (RD-71) before it's sent.
+        before_send=_drop_client_disconnect_noise,
     )
     _logger.info(
         "sentry_initialized",

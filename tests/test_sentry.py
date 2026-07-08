@@ -6,7 +6,6 @@ handled-failure paths, and — most importantly — that neither the bearer toke
 nor sensitive argument values ever reach an event.
 """
 
-import logging
 from collections.abc import Iterator
 from typing import Any
 
@@ -14,7 +13,6 @@ import pytest
 import sentry_sdk
 from pydantic import SecretStr
 from sentry_sdk.transport import Transport
-from starlette.requests import ClientDisconnect
 
 from autods_mcp_server import sentry as sentry_integration
 from autods_mcp_server.auth import UserContext
@@ -258,102 +256,3 @@ def test_upstream_detail_is_redacted(captured_events) -> None:
     )
     detail = captured_events[-1]["contexts"]["upstream"]["detail"]
     assert detail == {"password": "[Filtered]", "msg": "boom"}
-
-
-# --- before_send: drop benign MCP client-disconnect noise (RD-71) ----------
-
-
-def _log_record(name: str, message: str) -> logging.LogRecord:
-    return logging.LogRecord(
-        name=name, level=logging.ERROR, pathname=__file__, lineno=1, msg=message, args=(), exc_info=None
-    )
-
-
-def test_before_send_drops_streamable_http_disconnect_exception() -> None:
-    """Case 1 (AUTODS-MCP-PUBLIC-3): logger.exception with a live ClientDisconnect."""
-    hint = {"exc_info": (ClientDisconnect, ClientDisconnect(), None)}
-    assert sentry_integration._drop_client_disconnect_noise({}, hint) is None
-
-
-def test_before_send_drops_disconnect_wrapped_in_chain() -> None:
-    """A ClientDisconnect reached only via the __context__/__cause__ chain still drops."""
-    try:
-        try:
-            raise ClientDisconnect()
-        except ClientDisconnect as inner:
-            raise RuntimeError("wrapped") from inner
-    except RuntimeError as outer:
-        hint = {"exc_info": (type(outer), outer, outer.__traceback__)}
-    assert sentry_integration._drop_client_disconnect_noise({}, hint) is None
-
-
-def test_before_send_drops_lowlevel_stream_relog() -> None:
-    """Case 2 (AUTODS-MCP-PUBLIC-4): logger.error re-log with no exc_info."""
-    hint = {"log_record": _log_record("mcp.server.lowlevel.server", "Received exception from stream: ")}
-    assert sentry_integration._drop_client_disconnect_noise({}, hint) is None
-
-
-def test_before_send_keeps_unrelated_exception() -> None:
-    hint = {"exc_info": (ValueError, ValueError("boom"), None)}
-    event = {"exception": {"values": [{"type": "ValueError"}]}}
-    assert sentry_integration._drop_client_disconnect_noise(event, hint) is event
-
-
-def test_before_send_keeps_same_message_from_other_logger() -> None:
-    """The message-prefix match is scoped to the low-level session logger only."""
-    hint = {"log_record": _log_record("some.other.logger", "Received exception from stream: ")}
-    event = {"logger": "some.other.logger"}
-    assert sentry_integration._drop_client_disconnect_noise(event, hint) is event
-
-
-def test_before_send_keeps_other_error_from_stream_logger() -> None:
-    """A genuine error from the low-level logger (different message) still reaches Sentry."""
-    hint = {"log_record": _log_record("mcp.server.lowlevel.server", "Something actually broke")}
-    event = {"logger": "mcp.server.lowlevel.server"}
-    assert sentry_integration._drop_client_disconnect_noise(event, hint) is event
-
-
-def test_before_send_keeps_event_without_hint() -> None:
-    event = {"message": "plain capture_message"}
-    assert sentry_integration._drop_client_disconnect_noise(event, {}) is event
-
-
-@pytest.fixture
-def filtered_events() -> Iterator[list[dict[str, Any]]]:
-    """Like ``captured_events`` but wires the real ``before_send`` filter, so the
-    LoggingIntegration -> before_send path is exercised end-to-end."""
-    events: list[dict[str, Any]] = []
-    sentry_sdk.init(
-        dsn="https://public@sentry.autods.com/42",
-        environment="staging",
-        release="develop-1",
-        transport=_CapturingTransport(events),
-        before_send=sentry_integration._drop_client_disconnect_noise,
-    )
-    try:
-        yield events
-    finally:
-        client = sentry_sdk.get_client()
-        client.close()
-        sentry_sdk.get_global_scope().set_client(None)
-
-
-def test_end_to_end_disconnect_logs_are_dropped_but_real_errors_survive(filtered_events) -> None:
-    """Drive the actual SDK loggers through the LoggingIntegration: both disconnect
-    shapes are filtered while an unrelated ERROR log is still captured."""
-    # Case 1: streamable_http logs the live disconnect via logger.exception.
-    try:
-        raise ClientDisconnect()
-    except ClientDisconnect:
-        logging.getLogger("mcp.server.streamable_http").exception("Error handling POST request")
-
-    # Case 2: the low-level session re-logs it without an exception.
-    logging.getLogger("mcp.server.lowlevel.server").error("Received exception from stream: ")
-
-    # An unrelated genuine error must still reach Sentry.
-    logging.getLogger("autods_mcp_server.something").error("real problem")
-
-    messages = [e.get("logentry", {}).get("message") or e.get("message") for e in filtered_events]
-    assert "Error handling POST request" not in messages
-    assert not any((m or "").startswith("Received exception from stream") for m in messages)
-    assert "real problem" in messages

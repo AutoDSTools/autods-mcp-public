@@ -7,8 +7,9 @@ AutoDSApi and ProductsResearch tooling to MCP-compatible clients
 This repo is the foundation for the Public MCP epic
 ([RD-50](https://autods.atlassian.net/browse/RD-50)). Phase A
 ([RD-51](https://autods.atlassian.net/browse/RD-51)) set up the repo
-skeleton, the FastAPI app, structured logging, origin / HTTPS-only
-middlewares and the local Docker workflow. Phase B
+skeleton, the FastAPI app, structured logging, the Origin-allowlist
+middleware, HTTPS enforcement (a startup settings validator plus a
+request-level `X-Forwarded-Proto` guard) and the local Docker workflow. Phase B
 ([RD-52](https://autods.atlassian.net/browse/RD-52)) adds the Cognito
 JWT verification stack. Phase C
 ([RD-53](https://autods.atlassian.net/browse/RD-53)) adds the MCP-spec
@@ -83,6 +84,8 @@ All settings come from environment variables. See
 | `RATE_LIMIT_PER_MINUTE` | no (default `60`) | Per-user token-bucket ceiling; `0` disables this bucket |
 | `RATE_LIMIT_PER_HOUR` | no (default `1000`) | Per-user token-bucket ceiling; `0` disables this bucket |
 | `MIXPANEL_TOKEN` | no | Mixpanel project token for the tool-call event. Unset → analytics disabled (the local default) |
+| `SENTRY_URL` | no | Self-hosted Sentry DSN (`https://<key>@sentry.autods.com/<id>`). Unset (or `MCP_ENV=local`) makes Sentry init a no-op. Delivered via External Secrets in staging/prod |
+| `SENTRY_ENVIRONMENT` | no (default `MCP_ENV`) | Sentry environment tag. The release is derived from `__version__` in code, not an env var |
 | `COGNITO_ATTR_NEGATIVE_CACHE_TTL_SECONDS` | no (default `21600`) | TTL for *negative* identity-cache entries (6h) |
 | `COGNITO_ATTR_POSITIVE_CACHE_TTL_SECONDS` | no (default `86400`) | TTL for *positive* identity-cache entries (24h); the id is immutable but the cached `email`/`name` can change, so positives expire and refresh |
 
@@ -97,6 +100,18 @@ needed. Tracking is fire-and-forget and fails open, and the event is skipped
 when the identity is unresolved (never keyed on the Cognito `sub`). Logs
 (`request` access line + `tool_call` audit line) carry `autods_user_id` +
 `email` alongside `cognito_username`.
+
+Error / performance reporting (RD-66): when `SENTRY_URL` is set (staging/prod,
+via External Secrets) the server reports to the self-hosted
+`sentry.autods.com`. Init is a **no-op** locally or with `SENTRY_URL` unset, so
+dev/test runs send no events. The handled upstream/internal failures the server
+returns as `CallToolResult(isError=True)` envelopes (see *Hardening* below) are
+captured explicitly, since Sentry's automatic exception capture never sees them.
+The bearer token is never passed into a Sentry scope, `send_default_pii` stays
+off, and a substring-matching event scrubber (`sentry.py`) over-redacts
+compound secret keys (`access_token`, `api_secret`, `user_password`, …); the
+user is still identified by stable id + email via `set_user`. Traces are sampled
+at 1%.
 
 ## Authentication (Phase B)
 
@@ -197,8 +212,11 @@ the tool's `inputSchema`.
 The manifests under `manifests/` are maintained by hand: add a new operation
 as a JSON entry with its `parameters`, `has_json_body`/`request_body_required`
 flags, `annotations` (`title` + at least one hint), and `base_url_key`. The
-server's D5 startup lint refuses to boot if any operation is missing its
-annotations, so a malformed manifest can't reach a client.
+server runs two D5 startup lints and refuses to boot if either fails, so a
+malformed manifest can't reach a client: (1) every operation must have an
+`annotations.title` and at least one hint; (2) integer enum fields in a
+`body_schema` (e.g. `product_status`, `status`, `region`, `site_id`,
+`buy_site_id`, `inventory_status`) must be typed as integers, never strings.
 
 ### Self-identity (RD-68)
 
@@ -252,6 +270,32 @@ choice here:
   connections and drains in-flight tool calls within the window
   (≤ Kubernetes `terminationGracePeriodSeconds`). The app lifespan
   closes the upstream HTTP and Redis clients on exit.
+
+## Troubleshooting
+
+- **Client shows a connection error right after authorizing (but retry works).** The first
+  authenticated call (`initialize`) resolves the caller's identity synchronously via a
+  blocking upstream call. On a cold cache with a slow upstream this can exceed the MCP
+  client's connect timeout (~10s for Claude) even though the server returns 200 and warms
+  the cache — the client's automatic retry then connects. Treat it as upstream latency, not
+  an auth/config failure; watch upstream response times.
+- **OAuth fails at the Cognito sign-in step** (`oauth_error=invalid_request`,
+  `oauth_error_subtype=provider_redirect`, etc.). The authorize/token exchange happens
+  directly between the MCP client and Cognito Hosted UI — it bypasses this server, so the
+  real error is in Cognito / CloudWatch, not the MCP logs. Triage by scope: *one* user
+  failing is usually a Cognito identity-linking collision (a native account and a federated
+  `Google_<sub>` identity sharing one email that Cognito won't auto-merge); *all* users
+  failing points at global config (scopes, redirect-URI allowlist, or `client_id`).
+- **Connecting a new MCP client.** Cognito exact-matches redirect URIs — no random loopback
+  ports, no path wildcards — so the client must use a stable callback that is both
+  pre-registered on the Cognito app client and listed in `MCP_REGISTRATION_REDIRECT_URIS`.
+  Claude does this with `--callback-port 2048`; Codex needs `mcp_oauth_callback_port` /
+  `mcp_oauth_callback_url` set (its default random port+path can never match). Loosening the
+  server-side allowlist does not help — Cognito still rejects it.
+- **A burst of ~60s `500`s on `POST /mcp`.** These surface as `ClientDisconnect` and are
+  usually benign client-side timeouts, but a *flood* means either the transport is hanging
+  (see the Sentry request-body gotcha in `CLAUDE.md`) or genuine slow upstream tool calls —
+  worth checking upstream latency, which the disconnect noise can otherwise mask.
 
 ## Lint / format / test
 

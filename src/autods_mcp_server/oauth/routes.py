@@ -1,7 +1,7 @@
 """FastAPI router for the OAuth discovery + DCR endpoints.
 
-Mounted by ``app.create_app`` so it sits behind the Origin allowlist and
-HTTPS-only middlewares like every other route. The three endpoints are
+Mounted by ``app.create_app`` so it sits behind the Origin allowlist
+middleware and the HTTPS guard like every other route. The three endpoints are
 deliberately small — all the policy lives in ``metadata`` and
 ``registration``; this module is just HTTP plumbing.
 """

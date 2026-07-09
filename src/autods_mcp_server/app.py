@@ -1,7 +1,8 @@
 """FastAPI application factory.
 
 Phase A — exposes /health and wires the foundational middlewares
-(request context, Origin allowlist, HTTPS-only). Phase C mounts the
+(request context, Origin allowlist); HTTPS is enforced by a settings
+validator plus a request-level X-Forwarded-Proto guard. Phase C mounts the
 OAuth discovery + DCR endpoints (PRM, AS metadata, /oauth/register).
 Phase D mounts the MCP Streamable HTTP transport at /mcp (behind the
 Phase B auth dependency) and the runtime that serves manifest-defined

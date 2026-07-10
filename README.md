@@ -61,6 +61,96 @@ curl http://localhost:8000/health
 used by `uv run` are picked up by the container. Source is bind-mounted
 into the container, so edits hot-reload.
 
+## Connecting a client
+
+The three deployed environments each expose the MCP Streamable HTTP
+transport at `/mcp`:
+
+| Environment | MCP endpoint |
+|---|---|
+| Local | `http://localhost:8000/mcp` |
+| Staging | `https://mcp-staging.autods.com/mcp` |
+| Production | `https://mcp.autods.com/mcp` |
+
+Every environment is an OAuth resource server (see *Authentication* /
+*OAuth discovery + DCR* below), so the client drives a browser sign-in
+against Cognito the first time it connects. Cognito **exact-matches**
+redirect URIs — no random loopback ports, no path wildcards — so each
+client must use a callback that is pre-registered on the Cognito app
+client *and* listed in that environment's `MCP_REGISTRATION_REDIRECT_URIS`
+(local: `.env`; staging/prod: the helm `values-*.yaml` in
+`autods-mcp-deploy`). The recipes below use callbacks that are already
+registered.
+
+### Claude Code
+
+Claude Code needs the fixed OAuth callback port `2048` (its
+`http://localhost:2048/callback` redirect is pre-registered in all three
+environments). Add the server, then run `/mcp` and complete the browser
+sign-in:
+
+```bash
+# Local (server running via `make run`)
+claude mcp add --transport http --callback-port 2048 autods-local http://localhost:8000/mcp
+
+# Staging
+claude mcp add --transport http --callback-port 2048 autods-staging https://mcp-staging.autods.com/mcp
+
+# Production
+claude mcp add --transport http --callback-port 2048 autods https://mcp.autods.com/mcp
+```
+
+Add `-s user` to register the server for every project instead of just
+the current one (the default scope is `local`).
+
+### Claude (web & desktop)
+
+The claude.ai web app and the Claude desktop app authenticate through the
+hosted `https://claude.ai/api/mcp/auth_callback` /
+`https://claude.com/api/mcp/auth_callback` redirects (both pre-registered),
+so there's nothing to configure by hand — two custom connectors are
+already published:
+
+- **AutoDS** → staging
+- **AutoDS Prod** → production
+
+Enable them from **Settings → Customize → Connectors** (the *Connectors*
+menu), then authorize when prompted.
+
+### Codex
+
+Codex's default OAuth callback uses a random port and path, which can
+never match Cognito's exact-match allowlist. Each environment therefore
+pre-registers a **static** callback on port `2048` with a fixed,
+per-environment path. Point Codex at it in `~/.codex/config.toml`:
+
+```toml
+# Staging
+[mcp_servers.autods-staging]
+url = "https://mcp-staging.autods.com/mcp"
+mcp_oauth_callback_port = 2048
+mcp_oauth_callback_url = "http://localhost:2048/callback/j1OexN-34suD"
+
+# Production
+[mcp_servers.autods]
+url = "https://mcp.autods.com/mcp"
+mcp_oauth_callback_port = 2048
+mcp_oauth_callback_url = "http://localhost:2048/callback/sSA0buWJ4hMg"
+```
+
+The callback path differs per environment (`j1OexN-34suD` for staging,
+`sSA0buWJ4hMg` for prod) — it must match the URI registered in that
+environment's `MCP_REGISTRATION_REDIRECT_URIS` exactly. Loosening the
+server-side allowlist does not help; Cognito still rejects a mismatch.
+
+### MCP Inspector (local debugging)
+
+The MCP Inspector at `http://localhost:6274` points at a local server
+(`make run`) and completes the OAuth flow via its
+`http://localhost:6274/oauth/callback` redirect (registered locally and in
+staging), then lists the manifest-defined tools. See *Manual end-to-end
+test (C6)* below.
+
 ## Configuration
 
 All settings come from environment variables. See
@@ -286,12 +376,14 @@ choice here:
   failing is usually a Cognito identity-linking collision (a native account and a federated
   `Google_<sub>` identity sharing one email that Cognito won't auto-merge); *all* users
   failing points at global config (scopes, redirect-URI allowlist, or `client_id`).
-- **Connecting a new MCP client.** Cognito exact-matches redirect URIs — no random loopback
-  ports, no path wildcards — so the client must use a stable callback that is both
-  pre-registered on the Cognito app client and listed in `MCP_REGISTRATION_REDIRECT_URIS`.
-  Claude does this with `--callback-port 2048`; Codex needs `mcp_oauth_callback_port` /
-  `mcp_oauth_callback_url` set (its default random port+path can never match). Loosening the
-  server-side allowlist does not help — Cognito still rejects it.
+- **Connecting a new MCP client.** See *Connecting a client* above for the per-environment
+  endpoints and the ready-made Claude Code / Claude web+desktop / Codex recipes. The root
+  cause any new client hits: Cognito exact-matches redirect URIs — no random loopback ports,
+  no path wildcards — so the client must use a stable callback that is both pre-registered on
+  the Cognito app client and listed in `MCP_REGISTRATION_REDIRECT_URIS`. Claude Code does this
+  with `--callback-port 2048`; Codex needs `mcp_oauth_callback_port` / `mcp_oauth_callback_url`
+  set (its default random port+path can never match). Loosening the server-side allowlist does
+  not help — Cognito still rejects it.
 - **A burst of ~60s `500`s on `POST /mcp`.** These surface as `ClientDisconnect` and are
   usually benign client-side timeouts, but a *flood* means either the transport is hanging
   (see the Sentry request-body gotcha in `CLAUDE.md`) or genuine slow upstream tool calls —

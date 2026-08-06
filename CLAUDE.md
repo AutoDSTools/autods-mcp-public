@@ -297,14 +297,14 @@ production incident; don't undo the guard without understanding why it's there.
   `request`/`tool_call` logs**, so `configure_logging` raises them to WARNING — guarded so
   `LOG_LEVEL=debug` still gets the firehose. Don't undo it; emit the audit line, not the
   library's.
-- **`uvx` builds a throwaway env that ignores `uv.lock`, and `mcp` is unpinned at the top
-  end.** `uvx --with mcp python …` resolves **mcp 2.0.0**, whose low-level `Server` dropped
-  the `list_tools` decorator, so the module dies at import with `'Server' object has no
-  attribute 'list_tools'` (it also picks Python 3.13 for a 3.12-only project). Always
-  `uv run`. The same hazard exists inside the project: `dependencies` declares
-  `mcp>=1.27.2` with **no upper bound**, so a fresh `uv lock` or `uv sync --upgrade` can
-  pull 2.x and break the server the same way. If you regenerate the lock, check the
-  resolved `mcp` version before trusting a green `uv sync`.
+- **`mcp` is capped `<2` on purpose, and `uvx` bypasses the cap entirely.** mcp 2.0.0
+  dropped the `list_tools` decorator from the low-level `Server`, so `mcp_transport`
+  dies at import with `'Server' object has no attribute 'list_tools'` — a green
+  `uv sync` followed by a server that will not boot. `dependencies` therefore pins
+  `mcp>=1.27.2,<2`; don't widen it as routine housekeeping, and if you do raise it,
+  port `_build_server` to the 2.x API in the same change. `uvx --with mcp python …`
+  ignores `uv.lock` and resolves 2.x regardless (it also picks Python 3.13 for a
+  3.12-only project) — always `uv run`.
 - **MCP SDK models take `_meta` by alias, and silently accept the wrong spelling.** On
   `types.Tool` / `types.Resource` the field is `meta` but its alias is `_meta`, and the
   models are `extra="allow"` without `populate_by_name` — so `types.Tool(meta={...})`

@@ -29,6 +29,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 <head>
 <meta charset="utf-8">
 <title>AutoDS CSP probe</title>
+<meta name="probe-build" content="7b8f9d9-1652">
 <style>
   :root { color-scheme: light dark; }
   html, body { min-height: 320px; }
@@ -50,7 +51,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 <body>
 <!-- Static, no JS. If this banner is missing the iframe never rendered;
      if it shows but the sections below stay empty, scripting is blocked. -->
-<div id="banner">AutoDS CSP probe — static HTML rendered</div>
+<div id="banner">AutoDS CSP probe — static HTML rendered (build 7b8f9d9-1652)</div>
 <div id="verdict">images 0/5 · csp: waiting · <button id="fs" type="button">request fullscreen</button></div>
 
 <h2>1 · Host-approved CSP (ui/initialize → sandbox.csp)</h2>
@@ -154,9 +155,38 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
     log("msgs", "→ ui/initialize threw: " + err);
   }
 
+  // Report everything back to our own origin so the run can be read without a
+  // screenshot. connect-src already allows this host (row 5 proved fetch works).
+  var REPORT_URL = "https://mcp-staging.autods.com/probe/report";
+  var sendReport = function (reason) {
+    var payload = {
+      build: "7b8f9d9-1652",
+      reason: reason,
+      href: location.href,
+      frame: { innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+               docHeight: Math.ceil(document.documentElement.getBoundingClientRect().height) },
+      visible: { bannerRendered: !!$("banner"), verdict: $("verdict") ? $("verdict").textContent : null },
+      images: passCount + "/5",
+      rows: Array.prototype.map.call(document.querySelectorAll(".row"), function (r) {
+        return r.textContent.trim();
+      }),
+      csp: $("csp").textContent,
+      violations: $("viol").textContent,
+      messages: $("msgs").textContent
+    };
+    try {
+      fetch(REPORT_URL, { method: "POST", mode: "cors",
+                          headers: { "content-type": "application/json" },
+                          body: JSON.stringify(payload) });
+    } catch (_) {}
+  };
+  setTimeout(function () { sendReport("t+4s"); }, 4000);
+  setTimeout(function () { sendReport("t+12s"); }, 12000);
+
   $("fs").addEventListener("click", function () {
     post({ jsonrpc: "2.0", id: 2, method: "ui/request-display-mode", params: { mode: "fullscreen" } });
     log("msgs", "→ requested display mode: fullscreen");
+    setTimeout(function () { sendReport("after-fullscreen-request"); }, 2000);
   });
 
   refreshVerdict();

@@ -38,10 +38,11 @@ PATCH (apply on the spike branch only):
 """
 
 import base64
+import json
 import pathlib
 from typing import Any
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
@@ -195,9 +196,62 @@ def register_probe(server: Server, tools: list[types.Tool]) -> list[types.Tool]:
     return [*tools, *_PROBE_TOOLS]
 
 
+# Last report the widget POSTed. Redis-backed so it survives the replica the
+# GET happens to land on; the in-process copy is the local/no-Redis fallback.
+_LAST_REPORT: dict[str, Any] = {}
+_REPORT_KEY = "rd82:probe:last_report"
+
+
 def mount_probe_routes(app: FastAPI) -> None:
     """Same-origin image for widget rows 4 and 5. Unauthenticated by design —
     it serves a generated fixture, never user data, and exists only under the flag."""
+
+    async def _redis():  # noqa: ANN202 - spike helper
+        from autods_mcp_server.redis_client import create_redis  # noqa: PLC0415
+        from autods_mcp_server.settings import get_settings  # noqa: PLC0415
+
+        return create_redis(get_settings())
+
+    @app.get("/probe/widget.html", include_in_schema=False)
+    async def probe_widget_html() -> Response:
+        """The exact widget bytes the ui:// resource serves, over plain HTTP, so the
+        deployed build can be identified without going through an MCP client."""
+        return Response(content=_WIDGET_HTML, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+    @app.post("/probe/report", include_in_schema=False)
+    async def probe_report_post(request: Request) -> dict[str, str]:
+        """The widget POSTs its own results here, so they can be read back without
+        a screenshot. Public and unauthenticated: it holds probe output only."""
+        body = await request.body()
+        try:
+            payload = json.loads(body or b"{}")
+        except ValueError:
+            payload = {"parse_error": body.decode("utf-8", "replace")[:2000]}
+        _LAST_REPORT.clear()
+        _LAST_REPORT.update(payload)
+        redis = await _redis()
+        if redis is not None:
+            try:
+                await redis.set(_REPORT_KEY, json.dumps(payload), ex=86400)
+            finally:
+                await redis.aclose()
+        return {"stored": "ok"}
+
+    @app.get("/probe/report", include_in_schema=False)
+    async def probe_report_get() -> Response:
+        redis = await _redis()
+        if redis is not None:
+            try:
+                raw = await redis.get(_REPORT_KEY)
+            finally:
+                await redis.aclose()
+            if raw:
+                return Response(content=raw, media_type="application/json", headers={"Cache-Control": "no-store"})
+        return Response(
+            content=json.dumps(_LAST_REPORT or {"empty": True}, indent=2),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/probe/img.jpg", include_in_schema=False)
     async def probe_img() -> Response:

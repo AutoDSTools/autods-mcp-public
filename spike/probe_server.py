@@ -32,10 +32,12 @@ image reached it. ``python spike/fixtures.py`` prints the expected values.
 """
 
 import base64
+import pathlib
 from typing import Any
 
 from mcp import types
 from mcp.server.lowlevel import Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
 
 try:  # importable both as `spike.probe_server` and as a bare script
@@ -44,6 +46,22 @@ except ImportError:  # pragma: no cover
     import fixtures
 
 SIZES = fixtures.SIZES
+
+# The same widget the staging server serves, so the MCP App can be debugged
+# through a local stdio connection instead of a deploy. Reports still POST to
+# staging's /probe/report, so both paths land in one place.
+WIDGET_URI = "ui://autods/probe"
+_WIDGET_HTML = (pathlib.Path(__file__).parent / "widget_probe.html").read_text(encoding="utf-8")
+_RESOURCE_DOMAINS = [
+    "https://m.media-amazon.com",
+    "https://cdn.shopify.com",
+    "https://*.ttcdn-us.com",
+    "https://ae01.alicdn.com",
+    "https://i.ebayimg.com",
+    "https://static.wixstatic.com",
+    "https://autods-scraper-images.s3-us-west-2.amazonaws.com",
+    "https://mcp-staging.autods.com",
+]
 
 
 _CACHE: dict[tuple[int, int, bool], str] = {}
@@ -90,6 +108,17 @@ _TOOLS = [
         annotations=types.ToolAnnotations(title="Image probe", readOnlyHint=True),
     ),
     types.Tool(
+        **{
+            # Alias, not field name: these models are extra="allow" without
+            # populate_by_name, so meta=... would silently serialise as "meta".
+            "name": "probe_widget",
+            "description": "RD-82 probe. Renders the CSP probe widget in hosts that support MCP Apps.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": types.ToolAnnotations(title="CSP probe widget", readOnlyHint=True),
+            "_meta": {"ui": {"resourceUri": WIDGET_URI}},
+        }
+    ),
+    types.Tool(
         name="probe_control",
         description="RD-82 baseline. Same envelope, zero images. Use to measure the token delta.",
         inputSchema={"type": "object", "properties": {}},
@@ -103,8 +132,34 @@ async def list_tools() -> list[types.Tool]:
     return _TOOLS
 
 
+@server.list_resources()
+async def list_resources() -> list[types.Resource]:
+    return [
+        types.Resource(
+            **{
+                "uri": WIDGET_URI,
+                "name": "AutoDS CSP probe",
+                "mimeType": "text/html;profile=mcp-app",
+                "_meta": {"ui": {"csp": {"resourceDomains": _RESOURCE_DOMAINS, "connectDomains": _RESOURCE_DOMAINS}}},
+            }
+        )
+    ]
+
+
+@server.read_resource()
+async def read_resource(uri: Any) -> list[ReadResourceContents]:
+    if str(uri) != WIDGET_URI:
+        raise ValueError(f"Unknown resource '{uri}'")
+    return [ReadResourceContents(content=_WIDGET_HTML, mime_type="text/html;profile=mcp-app")]
+
+
 @server.call_tool(validate_input=False)
 async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    if name == "probe_widget":
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text='{"ok": true, "widget": true}')],
+            structuredContent={"products": []},
+        )
     if name == "probe_control":
         return types.CallToolResult(content=[types.TextContent(type="text", text='{"ok": true, "images": 0}')])
 

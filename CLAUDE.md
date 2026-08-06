@@ -13,7 +13,7 @@ bearer token upstream.
 ## Commands
 
 Python **3.12 only** (`>=3.12,<3.13`). Dependencies are managed with **`uv`** — never use
-bare `pip`/`venv`/`python`.
+bare `pip`/`venv`/`python` — and not `uvx` either (see the mcp 2.0.0 gotcha).
 
 ```bash
 make install   # uv sync (installs dev + test groups)
@@ -297,6 +297,22 @@ production incident; don't undo the guard without understanding why it's there.
   `request`/`tool_call` logs**, so `configure_logging` raises them to WARNING — guarded so
   `LOG_LEVEL=debug` still gets the firehose. Don't undo it; emit the audit line, not the
   library's.
+- **`uvx` builds a throwaway env that ignores `uv.lock`, and `mcp` is unpinned at the top
+  end.** `uvx --with mcp python …` resolves **mcp 2.0.0**, whose low-level `Server` dropped
+  the `list_tools` decorator, so the module dies at import with `'Server' object has no
+  attribute 'list_tools'` (it also picks Python 3.13 for a 3.12-only project). Always
+  `uv run`. The same hazard exists inside the project: `dependencies` declares
+  `mcp>=1.27.2` with **no upper bound**, so a fresh `uv lock` or `uv sync --upgrade` can
+  pull 2.x and break the server the same way. If you regenerate the lock, check the
+  resolved `mcp` version before trusting a green `uv sync`.
+- **MCP SDK models take `_meta` by alias, and silently accept the wrong spelling.** On
+  `types.Tool` / `types.Resource` the field is `meta` but its alias is `_meta`, and the
+  models are `extra="allow"` without `populate_by_name` — so `types.Tool(meta={...})`
+  raises nothing, creates a junk extra field, and serialises it as `"meta"`. The client
+  never sees the metadata and there is no error anywhere. Construct via
+  `types.Tool(**{"_meta": {...}})`. Related, same family: `read_resource` returning a bare
+  `str` silently labels the payload `text/plain` — return
+  `[ReadResourceContents(content=..., mime_type=...)]` when the type matters.
 - **OAuth metadata URL fields are typed `str`, not `AnyUrl`/`HttpUrl`** — `AnyUrl` appends a
   trailing slash and breaks the byte-identity RFC 8414/9728 require between `issuer`/
   `resource` and the discovery URL. Don't "clean up" the types. Relatedly, the advertised

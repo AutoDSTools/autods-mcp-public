@@ -34,6 +34,10 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
   html, body { min-height: 320px; }
   body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px; }
   #banner { background: #2a7; color: #fff; padding: 6px 8px; border-radius: 4px; font-weight: 600; }
+  /* The verdict must be readable even if the host clamps the frame to ~150px,
+     so it sits above everything and stays on one line. */
+  #verdict { margin: 6px 0; padding: 6px 8px; border: 1px solid #8886; border-radius: 4px; font-weight: 600; }
+  #verdict button { font: inherit; margin-left: 6px; }
   h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
   .row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
   .badge { width: 74px; text-align: center; padding: 2px 0; border-radius: 3px; font-weight: 600; }
@@ -47,6 +51,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 <!-- Static, no JS. If this banner is missing the iframe never rendered;
      if it shows but the sections below stay empty, scripting is blocked. -->
 <div id="banner">AutoDS CSP probe — static HTML rendered</div>
+<div id="verdict">images 0/5 · csp: waiting · <button id="fs" type="button">request fullscreen</button></div>
 
 <h2>1 · Host-approved CSP (ui/initialize → sandbox.csp)</h2>
 <pre id="csp">waiting for host response…</pre>
@@ -94,6 +99,11 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
     post({ jsonrpc: "2.0", method: "ui/notifications/size-changed",
            params: { width: Math.ceil(window.innerWidth), height: height } });
   };
+  var passCount = 0, cspOk = false;
+  var refreshVerdict = function () {
+    $("verdict").firstChild.nodeValue =
+      "images " + passCount + "/5 · csp: " + (cspOk ? "approved by host" : "waiting") + " · ";
+  };
   var log = function (el, text) {
     var node = $(el);
     if (node.textContent === "none yet" || node.textContent === "waiting for host response…") node.textContent = "";
@@ -111,11 +121,19 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
   window.addEventListener("message", function (e) {
     var body;
     try { body = JSON.stringify(e.data); } catch (_) { body = String(e.data); }
-    log("msgs", "← " + e.origin + "  " + body.slice(0, 900));
+    log("msgs", "← " + e.origin + "  " + body.slice(0, 4000));
     // 1 — pull sandbox.csp out of whichever message carries it.
     try {
       var r = e.data && e.data.result;
-      if (r && r.sandbox) $("csp").textContent = JSON.stringify(r.sandbox, null, 2);
+      if (r && r.sandbox) {
+        $("csp").textContent = JSON.stringify(r.sandbox, null, 2);
+        cspOk = true; refreshVerdict();
+      }
+      // hostContext carries the container dimensions the host allots us —
+      // the likely explanation for a clamped frame. Show it in full.
+      if (r && r.hostContext) {
+        $("csp").textContent += "\n\nhostContext:\n" + JSON.stringify(r.hostContext, null, 2);
+      }
     } catch (_) {}
   });
 
@@ -126,7 +144,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
       jsonrpc: "2.0", id: 1, method: "ui/initialize",
       params: {
         appInfo: { name: "autods-csp-probe", version: "0.1.0" },
-        appCapabilities: {},
+        appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
         protocolVersion: "2025-11-21"
       }
     }, "*");
@@ -136,6 +154,12 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
     log("msgs", "→ ui/initialize threw: " + err);
   }
 
+  $("fs").addEventListener("click", function () {
+    post({ jsonrpc: "2.0", id: 2, method: "ui/request-display-mode", params: { mode: "fullscreen" } });
+    log("msgs", "→ requested display mode: fullscreen");
+  });
+
+  refreshVerdict();
   reportSize();
   window.addEventListener("load", reportSize);
   setInterval(reportSize, 1000);  // belt and braces while probes resolve
@@ -152,6 +176,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
       var b = $("b" + i);
       b.className = "badge " + (ok ? "pass" : "fail");
       b.textContent = ok ? "PASS" : "FAIL";
+      if (ok) { passCount += 1; refreshVerdict(); }
       if (note) row.querySelector(".label").textContent = name + " — " + note;
     };
 

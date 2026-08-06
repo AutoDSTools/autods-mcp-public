@@ -78,7 +78,7 @@ from autods_mcp_server.sentry import (
     capture_tool_exception,
     set_tool_context,
 )
-from autods_mcp_server.settings import McpEnv, Settings
+from autods_mcp_server.settings import Settings
 from autods_mcp_server.tools import build_tools
 from autods_mcp_server.urls import MCP_PATH
 
@@ -192,26 +192,10 @@ def _build_server(
     dispatcher: OperationDispatcher,
     rate_limiter: RateLimiter,
     mixpanel: MixpanelClient,
-    settings: Settings,
 ) -> Server:
     """Create the low-level MCP server with tool list/call handlers."""
     server: Server = Server("autods-mcp-server")
     tools = build_tools(registry.list_operations())  # D5 lint runs here.
-
-    # RD-82 spike (TEMPORARY, revert with the probe commit). Staging only: no
-    # new env var means nothing to change in the deploy repo, and prod/local are
-    # untouched — so production never exposes the probe and the tool-count tests
-    # keep passing. Registered before _build_validators so probe inputSchemas are
-    # boot-checked too. The import is function-level on purpose: it pulls in
-    # Pillow, which must not be imported on the production path.
-    probe_tool_names: frozenset[str] = frozenset()
-    handle_probe_call = None
-    if settings.mcp_env is McpEnv.staging:
-        from spike.probe_extension import PROBE_TOOL_NAMES, handle_probe_call, register_probe  # noqa: PLC0415
-
-        tools = register_probe(server, tools)
-        probe_tool_names = PROBE_TOOL_NAMES
-
     validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
 
     @server.list_tools()
@@ -233,10 +217,6 @@ def _build_server(
             # The /mcp route always sets this; reaching here means the transport
             # was driven without the auth seam — treat as an internal error.
             return error_result(ERROR_INTERNAL, f"No authenticated user context for tool '{name}'.")
-
-        # RD-82 spike: probe tools are served in-process, never forwarded upstream.
-        if name in probe_tool_names and handle_probe_call is not None:
-            return handle_probe_call(name, arguments)
 
         # Record the tool call ("the request the client was making") on the
         # Sentry scope. The single POST /mcp handler dispatches every tool, so the
@@ -424,7 +404,7 @@ def build_runtime(
         if identity_resolver is not None
         else build_identity_resolver(settings, redis, self_identity_resolver)
     )
-    server = _build_server(registry, dispatcher, rate_limiter, mixpanel, settings)
+    server = _build_server(registry, dispatcher, rate_limiter, mixpanel)
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
     # stays off so the spec's SSE framing is still used for the single

@@ -29,7 +29,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 <head>
 <meta charset="utf-8">
 <title>AutoDS CSP probe</title>
-<meta name="probe-build" content="7b8f9d9-1652">
+<meta name="probe-build" content="1d2104e-1752">
 <style>
   :root { color-scheme: light dark; }
   html, body { min-height: 320px; }
@@ -51,7 +51,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 <body>
 <!-- Static, no JS. If this banner is missing the iframe never rendered;
      if it shows but the sections below stay empty, scripting is blocked. -->
-<div id="banner">AutoDS CSP probe — static HTML rendered (build 7b8f9d9-1652)</div>
+<div id="banner">AutoDS CSP probe — static HTML rendered (build 1d2104e-1752)</div>
 <div id="verdict">images 0/5 · csp: waiting · <button id="fs" type="button">request fullscreen</button></div>
 
 <h2>1 · Host-approved CSP (ui/initialize → sandbox.csp)</h2>
@@ -100,7 +100,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
     post({ jsonrpc: "2.0", method: "ui/notifications/size-changed",
            params: { width: Math.ceil(window.innerWidth), height: height } });
   };
-  var passCount = 0, cspOk = false;
+  var passCount = 0, cspOk = false, initDone = false;
   var refreshVerdict = function () {
     $("verdict").firstChild.nodeValue =
       "images " + passCount + "/5 · csp: " + (cspOk ? "approved by host" : "waiting") + " · ";
@@ -123,12 +123,28 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
     var body;
     try { body = JSON.stringify(e.data); } catch (_) { body = String(e.data); }
     log("msgs", "← " + e.origin + "  " + body.slice(0, 4000));
+    if (e.data && e.data.method === "ui/notifications/host-context-changed") reportSize();
     // 1 — pull sandbox.csp out of whichever message carries it.
     try {
       var r = e.data && e.data.result;
-      if (r && r.sandbox) {
-        $("csp").textContent = JSON.stringify(r.sandbox, null, 2);
+      // The host nests this under hostCapabilities, not at the top level —
+      // reading r.sandbox left section 1 stuck on "waiting" even when the
+      // approval was right there in the payload.
+      var sandbox = r && ((r.hostCapabilities && r.hostCapabilities.sandbox) || r.sandbox);
+      if (sandbox) {
+        $("csp").textContent = JSON.stringify(sandbox, null, 2);
         cspOk = true; refreshVerdict();
+      }
+      if (r && !initDone) {
+        // Only now are we actually initialized. Announcing it before the
+        // response arrived was a protocol-order violation: web then ignored
+        // every later notification, including size-changed, which is why the
+        // frame stayed at its 150px default despite maxHeight being 5000.
+        initDone = true;
+        post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+        log("msgs", "→ notifications/initialized (after result)");
+        reportSize();
+        setTimeout(reportSize, 250);
       }
       // hostContext carries the container dimensions the host allots us —
       // the likely explanation for a clamped frame. Show it in full.
@@ -149,8 +165,7 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
         protocolVersion: "2025-11-21"
       }
     }, "*");
-    post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
-    log("msgs", "→ sent ui/initialize + notifications/initialized");
+    log("msgs", "→ sent ui/initialize (initialized follows the response)");
   } catch (err) {
     log("msgs", "→ ui/initialize threw: " + err);
   }

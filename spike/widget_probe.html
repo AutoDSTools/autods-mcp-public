@@ -31,7 +31,9 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 <title>AutoDS CSP probe</title>
 <style>
   :root { color-scheme: light dark; }
+  html, body { min-height: 320px; }
   body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px; }
+  #banner { background: #2a7; color: #fff; padding: 6px 8px; border-radius: 4px; font-weight: 600; }
   h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
   .row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
   .badge { width: 74px; text-align: center; padding: 2px 0; border-radius: 3px; font-weight: 600; }
@@ -42,6 +44,10 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
 </style>
 </head>
 <body>
+<!-- Static, no JS. If this banner is missing the iframe never rendered;
+     if it shows but the sections below stay empty, scripting is blocked. -->
+<div id="banner">AutoDS CSP probe — static HTML rendered</div>
+
 <h2>1 · Host-approved CSP (ui/initialize → sandbox.csp)</h2>
 <pre id="csp">waiting for host response…</pre>
 
@@ -73,10 +79,26 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
   ];
 
   var $ = function (id) { return document.getElementById(id); };
+
+  // The host sizes the iframe from what the app reports; a widget that never
+  // sends this collapses to zero height and looks like a rendering failure.
+  // Measurement mirrors the reference implementation (documentElement at
+  // max-content), so the reported height matches what the host expects.
+  var post = function (msg) { try { window.parent.postMessage(msg, "*"); } catch (_) {} };
+  var reportSize = function () {
+    var root = document.documentElement;
+    var prev = root.style.height;
+    root.style.height = "max-content";
+    var height = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = prev;
+    post({ jsonrpc: "2.0", method: "ui/notifications/size-changed",
+           params: { width: Math.ceil(window.innerWidth), height: height } });
+  };
   var log = function (el, text) {
     var node = $(el);
     if (node.textContent === "none yet" || node.textContent === "waiting for host response…") node.textContent = "";
     node.textContent += text + "\n";
+    reportSize();  // content grew — tell the host again
   };
 
   // 3 — CSP violations. Registered first so nothing is missed.
@@ -108,10 +130,15 @@ Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
         protocolVersion: "2025-11-21"
       }
     }, "*");
-    log("msgs", "→ sent ui/initialize");
+    post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+    log("msgs", "→ sent ui/initialize + notifications/initialized");
   } catch (err) {
     log("msgs", "→ ui/initialize threw: " + err);
   }
+
+  reportSize();
+  window.addEventListener("load", reportSize);
+  setInterval(reportSize, 1000);  // belt and braces while probes resolve
 
   // 2 — image probes.
   SOURCES.forEach(function (pair, i) {

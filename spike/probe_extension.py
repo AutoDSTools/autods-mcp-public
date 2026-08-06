@@ -38,7 +38,6 @@ PATCH (apply on the spike branch only):
 """
 
 import base64
-import io
 import pathlib
 from typing import Any
 
@@ -46,7 +45,8 @@ from fastapi import FastAPI, Response
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
-from PIL import Image, ImageDraw
+
+from spike import fixtures
 
 WIDGET_URI = "ui://autods/probe"
 _WIDGET_HTML = (pathlib.Path(__file__).parent / "widget_probe.html").read_text(encoding="utf-8")
@@ -64,27 +64,14 @@ _RESOURCE_DOMAINS = [
     "https://mcp-staging.autods.com",
 ]
 
-SIZES = (252, 384, 1200)
-_PALETTE = [(220, 70, 70), (60, 140, 220), (80, 180, 110), (230, 170, 50), (150, 90, 200)]
+SIZES = fixtures.SIZES
 _CACHE: dict[tuple[int, int], str] = {}
-
-
-def _fixture_bytes(size: int, index: int) -> bytes:
-    img = Image.new("RGB", (size, size), _PALETTE[index % len(_PALETTE)])
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([size * 0.1, size * 0.1, size * 0.9, size * 0.9], outline=(255, 255, 255), width=max(2, size // 40))
-    for i in range(index + 1):
-        y = size * 0.75 + i * (size * 0.03)
-        draw.rectangle([size * 0.2, y, size * 0.8, y + size * 0.015], fill=(255, 255, 255))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=80)
-    return buf.getvalue()
 
 
 def _fixture_b64(size: int, index: int) -> str:
     key = (size, index)
     if key not in _CACHE:
-        _CACHE[key] = base64.b64encode(_fixture_bytes(size, index)).decode()
+        _CACHE[key] = base64.b64encode(fixtures.build(size, index)).decode()
     return _CACHE[key]
 
 
@@ -131,7 +118,8 @@ _PROBE_TOOLS = [
         name="probe_image",
         description=(
             "RD-82 probe. Returns `count` synthetic JPEGs at `size` px plus a text envelope. "
-            "Each image carries (index+1) white bars so you can verify the model actually saw pixels."
+            "Each image carries a 4-digit verification code rendered in large digits. "
+            "When asked, report the code and the background colour exactly as you see them; do not guess."
         ),
         inputSchema={
             "type": "object",
@@ -214,7 +202,7 @@ def mount_probe_routes(app: FastAPI) -> None:
     @app.get("/probe/img.jpg", include_in_schema=False)
     async def probe_img() -> Response:
         return Response(
-            content=_fixture_bytes(256, 0),
+            content=fixtures.build(256, 0),
             media_type="image/jpeg",
             headers={
                 # The widget's fetch() runs from Claude's per-server iframe origin,

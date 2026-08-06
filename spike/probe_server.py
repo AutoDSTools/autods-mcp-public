@@ -150,7 +150,17 @@ async def list_resources() -> list[types.Resource]:
 async def read_resource(uri: Any) -> list[ReadResourceContents]:
     if str(uri) != WIDGET_URI:
         raise ValueError(f"Unknown resource '{uri}'")
-    return [ReadResourceContents(content=_WIDGET_HTML, mime_type="text/html;profile=mcp-app")]
+    # The CSP goes on BOTH the list entry and the read response. The host
+    # fetches the resource to render it; if it only reads _meta from the
+    # contents, a declaration that lives solely on the list entry is
+    # invisible and the sandbox comes back with no approved domains.
+    return [
+        ReadResourceContents(
+            content=_WIDGET_HTML,
+            mime_type="text/html;profile=mcp-app",
+            meta={"ui": {"csp": {"resourceDomains": _RESOURCE_DOMAINS, "connectDomains": _RESOURCE_DOMAINS}}},
+        )
+    ]
 
 
 @server.call_tool(validate_input=False)

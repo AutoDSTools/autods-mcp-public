@@ -191,7 +191,17 @@ def register_probe(server: Server, tools: list[types.Tool]) -> list[types.Tool]:
             raise ValueError(f"Unknown resource '{uri}'")
         # Returning a bare str is deprecated AND defaults the mime type to
         # text/plain, which would stop the host treating this as an MCP App.
-        return [ReadResourceContents(content=_WIDGET_HTML, mime_type="text/html;profile=mcp-app")]
+        # The CSP goes on BOTH the list entry and the read response. The host
+        # fetches the resource to render it; if it only reads _meta from the
+        # contents, a declaration that lives solely on the list entry is
+        # invisible and the sandbox comes back with no approved domains.
+        return [
+            ReadResourceContents(
+                content=_WIDGET_HTML,
+                mime_type="text/html;profile=mcp-app",
+                meta={"ui": {"csp": {"resourceDomains": _RESOURCE_DOMAINS, "connectDomains": _RESOURCE_DOMAINS}}},
+            )
+        ]
 
     return [*tools, *_PROBE_TOOLS]
 

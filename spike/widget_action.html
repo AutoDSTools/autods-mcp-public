@@ -23,6 +23,11 @@ Answered on build rd97-1 (claude.ai web, remote connector to staging):
   E  NO  — -32601 Method not found. serverTools covers calling, not discovery.
   Q4 the model is left actively WRONG, not merely uninformed: asked afterwards it
      insisted probe_action "has not been invoked" and could produce no marker.
+  D  DELIVERS but does not repair: the model reproduced the RD97-CTX marker when
+     asked, yet had not volunteered it and still denied any tool had run. D's text
+     is neutral by design, so it measures delivery only — F measures belief.
+  -- nothing whatsoever appears in the conversation when A/B fire: no consent
+     prompt, no turn, no tool block. The direct path is invisible on both sides.
 
 Build rd97-2 fixes C (params.content must be an array, not the bare object the
 published spec example shows) and adds F, since after Q4 the whole write-safety

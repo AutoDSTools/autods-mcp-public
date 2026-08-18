@@ -29,7 +29,7 @@ silence is a result, not a blank.
 | A | `tools/call` → `probe_action` | Q1 does it arrive, Q2 consent | **arrives, executes, no consent prompt** |
 | B | `tools/call` → `probe_action_app_only` | Q3 can the app call a model-hidden tool | **yes** |
 | C | `ui/message` | Q5 the model-mediated path | rejected — wrong `content` shape, fixed in rd97-2 |
-| D | `ui/update-model-context` | the mitigation for Q4 | accepted (`{}`); model-side effect still to confirm |
+| D | `ui/update-model-context` | Q4 mitigation — *delivery* | **delivered**: model reproduced the marker, but did not volunteer it and discounted it |
 | E | `tools/list` | Q3 from the app side | **-32601 Method not found** |
 | F | A then D, chained on the real marker | the candidate pattern for RD-92 | added in rd97-2 |
 
@@ -51,6 +51,30 @@ conversation until the tool returns it. So, after pressing A:
    finding in this ticket. Record the answer **verbatim** (criterion 4).
 
 Repeat 1–3 for C, and for D (ask it to repeat the `RD97-CTX-…` marker).
+
+### Delivery is not belief repair — keep them apart
+
+Measured on rd97-1: asked for the `RD97-CTX-…` marker the model **produced it
+correctly**, so `ui/update-model-context` does deliver. But it had not
+volunteered it, described it as not having been in its prior context, and then
+discounted it — *"that's the widget's recorded context marker, not a probe_action
+result marker; probe_action has not been invoked by any path"* — while four
+direct calls had in fact executed in that conversation.
+
+D's payload is deliberately neutral ("recorded context marker"), so that reading
+is defensible: **D measures delivery only.** Belief repair is button F, whose
+payload asserts completion. Do not credit D with F's result.
+
+Two things to do on F:
+
+* Ask the model what it believes happened, then whether it can name the marker.
+  A model that names the marker but still says nothing ran is *delivery without
+  belief repair*, and that distinction decides the RD-92 recommendation.
+* **Press F twice** and ask for both markers. The spec says a context update
+  "may overwrite previous updates" — if only the latest survives, a widget that
+  performs several writes can only ever inform the model about the last one,
+  which is a hard constraint on an offer picker that creates more than one
+  sourcing request.
 
 For B and E, also ask the model directly: *"list every tool you can see whose
 name starts with probe_"*. If `probe_action_app_only` is absent from the model's

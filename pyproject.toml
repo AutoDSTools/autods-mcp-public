@@ -1,6 +1,10 @@
 [project]
 name = "autods-mcp-server"
-version = "0.1.0"
+# Single-sourced from ``__version__`` in src/autods_mcp_server/__init__.py — that
+# literal is the one place the version is edited. It's what the app already
+# serves (the FastAPI ``version=``) and what tags the Sentry release, so the
+# package metadata follows it rather than drifting alongside it.
+dynamic = ["version"]
 description = "Public MCP server for AutoDS — exposes AutoDSApi/ProductsResearch tooling to MCP clients."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -38,6 +42,9 @@ test = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/autods_mcp_server/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/autods_mcp_server"]

@@ -123,8 +123,13 @@ instinct applied to a response payload (internal fields told to clients as "do n
 
 ## Versioning
 
-The `__version__` lives in `src/autods_mcp_server/__init__.py`. Bump it on
-every commit:
+The `__version__` lives in `src/autods_mcp_server/__init__.py` and is the only
+place it is edited: `pyproject.toml` declares `dynamic = ["version"]` and
+hatchling reads that literal (`[tool.hatch.version]`), so the package metadata,
+the FastAPI `version=`, and the Sentry release tag all move together. Don't add
+a `version =` back to `pyproject.toml` — that's what drifted before.
+
+Bump it on every commit:
 
 - **Patch** (`x.y.Z`) — fixes, logging, analytics, and other technical changes.
 - **Minor** (`x.Y.0`) — new business logic, or new endpoints added in manifests.

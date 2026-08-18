@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<!--
+RD-82 Phase 1.5 — MCP App (ui:// resource) CSP probe.
+
+Served as the body of resource ui://autods/probe with
+mimeType "text/html;profile=mcp-app". Self-contained on purpose: the production
+widgets we inspected inline everything and reference zero external asset hosts,
+so any external load failure here is unambiguously the host's policy, not ours.
+
+What it captures, in priority order:
+  1. sandbox.csp from the host's ui/initialize response — per the ext-apps
+     schema this is literally "CSP domains approved by the host", i.e. the host
+     telling us what it granted. This is the answer to Q7, not an inference.
+  2. Every inbound postMessage, verbatim — so we still learn the host's traffic
+     even if our request framing is wrong.
+  3. Load/error for five image sources (Q7 verification).
+  4. securitypolicyviolation events (blockedURI + effectiveDirective).
+
+Claude serves this iframe from a per-server origin, sha256(mcpServerUrl)[:32] +
+".claudemcpcontent.com". For our URLs that is:
+  staging https://mcp-staging.autods.com/mcp
+          -> 8f539ec4dfb7e2cb83157acf73aa0328.claudemcpcontent.com
+  prod    https://mcp.autods.com/mcp
+          -> b120346ee589e213206746b1830d3eca.claudemcpcontent.com
+Row 4 (fetch->blob) needs that origin allowed by CORS on our side; rows 1-3 and
+5 are plain <img> loads and need no CORS.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AutoDS CSP probe</title>
+<meta name="probe-build" content="1d2104e-1752">
+<style>
+  :root { color-scheme: light dark; }
+  html, body { min-height: 320px; }
+  body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px; }
+  #banner { background: #2a7; color: #fff; padding: 6px 8px; border-radius: 4px; font-weight: 600; }
+  /* The verdict must be readable even if the host clamps the frame to ~150px,
+     so it sits above everything and stays on one line. */
+  #verdict { margin: 6px 0; padding: 6px 8px; border: 1px solid #8886; border-radius: 4px; font-weight: 600; }
+  #verdict button { font: inherit; margin-left: 6px; }
+  h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+  .badge { width: 74px; text-align: center; padding: 2px 0; border-radius: 3px; font-weight: 600; }
+  .pending { background: #8884; } .pass { background: #2a7; color: #fff; } .fail { background: #d44; color: #fff; }
+  .label { flex: 1; word-break: break-all; opacity: .85; }
+  img.t { width: 40px; height: 40px; object-fit: cover; background: #8882; }
+  pre { background: #8881; padding: 8px; border-radius: 4px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<!-- Static, no JS. If this banner is missing the iframe never rendered;
+     if it shows but the sections below stay empty, scripting is blocked. -->
+<div id="banner">AutoDS CSP probe — static HTML rendered (build 1d2104e-1752)</div>
+<div id="verdict">images 0/5 · csp: waiting · <button id="fs" type="button">request fullscreen</button></div>
+
+<h2>1 · Host-approved CSP (ui/initialize → sandbox.csp)</h2>
+<pre id="csp">waiting for host response…</pre>
+
+<h2>2 · Image source probes</h2>
+<div id="rows"></div>
+
+<h2>3 · CSP violations</h2>
+<pre id="viol">none yet</pre>
+
+<h2>4 · All inbound postMessages</h2>
+<pre id="msgs">none yet</pre>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- fill these two from the deployment under test --------------------
+  var OWN_ORIGIN_IMAGE = "https://mcp-staging.autods.com/probe/img.jpg";
+  var TINY_DATA_URI =
+    "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+  // -----------------------------------------------------------------------
+
+  var SOURCES = [
+    ["amazon CDN", "https://m.media-amazon.com/images/I/31PPBbEggBL._SS256_.jpg"],
+    ["shopify CDN", "https://cdn.shopify.com/s/files/1/0751/4016/9797/files/da9f68513ac117e50e574c8221a08aff.jpg?v=1785908965&width=256"],
+    ["data: URI", TINY_DATA_URI],
+    ["own origin <img>", OWN_ORIGIN_IMAGE],
+    ["own origin fetch→blob", OWN_ORIGIN_IMAGE]
+  ];
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // The host sizes the iframe from what the app reports; a widget that never
+  // sends this collapses to zero height and looks like a rendering failure.
+  // Measurement mirrors the reference implementation (documentElement at
+  // max-content), so the reported height matches what the host expects.
+  var post = function (msg) { try { window.parent.postMessage(msg, "*"); } catch (_) {} };
+  var reportSize = function () {
+    var root = document.documentElement;
+    var prev = root.style.height;
+    root.style.height = "max-content";
+    var height = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = prev;
+    post({ jsonrpc: "2.0", method: "ui/notifications/size-changed",
+           params: { width: Math.ceil(window.innerWidth), height: height } });
+  };
+  var passCount = 0, cspOk = false, initDone = false;
+  var refreshVerdict = function () {
+    $("verdict").firstChild.nodeValue =
+      "images " + passCount + "/5 · csp: " + (cspOk ? "approved by host" : "waiting") + " · ";
+  };
+  var log = function (el, text) {
+    var node = $(el);
+    if (node.textContent === "none yet" || node.textContent === "waiting for host response…") node.textContent = "";
+    node.textContent += text + "\n";
+    reportSize();  // content grew — tell the host again
+  };
+
+  // 3 — CSP violations. Registered first so nothing is missed.
+  document.addEventListener("securitypolicyviolation", function (e) {
+    log("viol", "BLOCKED " + e.blockedURI + "\n  directive: " + e.effectiveDirective +
+                "\n  policy:    " + (e.originalPolicy || "").slice(0, 400));
+  });
+
+  // 4 — every inbound message, verbatim.
+  window.addEventListener("message", function (e) {
+    var body;
+    try { body = JSON.stringify(e.data); } catch (_) { body = String(e.data); }
+    log("msgs", "← " + e.origin + "  " + body.slice(0, 4000));
+    if (e.data && e.data.method === "ui/notifications/host-context-changed") reportSize();
+    // 1 — pull sandbox.csp out of whichever message carries it.
+    try {
+      var r = e.data && e.data.result;
+      // The host nests this under hostCapabilities, not at the top level —
+      // reading r.sandbox left section 1 stuck on "waiting" even when the
+      // approval was right there in the payload.
+      var sandbox = r && ((r.hostCapabilities && r.hostCapabilities.sandbox) || r.sandbox);
+      if (sandbox) {
+        $("csp").textContent = JSON.stringify(sandbox, null, 2);
+        cspOk = true; refreshVerdict();
+      }
+      if (r && !initDone) {
+        // Only now are we actually initialized. Announcing it before the
+        // response arrived was a protocol-order violation: web then ignored
+        // every later notification, including size-changed, which is why the
+        // frame stayed at its 150px default despite maxHeight being 5000.
+        initDone = true;
+        post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+        log("msgs", "→ notifications/initialized (after result)");
+        reportSize();
+        setTimeout(reportSize, 250);
+      }
+      // hostContext carries the container dimensions the host allots us —
+      // the likely explanation for a clamped frame. Show it in full.
+      if (r && r.hostContext) {
+        $("csp").textContent += "\n\nhostContext:\n" + JSON.stringify(r.hostContext, null, 2);
+      }
+    } catch (_) {}
+  });
+
+  // 1 — initiate the handshake. Exact framing is JSON-RPC 2.0 over postMessage;
+  // if the host rejects it, section 4 still records whatever it does send.
+  try {
+    window.parent.postMessage({
+      jsonrpc: "2.0", id: 1, method: "ui/initialize",
+      params: {
+        appInfo: { name: "autods-csp-probe", version: "0.1.0" },
+        appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+        protocolVersion: "2025-11-21"
+      }
+    }, "*");
+    log("msgs", "→ sent ui/initialize (initialized follows the response)");
+  } catch (err) {
+    log("msgs", "→ ui/initialize threw: " + err);
+  }
+
+  // Report everything back to our own origin so the run can be read without a
+  // screenshot. connect-src already allows this host (row 5 proved fetch works).
+  var REPORT_URL = "https://mcp-staging.autods.com/probe/report";
+  var sendReport = function (reason) {
+    var payload = {
+      build: "7b8f9d9-1652",
+      reason: reason,
+      href: location.href,
+      frame: { innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+               docHeight: Math.ceil(document.documentElement.getBoundingClientRect().height) },
+      visible: { bannerRendered: !!$("banner"), verdict: $("verdict") ? $("verdict").textContent : null },
+      images: passCount + "/5",
+      rows: Array.prototype.map.call(document.querySelectorAll(".row"), function (r) {
+        return r.textContent.trim();
+      }),
+      csp: $("csp").textContent,
+      violations: $("viol").textContent,
+      messages: $("msgs").textContent
+    };
+    try {
+      fetch(REPORT_URL, { method: "POST", mode: "cors",
+                          headers: { "content-type": "application/json" },
+                          body: JSON.stringify(payload) });
+    } catch (_) {}
+  };
+  setTimeout(function () { sendReport("t+4s"); }, 4000);
+  setTimeout(function () { sendReport("t+12s"); }, 12000);
+
+  $("fs").addEventListener("click", function () {
+    post({ jsonrpc: "2.0", id: 2, method: "ui/request-display-mode", params: { mode: "fullscreen" } });
+    log("msgs", "→ requested display mode: fullscreen");
+    setTimeout(function () { sendReport("after-fullscreen-request"); }, 2000);
+  });
+
+  refreshVerdict();
+  reportSize();
+  window.addEventListener("load", reportSize);
+  setInterval(reportSize, 1000);  // belt and braces while probes resolve
+
+  // 2 — image probes.
+  SOURCES.forEach(function (pair, i) {
+    var name = pair[0], url = pair[1];
+    var row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<span class="badge pending" id="b' + i + '">…</span>' +
+                    '<span class="label">' + name + '</span>';
+    $("rows").appendChild(row);
+    var mark = function (ok, note) {
+      var b = $("b" + i);
+      b.className = "badge " + (ok ? "pass" : "fail");
+      b.textContent = ok ? "PASS" : "FAIL";
+      if (ok) { passCount += 1; refreshVerdict(); }
+      if (note) row.querySelector(".label").textContent = name + " — " + note;
+    };
+
+    if (name.indexOf("fetch") !== -1) {
+      fetch(url, { mode: "cors" })
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+        .then(function (blob) {
+          var img = new Image();
+          img.className = "t";
+          img.onload = function () { mark(true, "blob " + blob.size + "B"); };
+          img.onerror = function () { mark(false, "blob URL blocked"); };
+          img.src = URL.createObjectURL(blob);
+          row.appendChild(img);
+        })
+        .catch(function (e) { mark(false, "fetch: " + e.message); });
+      return;
+    }
+
+    var img = new Image();
+    img.className = "t";
+    img.onload = function () { mark(true, img.naturalWidth + "x" + img.naturalHeight); };
+    img.onerror = function () { mark(false, "blocked or failed"); };
+    img.src = url;
+    row.appendChild(img);
+  });
+})();
+</script>
+</body>
+</html>

@@ -21,7 +21,7 @@ from autods_mcp_server.mcp_transport import build_runtime, mcp_lifespan, mount_m
 from autods_mcp_server.middleware import OriginAllowlistMiddleware, RequestContextMiddleware
 from autods_mcp_server.oauth import router as oauth_router
 from autods_mcp_server.sentry import init_sentry
-from autods_mcp_server.settings import get_settings
+from autods_mcp_server.settings import McpEnv, get_settings
 
 
 def create_app() -> FastAPI:
@@ -63,5 +63,13 @@ def create_app() -> FastAPI:
 
     application.include_router(oauth_router)
     mount_mcp(application, runtime)
+
+    # RD-82 spike (TEMPORARY, revert with the probe commit). Staging only —
+    # see the note in mcp_transport._build_server. Function-level import:
+    # spike.probe_extension pulls in Pillow, absent from the prod path.
+    if settings.mcp_env is McpEnv.staging:
+        from spike.probe_extension import mount_probe_routes  # noqa: PLC0415
+
+        mount_probe_routes(application)
 
     return application

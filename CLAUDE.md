@@ -301,8 +301,10 @@ production incident; don't undo the guard without understanding why it's there.
   dropped the `list_tools` decorator from the low-level `Server`, so `mcp_transport`
   dies at import with `'Server' object has no attribute 'list_tools'` — a green
   `uv sync` followed by a server that will not boot. `dependencies` therefore pins
-  `mcp>=1.27.2,<2`; don't widen it as routine housekeeping, and if you do raise it,
-  port `_build_server` to the 2.x API in the same change. `uvx --with mcp python …`
+  `mcp>=1.29.0,<2` — 1.29.0 is the newest 1.x, and the maintenance line only fixes
+  its newest release, so stay on it. Don't widen the cap as routine housekeeping; the
+  2.x port is scoped in RD-99 and must move `_build_server` in the same change.
+  `uvx --with mcp python …`
   ignores `uv.lock` and resolves 2.x regardless (it also picks Python 3.13 for a
   3.12-only project) — always `uv run`.
 - **MCP SDK models take `_meta` by alias, and silently accept the wrong spelling.** On

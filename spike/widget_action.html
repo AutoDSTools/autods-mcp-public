@@ -7,13 +7,26 @@ Question: can a widget invoke a tool? RD-82 proved the widget renders and can
 postMessage to the host; it never issued a tools/call. This page issues one, and
 records what comes back.
 
-Five buttons, each a separate measurement:
+Six buttons, each a separate measurement:
 
   A  tools/call -> probe_action              the direct path (question 1 + 2)
   B  tools/call -> probe_action_app_only     can the app call a model-hidden tool (q3)
   C  ui/message                              the model-mediated path (q5)
   D  ui/update-model-context                 the mitigation for q4, measured not assumed
   E  tools/list                              what the host exposes to the APP, not the model
+  F  A then D, chained on the real marker    the candidate pattern for RD-92
+
+Answered on build rd97-1 (claude.ai web, remote connector to staging):
+
+  A  YES — reaches the server and executes, 706-3400ms, and NO consent prompt.
+  B  YES — the app can call a tool the model cannot see.
+  E  NO  — -32601 Method not found. serverTools covers calling, not discovery.
+  Q4 the model is left actively WRONG, not merely uninformed: asked afterwards it
+     insisted probe_action "has not been invoked" and could produce no marker.
+
+Build rd97-2 fixes C (params.content must be an array, not the bare object the
+published spec example shows) and adds F, since after Q4 the whole write-safety
+story for RD-92 turns on whether a context update repairs the model's view.
 
 Every request is recorded with its response, its JSON-RPC error, or — the case
 that matters most here — NO RESPONSE. All six RD-82 protocol bugs failed
@@ -31,7 +44,7 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
 <head>
 <meta charset="utf-8">
 <title>AutoDS click-to-action probe</title>
-<meta name="probe-build" content="rd97-1">
+<meta name="probe-build" content="rd97-2">
 <style>
   :root { color-scheme: light dark; }
   html, body { min-height: 420px; }
@@ -50,7 +63,7 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
 <body>
 <!-- Static, no JS. Missing banner => the iframe never rendered; banner but empty
      sections => scripting is blocked. -->
-<div id="banner">AutoDS click-to-action probe — static HTML rendered (build rd97-1)</div>
+<div id="banner">AutoDS click-to-action probe — static HTML rendered (build rd97-2)</div>
 <div id="verdict">waiting for host…</div>
 
 <h2>1 · Host capabilities (ui/initialize result)</h2>
@@ -63,6 +76,7 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
   <button id="bC" type="button">C · ui/message</button>
   <button id="bD" type="button">D · update-model-context</button>
   <button id="bE" type="button">E · tools/list</button>
+  <button id="bF" type="button">F · direct + context update</button>
 </div>
 <div class="hint">
   After A, ask the model what the last tool call returned — <b>without pasting the marker
@@ -106,7 +120,7 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
   };
 
   var rid = 100;
-  var pending = {};          // id -> {label, sentAt, timer}
+  var pending = {};          // id -> {label, started, timer, onResult}
   var transcript = [];       // everything, for the report POST
   var initDone = false;
 
@@ -130,13 +144,14 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
 
   // Send a JSON-RPC request and record how it resolves. A request that is never
   // answered resolves as NO RESPONSE — the failure shape RD-82 kept hitting.
-  var request = function (label, method, params) {
+  var request = function (label, method, params, onResult) {
     var id = ++rid;
     var body = { jsonrpc: "2.0", id: id, method: method, params: params };
     var started = Date.now();
     pending[id] = {
       label: label,
       started: started,
+      onResult: onResult,
       timer: setTimeout(function () {
         if (pending[id]) {
           delete pending[id];
@@ -159,6 +174,10 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
       note("[" + entry.label + "] ✗ ERROR after " + ms + "ms: " + JSON.stringify(data.error));
     } else {
       note("[" + entry.label + "] ✓ RESULT after " + ms + "ms: " + JSON.stringify(data.result).slice(0, 2000));
+      if (entry.onResult) {
+        try { entry.onResult(data.result); }
+        catch (err) { note("[" + entry.label + "] onResult threw: " + err); }
+      }
     }
     return true;
   };
@@ -197,7 +216,7 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
 
   var sendReport = function (reason) {
     var payload = {
-      build: "rd97-1",
+      build: "rd97-2",
       reason: reason,
       href: location.href,
       frame: { innerWidth: window.innerWidth, innerHeight: window.innerHeight },
@@ -232,16 +251,18 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
 
   $("bC").addEventListener("click", function () {
     var n = nonce();
-    // Per the ext-apps spec: role + a single content block. The model, not the
-    // widget, decides whether to call the tool — that is the whole distinction
-    // being measured, so the text has to be an unambiguous instruction.
+    // params.content must be an ARRAY. The published spec example shows a bare
+    // object ({type, text}) and claude.ai rejects that with -32603 "expected
+    // array, received object" — a spec-vs-implementation divergence, measured on
+    // the rd97-1 build. The model, not the widget, decides whether to call the
+    // tool, so the text has to be an unambiguous instruction.
     request("C ui/message", "ui/message", {
       role: "user",
-      content: {
+      content: [{
         type: "text",
         text: "Call the tool probe_action with arguments nonce=\"" + n +
               "\" and path=\"ui-message\", then tell me the marker it returned."
-      }
+      }]
     });
   });
 
@@ -256,7 +277,40 @@ result.hostCapabilities.sandbox, not result.sandbox (bug 6).
   $("bE").addEventListener("click", function () {
     // What the host lets the APP see. Compare with what the model sees in the
     // same conversation: that difference is the answer to question 3.
+    // Measured on rd97-1: claude.ai answers -32601 Method not found, so
+    // serverTools covers calling but not discovery — an app must know its tool
+    // names up front. Kept as a regression check.
     request("E tools/list", "tools/list", {});
+  });
+
+  // The candidate pattern for RD-92, end to end: do the work directly, then tell
+  // the model it happened. rd97-1 established that the direct path leaves the
+  // model not merely uninformed but actively wrong ("probe_action has not been
+  // invoked"), so the write-safety story depends on whether this second step
+  // repairs that. Chained on the real result, not a fabricated one — the marker
+  // handed to the model is the one the server minted.
+  $("bF").addEventListener("click", function () {
+    var n = nonce();
+    request("F direct+context", "tools/call", {
+      name: "probe_action",
+      arguments: { nonce: n, path: "direct-then-context", note: "widget button F" }
+    }, function (result) {
+      var marker = result && result.structuredContent && result.structuredContent.marker;
+      if (!marker) {
+        note("[F] no marker in the result — cannot chain the context update");
+        return;
+      }
+      request("F context update", "ui/update-model-context", {
+        content: [{
+          type: "text",
+          text: "The user completed an action in the click-to-action widget. The tool " +
+                "probe_action ran and returned marker " + marker + " for nonce " + n +
+                ". This work is already done; do not repeat it."
+        }]
+      });
+      note("[F] chained context update with the server's marker " + marker +
+           " — ask the model to repeat it, do not paste it.");
+    });
   });
 
   // --- handshake ------------------------------------------------------------

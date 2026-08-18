@@ -24,13 +24,14 @@ Each button records its own request, the host's response, and — the case that
 matters — **NO RESPONSE after 8s**. All six RD-82 bugs failed silently, so
 silence is a result, not a blank.
 
-| | Button | Answers |
-|---|---|---|
-| A | `tools/call` → `probe_action` | Q1 does it arrive, Q2 is there a consent step |
-| B | `tools/call` → `probe_action_app_only` | Q3 can the app call a model-hidden tool |
-| C | `ui/message` | Q5 the model-mediated path |
-| D | `ui/update-model-context` | the mitigation for Q4, measured not assumed |
-| E | `tools/list` | Q3 from the app side — what the host shows the *app* |
+| | Button | Answers | Result on rd97-1 |
+|---|---|---|---|
+| A | `tools/call` → `probe_action` | Q1 does it arrive, Q2 consent | **arrives, executes, no consent prompt** |
+| B | `tools/call` → `probe_action_app_only` | Q3 can the app call a model-hidden tool | **yes** |
+| C | `ui/message` | Q5 the model-mediated path | rejected — wrong `content` shape, fixed in rd97-2 |
+| D | `ui/update-model-context` | the mitigation for Q4 | accepted (`{}`); model-side effect still to confirm |
+| E | `tools/list` | Q3 from the app side | **-32601 Method not found** |
+| F | A then D, chained on the real marker | the candidate pattern for RD-92 | added in rd97-2 |
 
 ## The measurement discipline that makes Q4 answerable
 
@@ -68,10 +69,18 @@ design, which is a design decision, not more debugging.
 Taken from the ext-apps spec (2026-01-26), not guessed:
 
 * app → host tool call: `{"method": "tools/call", "params": {"name": …, "arguments": {…}}}`
-* app → host message: `{"method": "ui/message", "params": {"role": "user", "content": {"type": "text", "text": …}}}`
+* app → host message: `{"method": "ui/message", "params": {"role": "user", "content": [{"type": "text", "text": …}]}}`
+  — **`content` is an array.** The published spec example shows a bare object and
+  claude.ai rejects it with `-32603 … expected array, received object`. Measured,
+  not read: trust the host over the example here.
 * tool visibility: `_meta.ui.visibility`, values `["model"]` / `["app"]` /
-  both (default both) — **not** a top-level `visibility` field.
+  both (default both) — **not** a top-level `visibility` field. Honoured by
+  claude.ai web; ignored by clients with no MCP Apps support (Claude Code lists
+  and calls the app-only tool quite happily, which is what makes it the control).
 * model context: `{"method": "ui/update-model-context", "params": {"content": [ContentBlock]}}`
+* `tools/list` from an app: **not supported** (`-32601`). `serverTools` in
+  `hostCapabilities` means the app may *call* tools, not enumerate them — a widget
+  has to know its tool names up front.
 
 ## On completion
 

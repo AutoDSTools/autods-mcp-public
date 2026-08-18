@@ -1,40 +1,32 @@
-"""RD-82 Phase 1.5/2 — probe plumbing bolted onto the real server.
+"""Probe plumbing bolted onto the real server — RD-82 (images) + RD-97 (actions).
 
-Throwaway. Lives only on ``spike/RD-82-image-probe``; never merge it. Everything
-here is inert unless ``MCP_IMAGE_PROBE=true``, and it is deliberately kept in
-``spike/`` so the production diff is three guarded lines (see PATCH below).
+Throwaway, and on ``develop`` only because staging deploys from it. **Revert the
+whole spike stack once RD-97's measurements are on the ticket.**
 
-What it adds when enabled:
+Everything here is inert unless ``MCP_ENV=staging``. That gate is the reason no
+deploy-repo change is needed (``values-staging.yaml`` already sets it) and why
+prod and local behave exactly as before — the production path never registers a
+probe tool and never imports Pillow. The hooks are two guarded blocks, in
+``mcp_transport._build_server`` and ``app.create_app``.
 
-* ``ui://autods/probe`` — the MCP App resource serving ``widget_probe.html``,
-  with ``_meta.ui.csp.resourceDomains`` declaring the supplier CDNs we care
-  about. Whether claude.ai honours that declaration is exactly Q7; the widget
-  reports back the host's own ``sandbox.csp`` either way.
-* ``probe_widget`` — a tool carrying ``_meta.ui.resourceUri`` so the host knows
-  to render the resource, returning ``structuredContent`` with real product
-  rows (URLs only, no bytes — the zero-token path).
-* ``probe_image`` / ``probe_control`` — the Phase 1 tools, so claude.ai web can
-  be measured on the same fixtures as the local stdio run.
-* ``GET /probe/img.jpg`` — a same-origin image with permissive CORS, so the
-  widget can test both ``<img src>`` and ``fetch``→blob against our own origin.
+RD-82 (images, answered — see FINDINGS.md):
 
-PATCH (apply on the spike branch only):
+* ``ui://autods/probe`` — MCP App resource serving ``widget_probe.html``, with
+  ``_meta.ui.csp.resourceDomains`` declaring the supplier CDNs we care about.
+* ``probe_widget`` — carries ``_meta.ui.resourceUri`` so the host renders the
+  resource; returns ``structuredContent`` rows (URLs only, the zero-token path).
+* ``probe_image`` / ``probe_control`` — the Phase 1 image/no-image pair.
+* ``GET /probe/img.jpg`` — same-origin image with permissive CORS.
 
-``mcp_transport.py`` — at the end of ``_build_server``, before ``return server``::
+RD-97 (click-to-action, open) lives in ``action_probe`` and is merged in here so
+both spikes share one gate, one resource handler, and one in-process dispatch:
+``probe_action``, ``probe_action_app_only``, ``probe_action_widget``, the
+``ui://autods/action-probe`` resource, and the ``/probe/action/*`` readback
+routes.
 
-    if settings.image_probe_enabled:                       # RD-82 spike
-        from spike.probe_extension import register_probe   # noqa: PLC0415
-        tools = register_probe(server, tools)
-
-``app.py`` — after ``mount_mcp(application, runtime)``::
-
-    if settings.image_probe_enabled:                       # RD-82 spike
-        from spike.probe_extension import mount_probe_routes  # noqa: PLC0415
-        mount_probe_routes(application)
-
-``settings.py`` — one field::
-
-    image_probe_enabled: bool = Field(default=False, validation_alias="MCP_IMAGE_PROBE")
+Both widgets are subject to the six silent protocol bugs recorded in
+FINDINGS.md — in particular the ``_meta`` alias trap below, and the rule that
+the CSP must be declared on the ``resources/read`` response, not only the list.
 """
 
 import base64
@@ -47,7 +39,7 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
 
-from spike import fixtures
+from spike import action_probe, fixtures
 
 WIDGET_URI = "ui://autods/probe"
 _WIDGET_HTML = (pathlib.Path(__file__).parent / "widget_probe.html").read_text(encoding="utf-8")
@@ -141,11 +133,27 @@ _PROBE_TOOLS = [
     ),
 ]
 
-PROBE_TOOL_NAMES = frozenset(t.name for t in _PROBE_TOOLS)
+# RD-97 rides along on the same staging gate and the same in-process dispatch.
+PROBE_TOOL_NAMES = frozenset(t.name for t in _PROBE_TOOLS) | action_probe.ACTION_TOOL_NAMES
+
+
+async def handle_probe_call_async(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    user_sub: str | None,
+    autods_user_id: str | None,
+) -> types.CallToolResult:
+    """Single entry point for the transport. RD-97's handler is async (it writes
+    the call record to Redis) and needs the caller identity; RD-82's is neither,
+    so the split stays here rather than in ``mcp_transport``."""
+    if name in action_probe.ACTION_TOOL_NAMES:
+        return await action_probe.handle_action_call(name, arguments, user_sub=user_sub, autods_user_id=autods_user_id)
+    return handle_probe_call(name, arguments)
 
 
 def handle_probe_call(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
-    """Serve a probe tool. Callers must check ``name in PROBE_TOOL_NAMES`` first."""
+    """Serve an RD-82 probe tool. Callers must check ``name in PROBE_TOOL_NAMES`` first."""
     if name == "probe_control":
         return types.CallToolResult(content=[types.TextContent(type="text", text='{"ok": true, "images": 0}')])
 
@@ -182,11 +190,22 @@ def register_probe(server: Server, tools: list[types.Tool]) -> list[types.Tool]:
                         "ui": {"csp": {"resourceDomains": _RESOURCE_DOMAINS, "connectDomains": _RESOURCE_DOMAINS}}
                     },
                 }
-            )
+            ),
+            action_probe.action_resource(),  # RD-97
         ]
 
     @server.read_resource()
     async def read_resource(uri: Any) -> list[ReadResourceContents]:
+        # RD-97's widget, same contract: mime type set explicitly and the CSP
+        # repeated on the read response, because the host renders from the read.
+        if str(uri) == action_probe.ACTION_WIDGET_URI:
+            return [
+                ReadResourceContents(
+                    content=action_probe.action_widget_html(),
+                    mime_type="text/html;profile=mcp-app",
+                    meta=action_probe.action_read_meta(),
+                )
+            ]
         if str(uri) != WIDGET_URI:
             raise ValueError(f"Unknown resource '{uri}'")
         # Returning a bare str is deprecated AND defaults the mime type to
@@ -203,7 +222,7 @@ def register_probe(server: Server, tools: list[types.Tool]) -> list[types.Tool]:
             )
         ]
 
-    return [*tools, *_PROBE_TOOLS]
+    return [*tools, *_PROBE_TOOLS, *action_probe.action_tools()]
 
 
 # Last report the widget POSTed. Redis-backed so it survives the replica the
@@ -262,6 +281,8 @@ def mount_probe_routes(app: FastAPI) -> None:
             media_type="application/json",
             headers={"Cache-Control": "no-store"},
         )
+
+    action_probe.mount_action_routes(app)  # RD-97 readback + report endpoints.
 
     @app.get("/probe/img.jpg", include_in_schema=False)
     async def probe_img() -> Response:

@@ -14,8 +14,8 @@ dependencies = [
     "httpx>=0.27.0",
     "mcp>=1.27.2,<2",
     "mixpanel>=4.10.0",
-    # RD-82 spike only — required by spike/probe_extension.py so the staging
-    # image can build the probe fixtures. MUST NOT be merged to develop.
+    # RD-82/RD-97 spike only — required by spike/probe_extension.py so the staging
+    # image can build the probe fixtures. Goes out with the spike revert.
     "pillow>=10.0.0",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",

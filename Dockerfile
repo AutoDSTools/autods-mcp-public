@@ -22,9 +22,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY src ./src
 COPY manifests ./manifests
 COPY README.md ./README.md
-# RD-82 spike (TEMPORARY — revert with the rest of the probe commit). The probe
-# module is imported only when MCP_IMAGE_PROBE=true; without this COPY the
-# flag-on path would die at boot with ModuleNotFoundError.
+# RD-82/RD-97 spike (TEMPORARY — revert with the rest of the probe commits). The
+# probe modules are imported only when MCP_ENV=staging; without this COPY the
+# staging path dies at boot with ModuleNotFoundError.
 COPY spike ./spike
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev
@@ -32,8 +32,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 EXPOSE 8000
 
 ENV PATH="/app/.venv/bin:${PATH}"
-# RD-82 spike (TEMPORARY): /app is not implicitly on sys.path under the uvicorn
-# console script, so `import spike.probe_extension` needs it explicitly.
+# RD-82/RD-97 spike (TEMPORARY): /app is not implicitly on sys.path under the
+# uvicorn console script, so `import spike.probe_extension` needs it explicitly.
 ENV PYTHONPATH=/app
 
 # --timeout-graceful-shutdown (F5): on SIGTERM uvicorn stops accepting new

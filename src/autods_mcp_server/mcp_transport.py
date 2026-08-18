@@ -205,9 +205,13 @@ def _build_server(
     # boot-checked too. The import is function-level on purpose: it pulls in
     # Pillow, which must not be imported on the production path.
     probe_tool_names: frozenset[str] = frozenset()
-    handle_probe_call = None
+    handle_probe_call_async = None
     if settings.mcp_env is McpEnv.staging:
-        from spike.probe_extension import PROBE_TOOL_NAMES, handle_probe_call, register_probe  # noqa: PLC0415
+        from spike.probe_extension import (  # noqa: PLC0415
+            PROBE_TOOL_NAMES,
+            handle_probe_call_async,
+            register_probe,
+        )
 
         tools = register_probe(server, tools)
         probe_tool_names = PROBE_TOOL_NAMES
@@ -234,9 +238,18 @@ def _build_server(
             # was driven without the auth seam — treat as an internal error.
             return error_result(ERROR_INTERNAL, f"No authenticated user context for tool '{name}'.")
 
-        # RD-82 spike: probe tools are served in-process, never forwarded upstream.
-        if name in probe_tool_names and handle_probe_call is not None:
-            return handle_probe_call(name, arguments)
+        # RD-82/RD-97 spike: probe tools are served in-process, never forwarded
+        # upstream. Deliberately placed *after* the user_context check, so a
+        # widget-issued call is subject to the same auth seam as a model-issued
+        # one — whether it arrives with the caller's identity is exactly what
+        # RD-97 needs to know about write safety.
+        if name in probe_tool_names and handle_probe_call_async is not None:
+            return await handle_probe_call_async(
+                name,
+                arguments,
+                user_sub=user_context.sub,
+                autods_user_id=user_context.autods_user_id,
+            )
 
         # Record the tool call ("the request the client was making") on the
         # Sentry scope. The single POST /mcp handler dispatches every tool, so the

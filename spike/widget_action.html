@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<!--
+RD-97 — click-to-action probe. Served as the body of ui://autods/action-probe
+with mimeType "text/html;profile=mcp-app".
+
+Question: can a widget invoke a tool? RD-82 proved the widget renders and can
+postMessage to the host; it never issued a tools/call. This page issues one, and
+records what comes back.
+
+Five buttons, each a separate measurement:
+
+  A  tools/call -> probe_action              the direct path (question 1 + 2)
+  B  tools/call -> probe_action_app_only     can the app call a model-hidden tool (q3)
+  C  ui/message                              the model-mediated path (q5)
+  D  ui/update-model-context                 the mitigation for q4, measured not assumed
+  E  tools/list                              what the host exposes to the APP, not the model
+
+Every request is recorded with its response, its JSON-RPC error, or — the case
+that matters most here — NO RESPONSE. All six RD-82 protocol bugs failed
+silently, so a request that simply never gets answered is the expected shape of
+failure and must be distinguishable from one that was refused. Hence the
+per-request timeout: silence is recorded as a result, not left blank.
+
+Handshake order is load-bearing and is RD-82's, unchanged:
+  ui/initialize -> wait for the RESPONSE -> ui/notifications/initialized -> size-changed
+Announcing initialized before the response arrives makes claude.ai ignore every
+later notification, sizing included (RD-82 bug 5). The approved CSP is at
+result.hostCapabilities.sandbox, not result.sandbox (bug 6).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AutoDS click-to-action probe</title>
+<meta name="probe-build" content="rd97-1">
+<style>
+  :root { color-scheme: light dark; }
+  html, body { min-height: 420px; }
+  body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px; }
+  #banner { background: #2a7; color: #fff; padding: 6px 8px; border-radius: 4px; font-weight: 600; }
+  #verdict { margin: 6px 0; padding: 6px 8px; border: 1px solid #8886; border-radius: 4px; font-weight: 600; }
+  h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; opacity: .7; }
+  button { font: inherit; padding: 6px 10px; margin: 3px 4px 3px 0; border-radius: 4px;
+           border: 1px solid #8886; background: #8881; cursor: pointer; }
+  button:hover { background: #8883; }
+  pre { background: #8881; padding: 8px; border-radius: 4px; max-height: 320px; overflow: auto;
+        white-space: pre-wrap; word-break: break-all; }
+  .hint { opacity: .7; margin: 4px 0 8px; }
+</style>
+</head>
+<body>
+<!-- Static, no JS. Missing banner => the iframe never rendered; banner but empty
+     sections => scripting is blocked. -->
+<div id="banner">AutoDS click-to-action probe — static HTML rendered (build rd97-1)</div>
+<div id="verdict">waiting for host…</div>
+
+<h2>1 · Host capabilities (ui/initialize result)</h2>
+<pre id="caps">waiting for host response…</pre>
+
+<h2>2 · Actions</h2>
+<div>
+  <button id="bA" type="button">A · tools/call → probe_action</button>
+  <button id="bB" type="button">B · tools/call → app-only</button>
+  <button id="bC" type="button">C · ui/message</button>
+  <button id="bD" type="button">D · update-model-context</button>
+  <button id="bE" type="button">E · tools/list</button>
+</div>
+<div class="hint">
+  After A, ask the model what the last tool call returned — <b>without pasting the marker
+  into the chat</b>. If it can produce the marker, the result reached its context.
+</div>
+
+<h2>3 · Request / response transcript</h2>
+<pre id="rpc">nothing sent yet</pre>
+
+<h2>4 · All inbound postMessages, verbatim</h2>
+<pre id="msgs">none yet</pre>
+
+<script>
+(function () {
+  "use strict";
+
+  var REPORT_URL = "https://mcp-staging.autods.com/probe/action/report";
+  var TIMEOUT_MS = 8000;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var post = function (msg) { try { window.parent.postMessage(msg, "*"); } catch (_) {} };
+
+  // The host sizes the iframe from what the app reports; a widget that never
+  // sends this collapses to a ~150px default and the buttons are unreachable.
+  var reportSize = function () {
+    var root = document.documentElement;
+    var prev = root.style.height;
+    root.style.height = "max-content";
+    var height = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = prev;
+    post({ jsonrpc: "2.0", method: "ui/notifications/size-changed",
+           params: { width: Math.ceil(window.innerWidth), height: height } });
+  };
+
+  var log = function (el, text) {
+    var node = $(el);
+    if (node.textContent === "none yet" || node.textContent === "nothing sent yet" ||
+        node.textContent === "waiting for host response…") node.textContent = "";
+    node.textContent += text + "\n";
+    reportSize();
+  };
+
+  var rid = 100;
+  var pending = {};          // id -> {label, sentAt, timer}
+  var transcript = [];       // everything, for the report POST
+  var initDone = false;
+
+  var note = function (entry) {
+    transcript.push(entry);
+    log("rpc", entry);
+    sendReport("auto");
+  };
+
+  var nonce = function () {
+    try {
+      var a = new Uint8Array(4);
+      crypto.getRandomValues(a);
+      return Array.prototype.map.call(a, function (b) {
+        return ("0" + b.toString(16)).slice(-2);
+      }).join("");
+    } catch (_) {
+      return "n" + String(rid) + String(window.performance ? Math.floor(performance.now()) : 0);
+    }
+  };
+
+  // Send a JSON-RPC request and record how it resolves. A request that is never
+  // answered resolves as NO RESPONSE — the failure shape RD-82 kept hitting.
+  var request = function (label, method, params) {
+    var id = ++rid;
+    var body = { jsonrpc: "2.0", id: id, method: method, params: params };
+    var started = Date.now();
+    pending[id] = {
+      label: label,
+      started: started,
+      timer: setTimeout(function () {
+        if (pending[id]) {
+          delete pending[id];
+          note("[" + label + "] NO RESPONSE after " + TIMEOUT_MS + "ms — host never answered id " + id);
+        }
+      }, TIMEOUT_MS)
+    };
+    note("[" + label + "] → " + method + " id=" + id + " " + JSON.stringify(params));
+    post(body);
+    return id;
+  };
+
+  var resolve = function (data) {
+    var entry = pending[data.id];
+    if (!entry) return false;
+    clearTimeout(entry.timer);
+    delete pending[data.id];
+    var ms = Date.now() - entry.started;
+    if (data.error) {
+      note("[" + entry.label + "] ✗ ERROR after " + ms + "ms: " + JSON.stringify(data.error));
+    } else {
+      note("[" + entry.label + "] ✓ RESULT after " + ms + "ms: " + JSON.stringify(data.result).slice(0, 2000));
+    }
+    return true;
+  };
+
+  window.addEventListener("message", function (e) {
+    var body;
+    try { body = JSON.stringify(e.data); } catch (_) { body = String(e.data); }
+    log("msgs", "← " + e.origin + "  " + body.slice(0, 3000));
+
+    var data = e.data;
+    if (!data || typeof data !== "object") return;
+
+    // Correlate by id first; anything else is a notification or a host push.
+    if (data.id !== undefined && data.id !== null && resolve(data)) {
+      reportSize();
+      return;
+    }
+
+    if (data.method === "ui/notifications/host-context-changed") reportSize();
+
+    var r = data.result;
+    if (r && !initDone) {
+      initDone = true;
+      // Bug 6: the approved CSP hangs off hostCapabilities, not the top level.
+      $("caps").textContent = JSON.stringify(r.hostCapabilities || r, null, 2);
+      var st = r.hostCapabilities && r.hostCapabilities.serverTools;
+      $("verdict").textContent = "host ready · serverTools: " +
+        (st ? JSON.stringify(st) : "NOT ADVERTISED") + " · press A";
+      // Bug 5: only announce initialized once the response is in.
+      post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+      note("→ ui/notifications/initialized (after the initialize result)");
+      reportSize();
+      setTimeout(reportSize, 250);
+    }
+  });
+
+  var sendReport = function (reason) {
+    var payload = {
+      build: "rd97-1",
+      reason: reason,
+      href: location.href,
+      frame: { innerWidth: window.innerWidth, innerHeight: window.innerHeight },
+      capabilities: $("caps").textContent,
+      transcript: transcript,
+      messages: $("msgs").textContent
+    };
+    try {
+      fetch(REPORT_URL, { method: "POST", mode: "cors",
+                          headers: { "content-type": "application/json" },
+                          body: JSON.stringify(payload) });
+    } catch (_) {}
+  };
+
+  // --- the five measurements ------------------------------------------------
+
+  $("bA").addEventListener("click", function () {
+    var n = nonce();
+    request("A direct probe_action", "tools/call", {
+      name: "probe_action",
+      arguments: { nonce: n, path: "direct", note: "widget button A" }
+    });
+  });
+
+  $("bB").addEventListener("click", function () {
+    var n = nonce();
+    request("B direct app-only", "tools/call", {
+      name: "probe_action_app_only",
+      arguments: { nonce: n, path: "direct-app-only", note: "widget button B" }
+    });
+  });
+
+  $("bC").addEventListener("click", function () {
+    var n = nonce();
+    // Per the ext-apps spec: role + a single content block. The model, not the
+    // widget, decides whether to call the tool — that is the whole distinction
+    // being measured, so the text has to be an unambiguous instruction.
+    request("C ui/message", "ui/message", {
+      role: "user",
+      content: {
+        type: "text",
+        text: "Call the tool probe_action with arguments nonce=\"" + n +
+              "\" and path=\"ui-message\", then tell me the marker it returned."
+      }
+    });
+  });
+
+  $("bD").addEventListener("click", function () {
+    var m = "RD97-CTX-" + nonce().toUpperCase();
+    request("D update-model-context", "ui/update-model-context", {
+      content: [{ type: "text", text: "The click-to-action probe recorded context marker " + m + "." }]
+    });
+    note("[D] context marker minted: " + m + " — ask the model to repeat it, do not paste it.");
+  });
+
+  $("bE").addEventListener("click", function () {
+    // What the host lets the APP see. Compare with what the model sees in the
+    // same conversation: that difference is the answer to question 3.
+    request("E tools/list", "tools/list", {});
+  });
+
+  // --- handshake ------------------------------------------------------------
+
+  try {
+    post({
+      jsonrpc: "2.0", id: 1, method: "ui/initialize",
+      params: {
+        appInfo: { name: "autods-action-probe", version: "0.1.0" },
+        appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+        protocolVersion: "2025-11-21"
+      }
+    });
+    note("→ sent ui/initialize (initialized follows the response)");
+  } catch (err) {
+    note("→ ui/initialize threw: " + err);
+  }
+
+  reportSize();
+  window.addEventListener("load", reportSize);
+  setInterval(reportSize, 1000);
+  setTimeout(function () { sendReport("t+15s"); }, 15000);
+})();
+</script>
+</body>
+</html>

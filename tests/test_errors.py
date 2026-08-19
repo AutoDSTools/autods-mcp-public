@@ -24,7 +24,7 @@ def _text(result) -> str:
 def test_401_maps_to_unauthenticated() -> None:
     mapped = map_upstream_error(401, {"message": "expired"})
     assert mapped.error_type == ERROR_UNAUTHENTICATED
-    assert mapped.result.isError is True
+    assert mapped.result.is_error is True
     assert _text(mapped.result).startswith(f"{ERROR_UNAUTHENTICATED}: ")
     assert "re-authenticate" in _text(mapped.result).lower()
     assert mapped.log_full is None
@@ -93,7 +93,7 @@ def test_non_dict_4xx_body_is_handled() -> None:
 
 def test_rate_limited_result_reports_retry_after() -> None:
     result = rate_limited_result(2.3)
-    assert result.isError is True
+    assert result.is_error is True
     text = result.content[0].text
     assert text.startswith(f"{ERROR_RATE_LIMITED}: ")
     # Ceil'd to whole seconds.

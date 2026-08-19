@@ -54,8 +54,8 @@ def _error_prefix(result: types.CallToolResult) -> str:
 
 def _classify(result: types.CallToolResult, *, extra_ok_prefixes: frozenset[str]) -> tuple[str, Any]:
     """Map a tool result to ('ok', status) / ('business', prefix) / ('fail', detail)."""
-    if not result.isError:
-        status = (result.structuredContent or {}).get("status")
+    if not result.is_error:
+        status = (result.structured_content or {}).get("status")
         return "ok", status
     prefix = _error_prefix(result)
     if prefix in _BUSINESS_PREFIXES or prefix in extra_ok_prefixes:
@@ -87,7 +87,7 @@ async def test_tools_list_exposes_all_registered_ops(staging_app, access_token) 
     # Every ProductsResearch op is advertised read-only.
     by_name = {tool.name: tool for tool in tools.tools}
     for op in PRODUCTS_RESEARCH_OPS:
-        assert by_name[op].annotations.readOnlyHint is True
+        assert by_name[op].annotations.read_only_hint is True
 
 
 async def test_every_registered_op_smoke(staging_app, access_token, staging_config) -> None:
@@ -109,13 +109,13 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
             {"body": {"order_by": {"name": "created_at", "direction": "desc"}, "limit": 5}},
         )
         _record("search_products", search, failures, frozenset())
-        if not search.isError:
-            product_id = _first_product_id((search.structuredContent or {}).get("data"))
+        if not search.is_error:
+            product_id = _first_product_id((search.structured_content or {}).get("data"))
 
         winning = await call("get_winning_products", {"offset": 0, "limit": 5, "sort": "-created_at"})
         _record("get_winning_products", winning, failures, frozenset())
-        if product_id is None and not winning.isError:
-            product_id = _first_product_id((winning.structuredContent or {}).get("data"))
+        if product_id is None and not winning.is_error:
+            product_id = _first_product_id((winning.structured_content or {}).get("data"))
 
         # These three need a real product id; a 307 (subscription-gated winning
         # product) is a documented business response for get_product_by_id.
@@ -146,8 +146,8 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         _record("list_stores_api", stores, failures, frozenset())
 
         store_ids = staging_config.store_ids
-        if store_ids is None and not stores.isError:
-            store_ids = _first_store_ids((stores.structuredContent or {}).get("data"))
+        if store_ids is None and not stores.is_error:
+            store_ids = _first_store_ids((stores.structured_content or {}).get("data"))
 
         # --- AutoDSApi: store-scoped reads ---
         if store_ids:

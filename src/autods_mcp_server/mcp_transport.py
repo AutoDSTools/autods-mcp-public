@@ -4,9 +4,9 @@ This module turns a manifest registry into a live MCP server:
 
 * :func:`build_runtime` loads manifests, runs the D5 annotation lint (refusing
   to build if any tool is mis-annotated), and assembles the registry, the
-  low-level MCP ``Server`` (with ``list_tools`` / ``call_tool`` handlers), the
-  upstream HTTP client, the dispatcher, the shared Redis client + per-user rate
-  limiter (F0/F1), and the ``StreamableHTTPSessionManager``.
+  low-level MCP ``Server`` (with its ``on_list_tools`` / ``on_call_tool``
+  handlers), the upstream HTTP client, the dispatcher, the shared Redis client
+  + per-user rate limiter (F0/F1), and the ``StreamableHTTPSessionManager``.
 * :func:`mount_mcp` mounts the transport at ``/mcp`` on a FastAPI app behind the
   Phase B auth dependency, and registers the session manager's lifespan.
 
@@ -25,11 +25,13 @@ unauthenticated request gets the same RFC 6750 ``401 + WWW-Authenticate``
 challenge as any protected route, which is exactly what MCP clients follow to
 discover the OAuth flow. On success the verified ``UserContext`` is stashed on
 ``request.state``; because Starlette backs ``request.state`` with ``scope["state"]``
-and the SDK builds its own ``Request`` from that same scope, the ``call_tool``
-handler reads the context back via ``server.request_context.request.state`` and
-hands it to the dispatcher, which forwards the user's bearer token upstream.
+and the SDK builds its own ``Request`` from that same scope, the ``on_call_tool``
+handler reads the context back via ``ctx.request.state`` (the per-request
+``ServerRequestContext``) and hands it to the dispatcher, which forwards the
+user's bearer token upstream.
 """
 
+import json
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -42,9 +44,11 @@ from jsonschema.protocols import Validator
 from jsonschema.validators import validator_for
 from mcp import types
 from mcp.server.lowlevel import Server
+from mcp.server.lowlevel.server import ServerRequestContext
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from redis.asyncio import Redis
 
+from autods_mcp_server import __version__
 from autods_mcp_server.analytics import MixpanelClient, build_mixpanel
 from autods_mcp_server.auth import UserContext, get_current_user
 from autods_mcp_server.dispatch import (
@@ -83,7 +87,7 @@ from autods_mcp_server.tools import build_tools
 from autods_mcp_server.urls import MCP_PATH
 
 # Key under which the verified UserContext is stashed on the request scope's
-# state, to be read back inside the call_tool handler.
+# state, to be read back inside the on_call_tool handler.
 _USER_CONTEXT_STATE_KEY = "mcp_user_context"
 
 _audit_logger = get_logger("autods_mcp_server.audit")
@@ -149,12 +153,15 @@ def _build_validators(tools: list[types.Tool]) -> dict[str, Validator]:
     and re-check the schema against its meta-schema on every call. ``check_schema``
     runs here too, so a structurally invalid authored schema fails at boot
     (alongside the D5 lint) rather than as a per-request 500.
+
+    Since mcp 2.x this is the *only* schema validation on the call path: the
+    low-level server no longer validates arguments at all (see ``on_call_tool``).
     """
     validators: dict[str, Validator] = {}
     for tool in tools:
-        cls = validator_for(tool.inputSchema)
-        cls.check_schema(tool.inputSchema)
-        validators[tool.name] = cls(tool.inputSchema)
+        cls = validator_for(tool.input_schema)
+        cls.check_schema(tool.input_schema)
+        validators[tool.name] = cls(tool.input_schema)
     return validators
 
 
@@ -187,41 +194,56 @@ def _remote_endpoint(registry: ManifestRegistry, op_id: str) -> str:
     return f"{operation.base_url_key} {operation.method.upper()} {operation.path}"
 
 
+def _success_result(payload: dict[str, Any]) -> types.CallToolResult:
+    """Wrap a dispatcher payload in the result shape clients have always seen.
+
+    Through mcp 1.x the low-level ``call_tool`` decorator did this wrapping for
+    any handler that returned a plain dict: the payload verbatim as
+    ``structuredContent``, plus one ``text`` block carrying the same payload as
+    ``json.dumps(payload, indent=2)``. mcp 2.x removed the auto-wrapping and
+    hands result shaping to the handler, so this reproduces that exact shape.
+    It is the one place in the port where a change would be invisible — a
+    reformat here (dropping ``indent=2``, say) alters every successful response
+    with nothing raising anywhere — so ``test_transport`` pins it byte for byte.
+    """
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(payload, indent=2))],
+        structured_content=payload,
+    )
+
+
 def _build_server(
     registry: ManifestRegistry,
     dispatcher: OperationDispatcher,
     rate_limiter: RateLimiter,
     mixpanel: MixpanelClient,
 ) -> Server:
-    """Create the low-level MCP server with tool list/call handlers."""
-    server: Server = Server("autods-mcp-server")
+    """Create the low-level MCP server with tool list/call handlers.
+
+    Since mcp 2.x the handlers are constructor kwargs rather than decorators,
+    take the per-request ``ServerRequestContext`` as their first argument, and
+    return the full result type (``ListToolsResult`` / ``CallToolResult``).
+    """
     tools = build_tools(registry.list_operations())  # D5 lint runs here.
     validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
 
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return tools
+    async def on_list_tools(
+        _ctx: ServerRequestContext[Any, Any],
+        _params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(tools=tools)
 
-    # ``validate_input=False``: the SDK would validate ``arguments`` against the
-    # tool's ``inputSchema`` and return a generic "Input validation error". We
-    # validate ourselves instead so a bad body becomes our typed
-    # ``invalid_arguments`` error (consistent with the rest of this module) and
-    # is recorded in the audit log — still rejected before any upstream call.
-    @server.call_tool(validate_input=False)
-    async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any] | types.CallToolResult:
-        request = server.request_context.request
+    async def on_call_tool(
+        ctx: ServerRequestContext[Any, Any],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
         user_context: UserContext | None = None
-        if request is not None:
-            user_context = getattr(request.state, _USER_CONTEXT_STATE_KEY, None)
-        if user_context is None:
-            # The /mcp route always sets this; reaching here means the transport
-            # was driven without the auth seam — treat as an internal error.
-            return error_result(ERROR_INTERNAL, f"No authenticated user context for tool '{name}'.")
-
-        # Record the tool call ("the request the client was making") on the
-        # Sentry scope. The single POST /mcp handler dispatches every tool, so the
-        # Starlette/FastAPI integrations can't attribute it automatically.
-        set_tool_context(tool_name=name, operation_id=name, arguments=arguments)
+        # Whether the F2 audit line for this call has already been emitted, so
+        # the catch-all below doesn't emit a second one for the same call.
+        audited = False
+        handler_start = time.perf_counter()
 
         def emit(
             *,
@@ -230,6 +252,10 @@ def _build_server(
             latency_ms: float,
             error_type: str | None = None,
         ) -> None:
+            nonlocal audited
+            if user_context is None:  # nothing to attribute the call to
+                return
+            audited = True
             _emit_audit(
                 tool_name=name,
                 op_id=name,
@@ -242,124 +268,172 @@ def _build_server(
                 error_type=error_type,
             )
 
-        # F1 — per-user rate limit, enforced before any upstream work.
-        decision = await rate_limiter.acquire(user_context.sub)
-        if not decision.allowed:
-            emit(
-                upstream_url=None,
-                upstream_status=None,
-                latency_ms=0.0,
-                error_type=ERROR_RATE_LIMITED,
-            )
-            return rate_limited_result(decision.retry_after)
+        # mcp 1.x's ``call_tool`` decorator caught every handler exception and
+        # turned it into an ``isError`` result, so the model saw the error text
+        # and could self-correct. v2 lets it propagate as a top-level JSON-RPC
+        # error the LLM never sees, so we own that guard now: an unanticipated
+        # failure still comes back as the typed ``internal_error`` envelope the
+        # rest of this module returns.
+        try:
+            # The auth seam: the SDK builds its ``Request`` from the same ASGI
+            # scope the /mcp route ran on, and ``request.state`` is scope-backed,
+            # so the ``UserContext`` the route stashed is readable here.
+            request = ctx.request
+            if request is not None:
+                user_context = getattr(request.state, _USER_CONTEXT_STATE_KEY, None)
+            if user_context is None:
+                # The /mcp route always sets this; reaching here means the transport
+                # was driven without the auth seam — treat as an internal error.
+                return error_result(ERROR_INTERNAL, f"No authenticated user context for tool '{name}'.")
 
-        # "MCP Call Received" — fires once the call clears the rate limiter (RD-63),
-        # so a rate-limited / abusive caller can't drive unbounded tracking work.
-        # The event is keyed on the AutoDS user id; if that's unresolved we skip
-        # tracking entirely rather than emit an event keyed on the Cognito sub.
-        if user_context.autods_user_id is not None:
-            mixpanel.track_mcp_call_received(
-                user_context.autods_user_id,
-                remote_endpoint=_remote_endpoint(registry, name),
-            )
+            # Record the tool call ("the request the client was making") on the
+            # Sentry scope. The single POST /mcp handler dispatches every tool, so the
+            # Starlette/FastAPI integrations can't attribute it automatically.
+            set_tool_context(tool_name=name, operation_id=name, arguments=arguments)
 
-        # Validate arguments (incl. the typed request body) against the tool's
-        # inputSchema before any upstream work — a malformed body is rejected
-        # here, never forwarded as an opaque upstream 4xx.
-        validator = validator_by_name.get(name)
-        if validator is not None:
-            validation_error = _validate_arguments(arguments, validator)
-            if validation_error is not None:
+            # F1 — per-user rate limit, enforced before any upstream work.
+            decision = await rate_limiter.acquire(user_context.sub)
+            if not decision.allowed:
                 emit(
                     upstream_url=None,
                     upstream_status=None,
                     latency_ms=0.0,
+                    error_type=ERROR_RATE_LIMITED,
+                )
+                return rate_limited_result(decision.retry_after)
+
+            # "MCP Call Received" — fires once the call clears the rate limiter (RD-63),
+            # so a rate-limited / abusive caller can't drive unbounded tracking work.
+            # The event is keyed on the AutoDS user id; if that's unresolved we skip
+            # tracking entirely rather than emit an event keyed on the Cognito sub.
+            if user_context.autods_user_id is not None:
+                mixpanel.track_mcp_call_received(
+                    user_context.autods_user_id,
+                    remote_endpoint=_remote_endpoint(registry, name),
+                )
+
+            # Validate arguments (incl. the typed request body) against the tool's
+            # inputSchema before any upstream work — a malformed body is rejected
+            # here, never forwarded as an opaque upstream 4xx. Since mcp 2.x the
+            # SDK performs no schema validation of its own, so this is the only
+            # gate; it produces our typed ``invalid_arguments`` error and an audit
+            # line, which is why it was already ours to run under 1.x
+            # (``validate_input=False``).
+            validator = validator_by_name.get(name)
+            if validator is not None:
+                validation_error = _validate_arguments(arguments, validator)
+                if validation_error is not None:
+                    emit(
+                        upstream_url=None,
+                        upstream_status=None,
+                        latency_ms=0.0,
+                        error_type=ERROR_INVALID_ARGUMENTS,
+                    )
+                    return error_result(ERROR_INVALID_ARGUMENTS, validation_error)
+
+            start = time.perf_counter()
+            try:
+                result = await dispatcher.dispatch(name, arguments, user_context)
+            except MissingArgumentError as exc:
+                # Our own input validation — the message is safe to surface.
+                emit(
+                    upstream_url=None,
+                    upstream_status=None,
+                    latency_ms=round((time.perf_counter() - start) * 1000, 2),
                     error_type=ERROR_INVALID_ARGUMENTS,
                 )
-                return error_result(ERROR_INVALID_ARGUMENTS, validation_error)
+                return error_result(ERROR_INVALID_ARGUMENTS, str(exc))
+            except UpstreamRequestError as exc:
+                # Transport-level failure (timeout, connection) — no response body.
+                emit(
+                    upstream_url=exc.upstream_url or None,
+                    upstream_status=None,
+                    latency_ms=round((time.perf_counter() - start) * 1000, 2),
+                    error_type=ERROR_UPSTREAM_UNREACHABLE,
+                )
+                capture_tool_exception(
+                    exc,
+                    error_type=ERROR_UPSTREAM_UNREACHABLE,
+                    tool_name=name,
+                    upstream_url=exc.upstream_url or None,
+                )
+                return error_result(
+                    ERROR_UPSTREAM_UNREACHABLE,
+                    "The upstream service could not be reached. Please try again later.",
+                )
+            except (UnknownOperationError, DispatchError) as exc:
+                # UnknownOperationError shouldn't happen (the tool name came off
+                # our own advertised list), so it's an internal inconsistency,
+                # not a user error.
+                emit(
+                    upstream_url=None,
+                    upstream_status=None,
+                    latency_ms=round((time.perf_counter() - start) * 1000, 2),
+                    error_type=ERROR_INTERNAL,
+                )
+                capture_tool_exception(exc, error_type=ERROR_INTERNAL, tool_name=name)
+                return error_result(ERROR_INTERNAL, str(exc))
 
-        start = time.perf_counter()
-        try:
-            result = await dispatcher.dispatch(name, arguments, user_context)
-        except MissingArgumentError as exc:
-            # Our own input validation — the message is safe to surface.
-            emit(
-                upstream_url=None,
-                upstream_status=None,
-                latency_ms=round((time.perf_counter() - start) * 1000, 2),
-                error_type=ERROR_INVALID_ARGUMENTS,
-            )
-            return error_result(ERROR_INVALID_ARGUMENTS, str(exc))
-        except UpstreamRequestError as exc:
-            # Transport-level failure (timeout, connection) — no response body.
-            emit(
-                upstream_url=exc.upstream_url or None,
-                upstream_status=None,
-                latency_ms=round((time.perf_counter() - start) * 1000, 2),
-                error_type=ERROR_UPSTREAM_UNREACHABLE,
-            )
-            capture_tool_exception(
-                exc,
-                error_type=ERROR_UPSTREAM_UNREACHABLE,
-                tool_name=name,
-                upstream_url=exc.upstream_url or None,
-            )
-            return error_result(
-                ERROR_UPSTREAM_UNREACHABLE,
-                "The upstream service could not be reached. Please try again later.",
-            )
-        except (UnknownOperationError, DispatchError) as exc:
-            # UnknownOperationError shouldn't happen (the SDK validated the tool
-            # name), so it's an internal inconsistency, not a user error.
-            emit(
-                upstream_url=None,
-                upstream_status=None,
-                latency_ms=round((time.perf_counter() - start) * 1000, 2),
-                error_type=ERROR_INTERNAL,
-            )
-            capture_tool_exception(exc, error_type=ERROR_INTERNAL, tool_name=name)
-            return error_result(ERROR_INTERNAL, str(exc))
+            latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
-        latency_ms = round((time.perf_counter() - start) * 1000, 2)
+            if result.ok:
+                emit(
+                    upstream_url=result.upstream_url or None,
+                    upstream_status=result.status,
+                    latency_ms=latency_ms,
+                )
+                return _success_result(result.model_dump())
 
-        if result.ok:
+            # F3 — map an upstream non-2xx to a safe, typed MCP error.
+            mapped = map_upstream_error(result.status, result.data)
             emit(
                 upstream_url=result.upstream_url or None,
                 upstream_status=result.status,
                 latency_ms=latency_ms,
-            )
-            return result.model_dump()
-
-        # F3 — map an upstream non-2xx to a safe, typed MCP error.
-        mapped = map_upstream_error(result.status, result.data)
-        emit(
-            upstream_url=result.upstream_url or None,
-            upstream_status=result.status,
-            latency_ms=latency_ms,
-            error_type=mapped.error_type,
-        )
-        if mapped.log_full is not None:
-            # 5xx / unexpected 3xx: the user message is generic, so record the
-            # full upstream detail server-side for debugging (still no request
-            # payload).
-            _audit_logger.warning(
-                "upstream_error_detail",
-                op_id=name,
-                upstream_url=result.upstream_url or None,
-                upstream_status=result.status,
-                detail=mapped.log_full,
-            )
-            capture_tool_error(
-                f"{mapped.error_type}: upstream returned HTTP {result.status} for tool '{name}'",
                 error_type=mapped.error_type,
-                tool_name=name,
-                upstream_url=result.upstream_url or None,
-                upstream_status=result.status,
-                detail=mapped.log_full,
             )
-        return mapped.result
+            if mapped.log_full is not None:
+                # 5xx / unexpected 3xx: the user message is generic, so record the
+                # full upstream detail server-side for debugging (still no request
+                # payload).
+                _audit_logger.warning(
+                    "upstream_error_detail",
+                    op_id=name,
+                    upstream_url=result.upstream_url or None,
+                    upstream_status=result.status,
+                    detail=mapped.log_full,
+                )
+                capture_tool_error(
+                    f"{mapped.error_type}: upstream returned HTTP {result.status} for tool '{name}'",
+                    error_type=mapped.error_type,
+                    tool_name=name,
+                    upstream_url=result.upstream_url or None,
+                    upstream_status=result.status,
+                    detail=mapped.log_full,
+                )
+            return mapped.result
+        except Exception as exc:  # noqa: BLE001 - deliberate catch-all, see above
+            if not audited:
+                emit(
+                    upstream_url=None,
+                    upstream_status=None,
+                    latency_ms=round((time.perf_counter() - handler_start) * 1000, 2),
+                    error_type=ERROR_INTERNAL,
+                )
+            capture_tool_exception(exc, error_type=ERROR_INTERNAL, tool_name=name)
+            _audit_logger.exception("tool_call_unhandled_error", tool_name=name, op_id=name)
+            return error_result(ERROR_INTERNAL, f"An internal error occurred while running tool '{name}'.")
 
-    return server
+    # ``version`` feeds the ``serverInfo`` stamp mcp 2.x attaches to every
+    # result's ``_meta`` (spec #3002); left unset it advertises an empty string,
+    # so it rides the same single-sourced ``__version__`` as the FastAPI app and
+    # the Sentry release.
+    return Server(
+        "autods-mcp-server",
+        version=__version__,
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+    )
 
 
 def build_runtime(
@@ -475,7 +549,7 @@ def mount_mcp(app: FastAPI, runtime: McpRuntime) -> None:
         request: Request,
         user: Annotated[UserContext, Depends(get_current_user)],
     ) -> Response:
-        # Stash the verified context where the call_tool handler will read it
+        # Stash the verified context where the on_call_tool handler will read it
         # (scope-backed, so the SDK's Request sees the same value).
         setattr(request.state, _USER_CONTEXT_STATE_KEY, user)
         return _SessionManagerResponse(runtime.session_manager)

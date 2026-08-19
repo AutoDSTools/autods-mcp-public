@@ -19,13 +19,13 @@ def test_readonly_with_path_params(bundled_manifest_dir: Path) -> None:
     tool = to_tool(registry.get("get_bulk_action_items"))
 
     assert tool.name == "get_bulk_action_items"
-    props = tool.inputSchema["properties"]
+    props = tool.input_schema["properties"]
     # Both path params are required; the JSON body is optional.
     assert {"store_ids", "bulk_action_id"}.issubset(props)
-    assert set(tool.inputSchema["required"]) == {"store_ids", "bulk_action_id"}
+    assert set(tool.input_schema["required"]) == {"store_ids", "bulk_action_id"}
     assert tool.annotations.title
-    assert tool.annotations.readOnlyHint is True
-    assert tool.annotations.destructiveHint is False
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.destructive_hint is False
 
 
 def test_post_with_required_body(bundled_manifest_dir: Path) -> None:
@@ -33,16 +33,16 @@ def test_post_with_required_body(bundled_manifest_dir: Path) -> None:
     tool = to_tool(registry.get("upload_products"))
 
     # A required path param plus the required JSON body.
-    assert tool.inputSchema["properties"].keys() == {"store_ids", "body"}
-    assert set(tool.inputSchema["required"]) == {"store_ids", "body"}
+    assert tool.input_schema["properties"].keys() == {"store_ids", "body"}
+    assert set(tool.input_schema["required"]) == {"store_ids", "body"}
     # The body now carries its typed schema: required integer enums, modelled
     # as integers (never strings) so a string value is invalid by construction.
-    body = tool.inputSchema["properties"]["body"]
+    body = tool.input_schema["properties"]["body"]
     assert body["type"] == "object"
     assert set(body["required"]) == {"region", "status", "buy_site_id"}
     assert body["properties"]["status"]["type"] == "integer"
     assert body["properties"]["status"]["enum"] == [1, 2, 3, 4, 5, 6]
-    assert tool.annotations.readOnlyHint is False
+    assert tool.annotations.read_only_hint is False
 
 
 def test_body_schema_is_emitted_verbatim() -> None:
@@ -66,8 +66,8 @@ def test_body_schema_is_emitted_verbatim() -> None:
     )
     tool = to_tool(operation)
 
-    assert tool.inputSchema["properties"]["body"] == body_schema
-    assert "body" in tool.inputSchema["required"]
+    assert tool.input_schema["properties"]["body"] == body_schema
+    assert "body" in tool.input_schema["required"]
 
 
 def test_body_stays_open_without_body_schema() -> None:
@@ -84,17 +84,17 @@ def test_body_stays_open_without_body_schema() -> None:
         }
     )
     tool = to_tool(operation)
-    body = tool.inputSchema["properties"]["body"]
+    body = tool.input_schema["properties"]["body"]
 
     # Optional open body: not required, with no constraining keys.
-    assert "body" not in tool.inputSchema.get("required", [])
+    assert "body" not in tool.input_schema.get("required", [])
     assert "enum" not in body and "required" not in body
 
 
 def test_list_products_status_is_integer_enum(bundled_manifest_dir: Path) -> None:
     registry = build_registry(bundled_manifest_dir)
     tool = to_tool(registry.get("list_products"))
-    status = tool.inputSchema["properties"]["body"]["properties"]["product_status"]
+    status = tool.input_schema["properties"]["body"]["properties"]["product_status"]
 
     assert status["type"] == "integer"
     assert status["enum"] == [1, 2, 3, 4, 5, 6]
@@ -138,8 +138,8 @@ def test_delete_is_destructive() -> None:
     )
     tool = to_tool(operation)
 
-    assert tool.annotations.destructiveHint is True
-    assert {"thing_id", "store_id"} == set(tool.inputSchema["required"])
+    assert tool.annotations.destructive_hint is True
+    assert {"thing_id", "store_id"} == set(tool.input_schema["required"])
 
 
 def test_schema_type_mapping_covers_all_types() -> None:

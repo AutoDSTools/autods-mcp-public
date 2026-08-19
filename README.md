@@ -323,7 +323,10 @@ breaks auth or a tool call.
 
 1. Client lists tools via `tools/list`; each descriptor carries the
    manifest annotations.
-2. Client calls a tool; the SDK validates arguments against `inputSchema`.
+2. Client calls a tool; the server validates the arguments against that tool's
+   `inputSchema` (a jsonschema validator compiled at boot — since mcp 2.x the
+   SDK performs no validation of its own) and rejects a bad body as a typed
+   `invalid_arguments` error before any upstream call.
 3. The dispatcher looks up the operation, resolves its upstream base URL
    from `base_url_key`, substitutes path params, attaches query/header
    params and the JSON body, forwards `Authorization: Bearer …`, and
@@ -342,7 +345,7 @@ choice here:
   trade-off — the server→client GET SSE / resumability stream — is
   unused by this synchronous tool-forwarding server.
 - **Per-user rate limiting.** Two token buckets keyed by `user.sub`
-  (`60/min` and `1000/hour` by default) enforced in `call_tool`. State
+  (`60/min` and `1000/hour` by default) enforced in `on_call_tool`. State
   lives in Redis via an atomic Lua script so the limit holds
   cluster-wide; on a Redis outage the limiter *fails open*. Local dev
   with no `REDIS_URL` falls back to an in-process limiter. On exceed,

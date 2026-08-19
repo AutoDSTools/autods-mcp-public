@@ -36,7 +36,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import httpx
-from mcp.client.session import ClientSession
+import httpx2
+from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
 from autods_mcp_server.settings import Settings
@@ -145,19 +146,24 @@ def get_token() -> str:
 
 
 async def run_call(url: str, token: str, operation: str, arguments: dict) -> int:
-    http_client = httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    # httpx2, not httpx: the SDK's client transports run on httpx2 since mcp
+    # 2.x and the two are not interchangeable — an httpx client passed here
+    # degrades silently instead of raising. (The OAuth calls above stay on
+    # httpx; they're plain requests, not MCP traffic.)
+    http_client = httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=30)
     async with http_client:
-        async with streamable_http_client(url, http_client=http_client) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                if operation in ("list", "tools/list"):
-                    tools = await session.list_tools()
-                    for tool in tools.tools:
-                        print(tool.name)
-                    return 0
-                result = await session.call_tool(operation, arguments)
-                print(json.dumps(result.model_dump(mode="json"), indent=2, default=str))
-                return 1 if result.isError else 0
+        async with Client(streamable_http_client(url, http_client=http_client)) as client:
+            if operation in ("list", "tools/list"):
+                tools = await client.list_tools()
+                for tool in tools.tools:
+                    print(tool.name)
+                return 0
+            result = await client.call_tool(operation, arguments)
+            # ``by_alias``: 2.x model fields are snake_case, so a bare
+            # model_dump() would print ``structured_content``/``is_error``
+            # rather than what actually went over the wire.
+            print(json.dumps(result.model_dump(by_alias=True, mode="json"), indent=2, default=str))
+            return 1 if result.is_error else 0
 
 
 def main() -> int:

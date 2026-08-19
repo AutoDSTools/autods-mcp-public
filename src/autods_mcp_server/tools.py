@@ -111,11 +111,11 @@ def to_tool(operation: ManifestOperation) -> types.Tool:
     return types.Tool(
         name=operation.operation_id,
         description=_build_description(operation),
-        inputSchema=_build_input_schema(operation),
+        input_schema=_build_input_schema(operation),
         annotations=types.ToolAnnotations(
             title=annotations.title,
-            readOnlyHint=annotations.read_only_hint,
-            destructiveHint=annotations.destructive_hint,
+            read_only_hint=annotations.read_only_hint,
+            destructive_hint=annotations.destructive_hint,
         ),
     )
 

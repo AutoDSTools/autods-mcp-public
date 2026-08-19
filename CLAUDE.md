@@ -13,7 +13,7 @@ bearer token upstream.
 ## Commands
 
 Python **3.12 only** (`>=3.12,<3.13`). Dependencies are managed with **`uv`** — never use
-bare `pip`/`venv`/`python` — and not `uvx` either (see the mcp 2.0.0 gotcha).
+bare `pip`/`venv`/`python` — and not `uvx` either (see the mcp gotcha).
 
 ```bash
 make install   # uv sync (installs dev + test groups)
@@ -220,10 +220,17 @@ RD-50 :: Logging cleanup ::
 - **Transport is stateless** (`stateless=True`) by design — production runs many
   replicas × workers, so no MCP session is pinned to a worker. Don't reintroduce
   session state.
+- **OpenTelemetry stays inert** (RD-99): mcp 2.x hard-depends on `opentelemetry-api`
+  and instruments its request path, but with no `opentelemetry-sdk` installed the API
+  hands back non-recording spans — nothing is collected or exported, and Sentry remains
+  the only tracing surface. That was a deliberate choice, not an oversight: adding the
+  SDK is a real decision (exporter, endpoint, sampling) and carries the same
+  never-let-the-bearer-token-out rule as the Sentry scopes. Don't install
+  `opentelemetry-sdk` casually — installing it alone silently turns tracing on.
 - **Sentry** (`sentry.py`, self-hosted `sentry.autods.com`): no-op unless `SENTRY_URL`
   is set (so local/test send nothing); the release comes from `__version__`, the
   environment tag defaults to `MCP_ENV`. Handled failures are returned as
-  `CallToolResult(isError=True)` envelopes, so they're captured **explicitly** —
+  `CallToolResult(is_error=True)` envelopes, so they're captured **explicitly** —
   automatic exception capture never sees them. **The bearer token must never reach
   Sentry:** never pass `raw_token` / the `Authorization` header into a scope, keep
   `send_default_pii` off, and preserve the substring `_SensitiveDataScrubber` (it
@@ -302,24 +309,51 @@ production incident; don't undo the guard without understanding why it's there.
   `request`/`tool_call` logs**, so `configure_logging` raises them to WARNING — guarded so
   `LOG_LEVEL=debug` still gets the firehose. Don't undo it; emit the audit line, not the
   library's.
-- **`mcp` is capped `<2` on purpose, and `uvx` bypasses the cap entirely.** mcp 2.0.0
-  dropped the `list_tools` decorator from the low-level `Server`, so `mcp_transport`
-  dies at import with `'Server' object has no attribute 'list_tools'` — a green
-  `uv sync` followed by a server that will not boot. `dependencies` therefore pins
-  `mcp>=1.29.0,<2` — 1.29.0 is the newest 1.x, and the maintenance line only fixes
-  its newest release, so stay on it. Don't widen the cap as routine housekeeping; the
-  2.x port is scoped in RD-99 and must move `_build_server` in the same change.
-  `uvx --with mcp python …`
-  ignores `uv.lock` and resolves 2.x regardless (it also picks Python 3.13 for a
-  3.12-only project) — always `uv run`.
-- **MCP SDK models take `_meta` by alias, and silently accept the wrong spelling.** On
-  `types.Tool` / `types.Resource` the field is `meta` but its alias is `_meta`, and the
-  models are `extra="allow"` without `populate_by_name` — so `types.Tool(meta={...})`
-  raises nothing, creates a junk extra field, and serialises it as `"meta"`. The client
-  never sees the metadata and there is no error anywhere. Construct via
-  `types.Tool(**{"_meta": {...}})`. Related, same family: `read_resource` returning a bare
-  `str` silently labels the payload `text/plain` — return
-  `[ReadResourceContents(content=..., mime_type=...)]` when the type matters.
+- **The server runs on mcp 2.x, and `uvx` ignores the pin entirely.** `uvx --with mcp
+  python …` resolves whatever is newest regardless of `uv.lock` (and picks Python 3.13
+  for a 3.12-only project) — always `uv run`. The 1.x → 2.x port landed in RD-99; the
+  three v2 behaviours that bite silently, with nothing raising anywhere, are below.
+- **v2 `model_dump()` emits snake_case, so serializing an MCP type ourselves needs
+  `by_alias=True`.** In 1.x the model fields *were* the wire names (`inputSchema`,
+  `isError`), so `model_dump()` happened to produce wire format. In 2.x the fields are
+  snake_case with camelCase aliases, so the same call yields `input_schema` — a
+  silently wrong shape, not an error. The SDK's own outbound path dumps `by_alias=True,
+  mode="json"`; anywhere we dump an MCP model by hand (`scripts/mcp_call.py`, tests)
+  must do the same. Constructor kwargs still accept either spelling, so
+  `types.Tool(inputSchema=…)` keeps working and hides the switch.
+- **The success-path `CallToolResult` is now built by hand, and its shape is a
+  contract.** Through 1.x the `call_tool` decorator wrapped a returned dict into
+  `structuredContent` + one `text` block of `json.dumps(payload, indent=2)`; v2 removed
+  that wrapping. `_success_result` in `mcp_transport.py` reproduces it exactly, and
+  `test_success_result_shape_matches_the_1x_wire_format` pins the bytes (the literal
+  was captured from a 1.29.0 run). A "cleanup" here — a compact `json.dumps`, a dropped
+  `structuredContent` — changes every successful response with no test-free signal.
+- **v2 does not turn handler exceptions into `isError` results.** 1.x's decorator
+  caught everything and returned `CallToolResult(isError=True)`, so the model saw the
+  error and could self-correct; v2 lets it escape as a top-level JSON-RPC error the LLM
+  never sees. `on_call_tool` therefore ends in a deliberate catch-all that returns the
+  typed `internal_error` envelope (and emits the audit line if nothing else did). Don't
+  remove it as dead code — it only fires on paths no `except` clause names. Relatedly,
+  v2 does no argument validation at all (`validate_input` is gone), so
+  `_build_validators` / `_validate_arguments` are the only schema gate left.
+- **`httpx` and `httpx2` are not interchangeable, and mixing them fails quietly.** The
+  SDK's *client* transports run on httpx2 since 2.x: passing an `httpx.AsyncClient` as
+  `streamable_http_client(http_client=…)` degrades silently rather than raising, and an
+  `except httpx.ConnectError:` around an SDK call still imports fine while never
+  matching again. Only the MCP client moved (tests, `scripts/mcp_call.py`); the
+  upstream dispatcher and its `pytest-httpx` mocks stay on `httpx`. Note httpx2 uses the
+  OS trust store via `truststore`, not certifi — irrelevant in prod (the server never
+  uses the SDK's HTTP client) but it can bite in a minimal container image;
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` are honoured first.
+- **Extra keys on an MCP model are dropped without a word (and `_meta` is the field
+  that used to be the trap).** Under 1.x the models were `extra="allow"` without
+  `populate_by_name`, so `types.Tool(meta={...})` silently created a junk extra field
+  serialised as `"meta"` and the client never saw the metadata; the fix was
+  `types.Tool(**{"_meta": {...}})`. mcp 2.x sets `populate_by_name=True`, so `meta=` now
+  populates the real field — but `extra="allow"` is gone, so any *other* non-schema key
+  you stuff into an MCP model is accepted at construction and then discarded. Same
+  failure shape as before (no error, no data), different cause: relevant to the RD-82 /
+  RD-97 widget probes, which rode extra fields.
 - **OAuth metadata URL fields are typed `str`, not `AnyUrl`/`HttpUrl`** — `AnyUrl` appends a
   trailing slash and breaks the byte-identity RFC 8414/9728 require between `issuer`/
   `resource` and the discovery URL. Don't "clean up" the types. Relatedly, the advertised

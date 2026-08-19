@@ -3,8 +3,8 @@
 Provides a self-contained RSA signer / JWKS / token factory (so these tests
 don't depend on the auth package's conftest), helpers to build manifests on
 disk, and an in-process MCP client harness that drives the real Streamable HTTP
-transport over an ``httpx.ASGITransport`` — exercising middleware, the Phase B
-auth dependency, the transport route, and the call_tool → dispatcher path.
+transport over an ``httpx2.ASGITransport`` — exercising middleware, the Phase B
+auth dependency, the transport route, and the on_call_tool → dispatcher path.
 """
 
 import json
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import jwt as pyjwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -23,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
-from mcp.client.session import ClientSession
+from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
 from autods_mcp_server.auth.dependency import jwks_dependency
@@ -193,17 +194,27 @@ async def mcp_client_session(
     runtime: McpRuntime,
     *,
     token: str | None,
-) -> AsyncIterator[ClientSession]:
+) -> AsyncIterator[Client]:
     """Drive the in-process app via the real Streamable HTTP MCP client.
 
     Runs the session manager's task group for the duration (ASGITransport does
-    not trigger the app lifespan), then yields an initialized ``ClientSession``.
-    The bearer token is baked into the ASGITransport-backed client so it rides
-    every request the MCP client makes.
+    not trigger the app lifespan), then yields a connected ``Client`` (entering
+    it performs the handshake). The bearer token is baked into the
+    ASGITransport-backed client so it rides every request the MCP client makes.
+
+    The HTTP client is ``httpx2``, not ``httpx``: since mcp 2.x the SDK's client
+    transports are built on httpx2, and the two are not interchangeable at
+    runtime — handing ``streamable_http_client`` an ``httpx.AsyncClient``
+    degrades silently rather than raising. Only the MCP *client* moves; the
+    dispatcher's upstream client (and its pytest-httpx mocks) stay on ``httpx``.
+
+    ``cache=None`` disables the SDK's new client-side response cache so every
+    call reaches the server, which is what these tests assert on (rate-limit
+    accounting, per-call audit lines, upstream call counts).
     """
     headers = {"Authorization": f"Bearer {token}"} if token else None
-    http_client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
+    http_client = httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app),
         base_url="http://mcp.test",
         headers=headers,
         timeout=30,
@@ -212,8 +223,9 @@ async def mcp_client_session(
     async with runtime.session_manager.run():
         async with (
             http_client,
-            streamable_http_client("http://mcp.test/mcp", http_client=http_client) as (read, write, _get_session_id),
-            ClientSession(read, write) as session,
+            Client(
+                streamable_http_client("http://mcp.test/mcp", http_client=http_client),
+                cache=None,
+            ) as client,
         ):
-            await session.initialize()
-            yield session
+            yield client

@@ -71,8 +71,8 @@ async def test_rate_limit_blocks_after_capacity(
         first = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
         second = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
-    assert first.isError is False
-    assert second.isError is True
+    assert first.is_error is False
+    assert second.is_error is True
     assert second.content[0].text.startswith("rate_limited: ")
     assert "Retry after" in second.content[0].text
 
@@ -171,7 +171,7 @@ async def test_upstream_5xx_audit_records_detail_separately(
             result = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
     # User sees a generic error; internal hostname is not leaked.
-    assert result.isError is True
+    assert result.is_error is True
     assert result.content[0].text.startswith("upstream_error: ")
     assert "pg-internal" not in result.content[0].text
 
@@ -206,7 +206,7 @@ async def test_upstream_client_errors_map_to_typed_results(
     async with mcp_client_session(app, runtime, token=access_token) as session:
         result = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
 
-    assert result.isError is True
+    assert result.is_error is True
     assert result.content[0].text.startswith(prefix)
 
 
@@ -246,7 +246,7 @@ async def test_invalid_body_is_rejected_locally_without_upstream_call(
     async with mcp_client_session(app, runtime, token=access_token) as session:
         result = await session.call_tool("list_products", {"store_ids": "s1", "body": {"product_status": "active"}})
 
-    assert result.isError is True
+    assert result.is_error is True
     assert result.content[0].text.startswith("invalid_arguments: ")
     assert "product_status" in result.content[0].text
     # The malformed call short-circuits before any upstream request.
@@ -269,5 +269,5 @@ async def test_valid_integer_enum_body_passes_validation(
     async with mcp_client_session(app, runtime, token=access_token) as session:
         result = await session.call_tool("list_products", {"store_ids": "s1", "body": {"product_status": 2}})
 
-    assert result.isError is False
+    assert result.is_error is False
     assert len(upstream_calls) == 1

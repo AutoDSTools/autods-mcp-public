@@ -64,11 +64,11 @@ async def test_products_manifest_lists_annotated_tools(
     assert len(by_name) == 11
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
-    assert tool.annotations.readOnlyHint is False
+    assert tool.annotations.read_only_hint is False
     # A ProductsResearch read endpoint is advertised read-only.
-    assert by_name["get_winning_products"].annotations.readOnlyHint is True
+    assert by_name["get_winning_products"].annotations.read_only_hint is True
     # The RD-68 self-identity op is advertised read-only.
-    assert by_name["get_current_user"].annotations.readOnlyHint is True
+    assert by_name["get_current_user"].annotations.read_only_hint is True
 
 
 async def test_tool_call_forwards_bearer_to_upstream(
@@ -92,8 +92,8 @@ async def test_tool_call_forwards_bearer_to_upstream(
             {"store_ids": "store-1", "body": body},
         )
 
-    assert result.isError is False
-    assert result.structuredContent == {
+    assert result.is_error is False
+    assert result.structured_content == {
         "operation_id": "upload_products",
         "status": 200,
         "ok": True,
@@ -103,6 +103,84 @@ async def test_tool_call_forwards_bearer_to_upstream(
     assert captured["auth"] == f"Bearer {access_token}"
     # The validated body is forwarded verbatim to the upstream.
     assert captured["body"] == '{"region":1,"status":1,"buy_site_id":1,"new_products":[{"asin":"B0X"}]}'
+
+
+async def test_success_result_shape_matches_the_1x_wire_format(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-99 golden output: the success path must serialize exactly as it did on mcp 1.x.
+
+    Through 1.x the SDK's ``call_tool`` decorator wrapped a handler's plain dict
+    into ``structuredContent`` plus one ``text`` block of
+    ``json.dumps(payload, indent=2)``. 2.x dropped that wrapping and
+    ``_success_result`` reproduces it by hand — the one change in the port that
+    live clients could see with *nothing raising anywhere* if it drifted (a
+    compact ``json.dumps``, a different block order, a missing
+    ``structuredContent``). The literal below was captured from a 1.29.0 run of
+    this exact call, so it pins the bytes rather than the intent.
+    """
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"task_id": "abc", "nested": {"n": 1}, "list": [1, 2]})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    body = {"region": 1, "status": 1, "buy_site_id": 1, "new_products": [{"asin": "B0X"}]}
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool("upload_products", {"store_ids": "store-1", "body": body})
+
+    payload = {
+        "operation_id": "upload_products",
+        "status": 200,
+        "ok": True,
+        "data": {"task_id": "abc", "nested": {"n": 1}, "list": [1, 2]},
+    }
+    assert result.is_error is False
+    assert result.structured_content == payload
+    assert len(result.content) == 1
+    block = result.content[0]
+    assert block.type == "text"
+    assert block.text == (
+        '{\n  "operation_id": "upload_products",\n  "status": 200,\n  "ok": true,\n'
+        '  "data": {\n    "task_id": "abc",\n    "nested": {\n      "n": 1\n    },\n'
+        '    "list": [\n      1,\n      2\n    ]\n  }\n}'
+    )
+    # …and the same shape on the wire, camelCase aliases included: mcp 2.x model
+    # fields are snake_case, so a hand-rolled ``model_dump()`` without
+    # ``by_alias=True`` would silently emit ``structured_content``.
+    wire = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+    assert wire["structuredContent"] == payload
+    assert wire["isError"] is False
+
+
+async def test_unanticipated_handler_error_becomes_a_typed_error_result(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token, monkeypatch
+) -> None:
+    """An exception the handler doesn't anticipate must still reach the model.
+
+    mcp 1.x's ``call_tool`` decorator caught everything and returned
+    ``isError=True``, so the LLM saw the message and could self-correct. 2.x
+    lets a handler exception propagate as a top-level JSON-RPC error the model
+    never sees, so ``on_call_tool`` carries its own catch-all. Simulated here by
+    making the rate limiter — the first thing the handler awaits after auth —
+    blow up in a way no ``except`` clause on the path names.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async def boom(_sub: str) -> None:
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(runtime.rate_limiter, "acquire", boom)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool("get_current_user", {})
+
+    assert result.is_error is True
+    assert result.content[0].text.startswith("internal_error: ")
+    # The exception text itself never reaches the client.
+    assert "kaboom" not in result.content[0].text
 
 
 async def test_tool_call_without_auth_context_is_error(mcp_settings, make_mcp_app, empty_manifest_dir) -> None:

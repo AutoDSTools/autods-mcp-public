@@ -1,6 +1,6 @@
 """MCP tool-error construction and upstream error mapping (F1 + F3).
 
-Every failure a client sees is a ``CallToolResult`` with ``isError=True`` and a
+Every failure a client sees is a ``CallToolResult`` with ``is_error=True`` and a
 short, safe text message prefixed by a stable ``error_type`` token (so an LLM
 or a client can branch without parsing prose). Two sources feed this module:
 
@@ -36,10 +36,14 @@ _LEAK_MARKERS = ("traceback", 'file "', "/usr/", "/app/", "  at ", "sqlalchemy",
 
 
 def error_result(error_type: str, message: str) -> types.CallToolResult:
-    """Build an ``isError`` tool result whose text is ``"{error_type}: {message}"``."""
+    """Build an error tool result whose text is ``"{error_type}: {message}"``.
+
+    ``is_error=True`` is the field name since mcp 2.x; it still serialises as
+    ``isError`` on the wire.
+    """
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=f"{error_type}: {message}")],
-        isError=True,
+        is_error=True,
     )
 
 

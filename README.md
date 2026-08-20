@@ -284,8 +284,8 @@ token upstream (the server never holds privileged credentials).
 
 Tools are defined by JSON manifests under `MCP_MANIFEST_DIR` (default: the
 bundled `manifests/`). The format mirrors
-`autods-mcp/generated/servers/<server>/operations.json`, extended with two
-fields the public server needs:
+`autods-mcp/generated/servers/<server>/operations.json`, extended with the
+fields the public server needs — two of them per operation:
 
 - `annotations` — `{ title, readOnlyHint, destructiveHint }` per operation.
   The server **refuses to boot** if any tool lacks a `title` or lacks both
@@ -302,11 +302,61 @@ the tool's `inputSchema`.
 The manifests under `manifests/` are maintained by hand: add a new operation
 as a JSON entry with its `parameters`, `has_json_body`/`request_body_required`
 flags, `annotations` (`title` + at least one hint), and `base_url_key`. The
-server runs two D5 startup lints and refuses to boot if either fails, so a
+server runs four startup lints and refuses to boot if any fails, so a
 malformed manifest can't reach a client: (1) every operation must have an
 `annotations.title` and at least one hint; (2) integer enum fields in a
 `body_schema` (e.g. `product_status`, `status`, `region`, `site_id`,
-`buy_site_id`, `inventory_status`) must be typed as integers, never strings.
+`buy_site_id`, `inventory_status`) must be typed as integers, never strings;
+(3) the concatenated `instructions` (below) must be at most 6000 characters;
+(4) a `business_errors` block (below) must declare at least one path, and its
+operation's `notes` must mention `ok`.
+
+#### Server instructions
+
+Each manifest may carry an `instructions` string. They are concatenated in
+sorted-filename order and passed to the MCP `Server`, which puts them in
+`InitializeResult.instructions` — the text a client surfaces in the model's
+system prompt (Claude Code shows it under an "MCP Server Instructions"
+heading). To see exactly what a live server advertises:
+
+```bash
+uv run python scripts/mcp_call.py instructions
+```
+
+Because that text rides in the system prompt on every model turn and sits in
+the client's cached prefix, it is kept to an **index**: where to start, and the
+handful of invariants that hold across every tool (enums are integers,
+`store_ids` is a path parameter, `ok` is a transport-level signal only). It
+lives in `manifests/_server.json`, a manifest with no operations. Anything
+needed to form a specific call belongs in that tool's `inputSchema`, and
+anything describing one tool's contract in its `description`/`notes` — both
+arrive attached to the tool, which is cheaper and more reliable. An empty
+`instructions` is normal for a domain that has nothing to add. The 6000-char
+boot lint is what keeps the channel from growing back.
+
+#### Business errors inside a 200
+
+Some upstreams answer a request they refused with HTTP 200 and an error code
+inside the payload, which makes the envelope's `ok` misleading on its own. An
+operation can declare where those codes live and what each one means:
+
+```json
+"business_errors": {
+  "paths": ["scraper_error.errorCode", "data.*.error.errorCode"],
+  "codes": { "PRODUCT_OOS": "Offer is out of stock. Choose a different offer." }
+}
+```
+
+`paths` are dotted paths into the upstream payload (`*` matches every element
+of a list or value of a dict). On a match the envelope gains a
+`business_error` list of `{code, message}` **next to** `data`; `data` itself is
+always the upstream payload verbatim, and an operation without the block gets
+an untouched envelope.
+
+This applies to a rejection inside an HTTP 200 only. A refusal the upstream
+reports with a non-2xx status is mapped to a generic typed error whose detail is
+logged server-side and never echoed to the caller, so it can't be surfaced as a
+recovery hint this way.
 
 ### Self-identity (RD-68)
 
@@ -321,6 +371,8 @@ breaks auth or a tool call.
 
 ### Manifest → upstream call flow
 
+0. Client connects; the `initialize` response carries the concatenated
+   manifest `instructions`.
 1. Client lists tools via `tools/list`; each descriptor carries the
    manifest annotations.
 2. Client calls a tool; the server validates the arguments against that tool's
@@ -330,7 +382,9 @@ breaks auth or a tool call.
 3. The dispatcher looks up the operation, resolves its upstream base URL
    from `base_url_key`, substitutes path params, attaches query/header
    params and the JSON body, forwards `Authorization: Bearer …`, and
-   returns a structured `{ operation_id, status, ok, data }` envelope.
+   returns a structured `{ operation_id, status, ok, data }` envelope — plus a
+   `business_error` sibling when the operation declares one and the payload
+   matches.
 
 ## Hardening (Phase F)
 

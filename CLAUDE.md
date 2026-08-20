@@ -57,8 +57,9 @@ Module map (`src/autods_mcp_server/`):
 - `oauth/` — three unauthenticated discovery routes (PRM RFC 9728, AS metadata RFC 8414,
   and a DCR shim `POST /oauth/register` RFC 7591 that hands back the pre-created
   `COGNITO_PUBLIC_CLIENT_ID` because Cognito doesn't speak DCR).
-- `manifests/` — `schema.py` Pydantic models + `loader.py` (`load_manifests`,
-  `ManifestRegistry`).
+- `manifests/` — `schema.py` Pydantic models, `loader.py` (`load_manifests`,
+  `ManifestRegistry`), and `instructions.py` (concatenates the per-manifest
+  `instructions` and enforces the size cap).
 - `tools.py` — converts manifest operations to MCP `Tool` descriptors and runs the boot
   lint (D5).
 - `dispatch.py` — `OperationDispatcher` resolves the upstream base URL, substitutes path
@@ -68,6 +69,11 @@ Module map (`src/autods_mcp_server/`):
   transport behind the auth dependency; the `call_tool` handler applies rate limiting and
   emits the audit log.
 - `errors.py` — MCP tool error construction + upstream error mapping.
+- `business_errors.py` — detects a business rejection reported *inside* an HTTP
+  200 payload (per-operation config is manifest data) and renders it as the
+  `business_error` envelope field.
+- `payload_paths.py` — the shared dotted-path-with-`*`-wildcard resolver used to
+  address a place inside an upstream payload from manifest data.
 - `analytics.py` — Mixpanel "MCP Call Received" event per tool call, keyed by the
   stable `autods_user_id`; fire-and-forget, fails open, no-op without `MIXPANEL_TOKEN`.
 - `identity.py` — `SelfIdentityResolver` resolves the caller's AutoDS identity via the
@@ -86,14 +92,71 @@ Each operation needs `operation_id`, `method`, `path`, `parameters`,
 `has_json_body`/`request_body_required`, `base_url_key` (`autods_api` or
 `products_research`), and `annotations`.
 
-Two boot-time lints (D5) refuse to start the server, so a malformed manifest can't reach a
+Four boot-time lints refuse to start the server, so a malformed manifest can't reach a
 client:
 
 - Every operation must have an `annotations.title` **and** at least one hint
-  (`readOnlyHint` or `destructiveHint`).
+  (`readOnlyHint` or `destructiveHint`) — D5.
 - Integer enum fields in `body_schema` (e.g. `product_status`, `status`, `region`,
   `site_id`, `buy_site_id`, `inventory_status`) **must** be typed as integers, never
-  strings.
+  strings — D5.
+- The **concatenated** `instructions` across all manifests must be ≤ 6000 chars
+  (RD-90). See the tiers below.
+- A `business_errors` block must carry at least one `paths` entry, and the operation's
+  `notes` must mention `ok` (RD-90). Both failures are otherwise silent: a block with no
+  paths can never match, and a block nobody documented populates a field the model was
+  never told to read.
+
+### Where text goes: the four tiers
+
+Manifest text reaches the model through four channels with very different cost and
+reliability, so text is placed by how reliably it must arrive — not by which field is
+convenient to edit:
+
+| Tier | Where | What belongs there |
+|---|---|---|
+| 1 | `inputSchema` (parameter `description`, `enum`) | anything needed to form *this* call — enum values, `min-max` syntax, id formats |
+| 2 | tool `description` / `notes` | this tool's observable contract: async-then-poll, response shape, the enums needed to *read* a response |
+| 3 | playbook body (RD-100, lazy) | multi-tool chains, state machines, polling cadence, recovery matrices |
+| 4 | `instructions` | **index only**: where to start, and the two or three server-wide invariants |
+
+Tiers 1–2 arrive attached to the tool. Tier 4 is the expensive one: `instructions` rides in
+the client's system prompt on **every** model turn for the life of the conversation and
+sits in the cached prefix, so editing it invalidates prompt caching downstream — and it is
+also the *least* reliable, since surfacing it at all is client discretion. Hence the size
+cap, and hence the rule that a long enum table belongs on the parameter that takes it, not
+here.
+
+The server-wide index lives in `manifests/_server.json` — a manifest with no operations,
+carrying only the tier-4 block. Everything else is per-domain, and an **empty**
+`instructions` is the normal case for a domain whose whole contract is tier 1/2
+(`users.json`, `stores.json`). There is deliberately no non-empty lint: requiring text per
+manifest would push filler into the most expensive channel.
+
+### Business errors inside a 200
+
+Some upstreams report a business rejection as HTTP 200 with an error code in the payload —
+`ok` is `true`, `map_upstream_error` never fires, and an agent that branches on `ok`
+reports success for a call that did nothing. An operation declares where to look and what
+each code means, as data:
+
+```json
+"business_errors": {
+  "paths": ["scraper_error.errorCode", "data.*.error.errorCode"],
+  "codes": { "PRODUCT_OOS": "Offer is out of stock. Choose a different offer." }
+}
+```
+
+`paths` are dotted paths **into the upstream payload** (i.e. relative to the envelope's
+`data`), where `*` fans out over a list's elements or a dict's values. A match publishes a
+`business_error` list of `{code, message}` **beside** `data` — never inside it, so the
+upstream payload stays verbatim and `dispatch.py` stays a pure forwarder. An operation
+carrying this block must also say in its `notes` that `ok` is transport-level only — the
+boot lint above enforces that, and that `paths` is non-empty.
+
+This covers a rejection inside a **2xx** only. A business rejection that arrives as a
+non-2xx is not deliverable to the model at all (see the Gotcha below), so don't describe
+one in `notes` as something the caller will be able to read.
 
 ### Keep descriptions implementation-agnostic
 
@@ -217,6 +280,12 @@ RD-50 :: Logging cleanup ::
 - **Rate limiting**: two per-`user.sub` token buckets (60/min, 1000/hour by default) in
   `call_tool`; Redis-backed via an atomic Lua script that mirrors `evaluate_buckets()`,
   fails open on Redis outage, falls back to in-process locally.
+- **Manifest text is tiered by required reliability, not by convenience** (RD-90): tier 1
+  `inputSchema` → tier 2 `description`/`notes` → tier 3 playbook → tier 4 `instructions`
+  (see **Tools are data**). `instructions` is an index with a hard 6000-char boot lint
+  because it rides the client's system prompt on every turn and sits in the cached prefix;
+  moving a long enum table back into it is a regression even though nothing about the call
+  breaks. Empty per-manifest `instructions` is legitimate — don't add a non-empty lint.
 - **Transport is stateless** (`stateless=True`) by design — production runs many
   replicas × workers, so no MCP session is pinned to a worker. Don't reintroduce
   session state.
@@ -292,6 +361,45 @@ production incident; don't undo the guard without understanding why it's there.
   query enum ships silently with no test catching it — verify query-param enums against the
   upstream controller by hand. Boot *does* fail on duplicate `operation_id`s across
   manifests and on tool names over 128 chars (`_MAX_TOOL_NAME_LENGTH`).
+- **Two upstream red herrings when verifying a filter enum against AutoDSApi.** (a) The
+  `value_type` in `api/resource/products/schema.py:products_schema_fields` is **not** the
+  contract — that tuple only feeds the `OneOf` allowlist for a filter's `name`. The cast
+  comes from the `value_type` *the caller sends* (`helper/convert_queries.py:convert_value`),
+  so what a filter value must be is decided by the **stored field type** in
+  `dal/model/item.py`. `variations.active_buy_item.region` is annotated `string` there and
+  is an `IntEnumField` in Mongo — it takes the integer. (b) `EnumField(Region,
+  use_name=True, …)` does **not** mean "send the name": `use_name` is popped into
+  `metadata` for the API docs, and the deserializer stays value-based unless
+  `serialize_with_name=True` is passed (`helper/custom_webargs_fields.py`). `region`,
+  `status` and `buy_site_id` on the upload body really are integers, which is what the
+  integer-enum boot lint asserts. Check the model field, not the schema annotation.
+- **Filter *fields* go phantom the same way tools do** (RD-90). `products.json` documented
+  a top-level `region` filter; `products_schema_fields` has no such entry — the item's
+  region is only `variations.active_buy_item.region`. Nothing catches this: the phantom-tool
+  test can only see tool-shaped tokens, and a bad filter `name` fails upstream with a
+  validation error the model can't act on. When you add a filterable field to manifest
+  text, confirm it against that tuple.
+- **A parsed manifest field that nothing reads is invisible, not harmless** (RD-90).
+  `Manifest.instructions` was parsed from day one and never passed to
+  `Server(instructions=…)`, so for the whole life of the server every hand-written enum
+  table, filter rule and "see the … table in server instructions" pointer reached exactly
+  nobody — and drifted freely, ending up documenting an `update_product` PUT workflow for
+  a tool that was never registered. Nothing failed, no test noticed, and the text looked
+  authoritative in review. When you add a manifest field, add the test that asserts it
+  arrives at a *client*, not just that it parses; `uv run python scripts/mcp_call.py
+  instructions` prints what a real handshake actually carried.
+- **A business rejection that arrives as a non-2xx cannot reach the model, however the
+  manifest describes it** (RD-90). `map_upstream_error` deliberately hands the client a
+  generic typed error and keeps the upstream detail server-side (`log_full`) — and for a
+  3xx the message is only "unexpected redirect", because `follow_redirects=False` means a
+  3xx signals a misconfigured upstream far more often than a business answer. So
+  `get_product_by_id`'s `notes` calling its 307 "a documented business response" promised
+  the model text it never receives: the caller sees an opaque `upstream_error` and reports
+  a fault instead of a missing add-on. `business_errors` closes this only for a 200. When
+  an upstream signals entitlement or policy through a status code, the *observable*
+  behaviour (which typed error arrives, and what it actually means) is what the `notes`
+  must describe — not the upstream's intent. Don't widen the error mapping to echo 3xx/4xx
+  bodies instead: those carry internal hostnames and are sanitized for that reason.
 - **`operations_count` in a manifest is cosmetic** — the model uses `extra="ignore"` and
   drops it; it's never validated and silently drifts. The real count guarantee is the
   tool-count assertions in the tests; update those by hand when you add/remove an operation.

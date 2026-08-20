@@ -6,12 +6,19 @@ block, plus the type mapping for the full ``schema_type`` vocabulary.
 """
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from autods_mcp_server.manifests import build_registry
 from autods_mcp_server.manifests.schema import ManifestOperation
-from autods_mcp_server.tools import BodySchemaError, build_input_model, build_tools, to_tool
+from autods_mcp_server.tools import (
+    BodySchemaError,
+    BusinessErrorsError,
+    build_input_model,
+    build_tools,
+    to_tool,
+)
 
 
 def test_readonly_with_path_params(bundled_manifest_dir: Path) -> None:
@@ -119,6 +126,56 @@ def test_build_tools_rejects_string_typed_enum_field() -> None:
     )
     with pytest.raises(BodySchemaError, match="product_status"):
         build_tools([operation])
+
+
+def _business_errors_op(**overrides: Any) -> ManifestOperation:
+    payload: dict[str, Any] = {
+        "operation_id": "scan_offer",
+        "method": "POST",
+        "path": "/scan",
+        "notes": "`ok` is a transport-level signal only: a rejected scan still answers 200.",
+        "business_errors": {"paths": ["scraper_error.errorCode"], "codes": {"PRODUCT_OOS": "hint"}},
+        "annotations": {"title": "Scan Offer", "readOnlyHint": True},
+    }
+    payload.update(overrides)
+    return ManifestOperation.model_validate(payload)
+
+
+def test_business_errors_block_with_notes_and_paths_passes_the_lint() -> None:
+    assert build_tools([_business_errors_op()])
+
+
+def test_build_tools_rejects_business_errors_without_paths() -> None:
+    """A block with no ``paths`` can never match — ``detect_business_errors``
+    returns early — so it reads as protection while doing nothing."""
+    operation = _business_errors_op(business_errors={"codes": {"PRODUCT_OOS": "hint"}})
+
+    with pytest.raises(BusinessErrorsError, match="no 'paths'"):
+        build_tools([operation])
+
+
+def test_build_tools_rejects_business_errors_the_notes_never_mention() -> None:
+    """RD-90's own lesson, applied to its own feature: the block populates a
+    ``business_error`` field, and the only place the model is told not to read
+    ``ok`` as success is the tool it is holding. Silent if forgotten."""
+    operation = _business_errors_op(notes="Read-only POST. Returns the scan result.")
+
+    with pytest.raises(BusinessErrorsError, match="never mention 'ok'"):
+        build_tools([operation])
+
+
+def test_the_ok_warning_is_not_satisfied_by_a_substring() -> None:
+    """``ok`` must appear as a word — "token"/"look" must not pass the guard."""
+    operation = _business_errors_op(notes="Forwards the caller's token; look at the result.")
+
+    with pytest.raises(BusinessErrorsError, match="never mention 'ok'"):
+        build_tools([operation])
+
+
+def test_operations_without_the_block_are_untouched_by_the_lint() -> None:
+    operation = _business_errors_op(business_errors=None, notes="Read-only POST.")
+
+    assert build_tools([operation])
 
 
 def test_delete_is_destructive() -> None:

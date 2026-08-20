@@ -82,6 +82,10 @@ async def test_tools_list_exposes_all_registered_ops(staging_app, access_token) 
     app, runtime = staging_app
     async with mcp_client_session(app, runtime, token=access_token) as session:
         tools = await session.list_tools()
+        # RD-90: the same handshake carries the concatenated manifest
+        # instructions, which is what a client puts in the model's system prompt.
+        assert session.instructions is not None
+        assert session.instructions.startswith("## AutoDS MCP — start here")
     names = {tool.name for tool in tools.tools}
     assert names == ALL_OPS
     # Every ProductsResearch op is advertised read-only.

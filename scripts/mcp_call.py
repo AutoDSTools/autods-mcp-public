@@ -8,6 +8,7 @@ cached locally so you only authorize in the browser once.
 
 Usage:
     uv run python scripts/mcp_call.py list                  # list tool names
+    uv run python scripts/mcp_call.py instructions          # print the server instructions from the handshake
     uv run python scripts/mcp_call.py token                 # print an access token (for reuse: export T=$(...))
     uv run python scripts/mcp_call.py list_stores_api
     uv run python scripts/mcp_call.py get_bulk_action_items '{"store_ids":"1","bulk_action_id":123}'
@@ -157,6 +158,12 @@ async def run_call(url: str, token: str, operation: str, arguments: dict) -> int
                 tools = await client.list_tools()
                 for tool in tools.tools:
                     print(tool.name)
+                return 0
+            if operation == "instructions":
+                # The server ``instructions`` as they arrived in this client's
+                # InitializeResult — i.e. exactly the block a real client puts in
+                # the model's system prompt (RD-90).
+                print(client.instructions or "(the server advertised no instructions)")
                 return 0
             result = await client.call_tool(operation, arguments)
             # ``by_alias``: 2.x model fields are snake_case, so a bare

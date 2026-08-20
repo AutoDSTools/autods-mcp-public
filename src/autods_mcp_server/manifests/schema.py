@@ -44,6 +44,29 @@ class ToolAnnotations(BaseModel):
     destructive_hint: bool | None = Field(default=None, alias="destructiveHint")
 
 
+class BusinessErrors(BaseModel):
+    """Declarative mapping of in-payload business rejections to recovery hints.
+
+    Some upstreams report a business rejection as HTTP 200 with an error code
+    inside the payload: the envelope's ``ok`` is ``True``, nothing in
+    ``errors.map_upstream_error`` fires, and an agent that branches on ``ok``
+    concludes the call succeeded. This block tells the transport where to look
+    and what to say when it finds something.
+
+    ``paths`` are dotted payload paths into the upstream ``data``, where ``*``
+    matches every element of a list / every value of a dict (see
+    ``payload_paths``). ``codes`` maps an upstream error code to the recovery
+    hint the model should read. Matching produces a ``business_error`` field
+    *beside* ``data`` in the envelope — never inside it, so the upstream
+    contract stays byte-identical and the dispatcher stays a pure forwarder.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    paths: list[str] = Field(default_factory=list)
+    codes: dict[str, str] = Field(default_factory=dict)
+
+
 class ManifestParameter(BaseModel):
     """A single path/query/header parameter of an operation."""
 
@@ -78,6 +101,11 @@ class ManifestOperation(BaseModel):
     # whose body shape isn't modelled yet; those keep the open-object behaviour.
     body_schema: dict[str, Any] | None = None
     notes: str | None = None
+    # Optional declarative "the upstream said 200 but rejected the request"
+    # config. ``None`` means the operation has no in-payload business errors to
+    # look for, which is the case for every operation whose failures arrive as
+    # a non-2xx status.
+    business_errors: BusinessErrors | None = None
     # Whether the operation is side-effect-free is advertised to clients via
     # ``annotations.read_only_hint`` (the MCP-canonical signal), so the
     # generator's separate ``safe`` flag is intentionally not modelled here —

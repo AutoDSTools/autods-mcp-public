@@ -2,7 +2,7 @@
   "server_name": "autods-users",
   "domain": "users",
   "base_url_key": "autods_api",
-  "instructions": "## AutoDS Users API — Agent Reference\n\nIdentity for the **currently authenticated user** (the caller).\n\n- `get_current_user` (GET /users/list/) returns the caller's own user record — id, name, email, and account status. Despite the upstream path name, it resolves only the authenticated user from the bearer token, not a list of other users.\n",
+  "instructions": "",
   "operations": [
     {
       "operation_id": "get_current_user",

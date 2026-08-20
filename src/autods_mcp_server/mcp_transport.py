@@ -3,7 +3,8 @@
 This module turns a manifest registry into a live MCP server:
 
 * :func:`build_runtime` loads manifests, runs the D5 annotation lint (refusing
-  to build if any tool is mis-annotated), and assembles the registry, the
+  to build if any tool is mis-annotated) and the RD-90 instructions size lint,
+  and assembles the registry, the concatenated server ``instructions``, the
   low-level MCP ``Server`` (with its ``on_list_tools`` / ``on_call_tool``
   handlers), the upstream HTTP client, the dispatcher, the shared Redis client
   + per-user rate limiter (F0/F1), and the ``StreamableHTTPSessionManager``.
@@ -51,6 +52,7 @@ from redis.asyncio import Redis
 from autods_mcp_server import __version__
 from autods_mcp_server.analytics import MixpanelClient, build_mixpanel
 from autods_mcp_server.auth import UserContext, get_current_user
+from autods_mcp_server.business_errors import BUSINESS_ERROR_KEY, detect_business_errors
 from autods_mcp_server.dispatch import (
     DispatchError,
     MissingArgumentError,
@@ -74,7 +76,12 @@ from autods_mcp_server.identity import (
     build_identity_resolver,
 )
 from autods_mcp_server.logging import get_logger
-from autods_mcp_server.manifests import ManifestRegistry, build_registry
+from autods_mcp_server.manifests import (
+    ManifestRegistry,
+    assert_instructions_within_limit,
+    build_instructions,
+    load_manifests,
+)
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
 from autods_mcp_server.redis_client import create_redis
 from autods_mcp_server.sentry import (
@@ -217,12 +224,19 @@ def _build_server(
     dispatcher: OperationDispatcher,
     rate_limiter: RateLimiter,
     mixpanel: MixpanelClient,
+    instructions: str,
 ) -> Server:
     """Create the low-level MCP server with tool list/call handlers.
 
     Since mcp 2.x the handlers are constructor kwargs rather than decorators,
     take the per-request ``ServerRequestContext`` as their first argument, and
     return the full result type (``ListToolsResult`` / ``CallToolResult``).
+
+    ``instructions`` is the concatenated manifest text (RD-90). The SDK carries
+    it through ``create_initialization_options()`` into
+    ``InitializeResult.instructions``, which clients surface in the model's
+    system prompt — so passing it here is the whole delivery mechanism for that
+    channel.
     """
     tools = build_tools(registry.list_operations())  # D5 lint runs here.
     validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
@@ -382,7 +396,17 @@ def _build_server(
                     upstream_status=result.status,
                     latency_ms=latency_ms,
                 )
-                return _success_result(result.model_dump())
+                payload = result.model_dump()
+                # RD-90: a 2xx whose payload carries a business rejection. The
+                # hint lands *beside* ``data``, so ``data`` remains the upstream
+                # payload verbatim; an operation without a ``business_errors``
+                # block gets an untouched envelope.
+                operation = registry.get(name)
+                if operation is not None:
+                    business_error = detect_business_errors(operation, payload.get("data"))
+                    if business_error is not None:
+                        payload[BUSINESS_ERROR_KEY] = business_error
+                return _success_result(payload)
 
             # F3 — map an upstream non-2xx to a safe, typed MCP error.
             mapped = map_upstream_error(result.status, result.data)
@@ -431,6 +455,7 @@ def _build_server(
     return Server(
         "autods-mcp-server",
         version=__version__,
+        instructions=instructions or None,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
     )
@@ -459,8 +484,22 @@ def build_runtime(
     Raises:
         ToolAnnotationError: if any manifest operation fails the D5 lint — this
             propagates out of ``create_app`` so the process refuses to boot.
+        BodySchemaError: if a ``body_schema`` types a known integer-enum field as
+            a string — likewise fatal at boot.
+        BusinessErrorsError: if a ``business_errors`` block declares no paths, or
+            its operation's ``notes`` never warn that ``ok`` is transport-level
+            only (RD-90) — likewise fatal at boot.
+        InstructionsTooLargeError: if the concatenated manifest ``instructions``
+            exceed the size budget (RD-90) — likewise fatal at boot.
     """
-    registry = build_registry(settings.mcp_manifest_dir)
+    # Manifests are read once: the registry indexes their operations, and the
+    # server ``instructions`` are the concatenation of their text blocks in the
+    # loader's sorted-filename order (deterministic across replicas, which the
+    # client's prompt cache depends on).
+    manifests = load_manifests(settings.mcp_manifest_dir)
+    registry = ManifestRegistry(manifests)
+    instructions = build_instructions(manifests)
+    assert_instructions_within_limit(instructions)
     http_client = http_client or create_http_client()
     redis = redis if redis is not None else create_redis(settings)
     rate_limiter = rate_limiter or build_rate_limiter(settings, redis)
@@ -478,7 +517,7 @@ def build_runtime(
         if identity_resolver is not None
         else build_identity_resolver(settings, redis, self_identity_resolver)
     )
-    server = _build_server(registry, dispatcher, rate_limiter, mixpanel)
+    server = _build_server(registry, dispatcher, rate_limiter, mixpanel, instructions)
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
     # stays off so the spec's SSE framing is still used for the single

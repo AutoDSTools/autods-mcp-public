@@ -1,4 +1,4 @@
-"""Manifest operation -> MCP tool descriptor conversion (D3) and the D5 lint.
+"""Manifest operation -> MCP tool descriptor conversion (D3) and the boot lints.
 
 Each manifest operation becomes one MCP ``Tool``. We build a pydantic v2 model
 describing the tool's inputs — one field per path/query/header parameter, plus a
@@ -12,6 +12,7 @@ as the ``body`` field's schema. Otherwise ``body`` is modelled as an open object
 records *that* a body exists, not its shape, so un-modelled bodies stay open.
 """
 
+import re
 from typing import Any
 
 from mcp import types
@@ -42,6 +43,13 @@ _INTEGER_ENUM_BODY_FIELDS = frozenset(
     {"product_status", "status", "region", "site_id", "buy_site_id", "inventory_status"}
 )
 
+# A standalone mention of ``ok`` in an operation's ``notes`` — backticked, bare
+# or capitalised. Used as the (deliberately loose) proxy for "this operation
+# warns the model that ``ok`` is transport-level only"; no lint can check that
+# the sentence around it says the right thing, but it does catch the block being
+# added with the warning forgotten entirely.
+_OK_MENTION = re.compile(r"\bok\b", re.IGNORECASE)
+
 
 class ToolAnnotationError(ValueError):
     """A registered operation is missing a required MCP annotation (D5)."""
@@ -49,6 +57,10 @@ class ToolAnnotationError(ValueError):
 
 class BodySchemaError(ValueError):
     """An operation's ``body_schema`` types a known integer-enum field as a string."""
+
+
+class BusinessErrorsError(ValueError):
+    """An operation's ``business_errors`` block can never fire, or is undocumented."""
 
 
 def build_input_model(operation: ManifestOperation) -> type[BaseModel]:
@@ -168,9 +180,42 @@ def _assert_integer_enum_fields(operation: ManifestOperation) -> None:
     walk(operation.body_schema)
 
 
+def _assert_business_errors_usable(operation: ManifestOperation) -> None:
+    """Reject a ``business_errors`` block that can't fire, or that ships silently.
+
+    Two failure modes, both of which look fine in review and produce no runtime
+    signal whatsoever — the same shape as the bug RD-90 itself fixed:
+
+    * **No ``paths``.** ``detect_business_errors`` returns ``None`` without a
+      path to look at, so the block is dead config that reads as protection.
+    * **``notes`` that never mention ``ok``.** The whole point of the block is
+      that an agent branching on ``ok`` must not read a 2xx as success. That
+      warning belongs on the tool the agent is actually holding (tier 2); left
+      out, the block populates a field nothing told the model to read.
+
+    Raises:
+        BusinessErrorsError: on either, at boot, like the other manifest lints.
+    """
+    config = operation.business_errors
+    if config is None:
+        return
+    if not config.paths:
+        raise BusinessErrorsError(
+            f"Operation '{operation.operation_id}' declares 'business_errors' with no 'paths'; "
+            f"the block can never match and is dead config."
+        )
+    if not _OK_MENTION.search(operation.notes or ""):
+        raise BusinessErrorsError(
+            f"Operation '{operation.operation_id}' declares 'business_errors' but its 'notes' never "
+            f"mention 'ok'; an operation that can reject a request inside a 2xx must say so on the "
+            f"tool itself, so the model knows not to read 'ok' as success."
+        )
+
+
 def build_tools(operations: list[ManifestOperation]) -> list[types.Tool]:
     """Lint, then convert every operation to an MCP tool descriptor."""
     assert_valid_annotations(operations)
     for operation in operations:
         _assert_integer_enum_fields(operation)
+        _assert_business_errors_usable(operation)
     return [to_tool(operation) for operation in operations]

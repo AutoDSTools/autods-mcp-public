@@ -4,7 +4,7 @@
   "generated_at": "2026-06-02T00:00:00+00:00",
   "operations_count": 1,
   "top_typed_operations_count": 0,
-  "instructions": "## AutoDS Bulk Actions API — Agent Reference\n\nBulk actions track the progress of async operations (product uploads, marketplace imports, bulk updates/deletes, etc.). Operations like upload_products (autods-products manifest) return a bulk_action object whose `id` you poll here.\n\n### Key enums (integer values)\n\n**bulk_status**: 1=created, 2=in_progress, 3=finished, 4=canceled, 99=error\n\n**bulk_action_type**:\n1=create_draft, 2=import_to_marketplace, 3=import_untracked,\n4=products_update, 5=products_delete, 6=drafts_delete,\n7=orders_update, 8=drafts_update, 9=products_relist,\n10=conversations_update\n\n### Common patterns\n- store_ids is always a path parameter (comma-separated string of store IDs)\n- bulk_action_id (path) is the integer `id` from the bulk_action returned by the operation that started the job\n- get_bulk_action_items is a read-only POST (safe); body holds optional filter/pagination\n- limit/offset pagination: default limit=10, offset=0\n",
+  "instructions": "",
   "operations": [
     {
       "operation_id": "get_bulk_action_items",
@@ -12,7 +12,7 @@
       "path": "/bulk_actions/{store_ids}/list/{bulk_action_id}",
       "summary": "Get the items (and their statuses) of a single bulk action.",
       "description": "",
-      "notes": "Read-only POST. Returns the per-item results of a bulk action so you can track upload/import progress. Path params: store_ids (comma-separated AutoDS store IDs), bulk_action_id (the integer id from the bulk_action object returned when the job was started, e.g. by upload_products). Body holds optional filter/pagination. Response: {results: [...], total_results: int}.",
+      "notes": "Read-only POST. Returns the per-item results of a bulk action so you can track upload/import progress. Path params: store_ids (comma-separated AutoDS store IDs), bulk_action_id (the integer id from the bulk_action object returned when the job was started, e.g. by upload_products). Body holds optional filter/pagination. Response: {results: [...], total_results: int}. Each result carries an integer `status` (1=created, 2=in_progress, 3=finished, 4=canceled, 99=error — the job is only over at 3 or 99, so keep polling while items are 1 or 2) and the parent action carries an integer `type`: 1=create_draft, 2=import_to_marketplace, 3=import_untracked, 4=products_update, 5=products_delete, 6=drafts_delete, 7=orders_update, 8=drafts_update, 9=products_relist, 10=conversations_update.",
       "tags": [
         "bulk_actions"
       ],

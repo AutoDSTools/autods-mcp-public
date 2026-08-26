@@ -91,14 +91,19 @@ sign-in:
 
 ```bash
 # Local (server running via `make run`)
-claude mcp add --transport http --callback-port 2048 autods-local http://localhost:8000/mcp
+claude mcp add --transport http --callback-port 2048 autods-public-local http://localhost:8000/mcp
 
 # Staging
-claude mcp add --transport http --callback-port 2048 autods-staging https://mcp-staging.autods.com/mcp
+claude mcp add --transport http --callback-port 2048 autods-public-staging https://mcp-staging.autods.com/mcp
 
 # Production
-claude mcp add --transport http --callback-port 2048 autods https://mcp.autods.com/mcp
+claude mcp add --transport http --callback-port 2048 autods-public-prod https://mcp.autods.com/mcp
 ```
+
+Use exactly these names. Tools are namespaced by alias
+(`mcp__autods-public-staging__list_stores_api`), so a consistent name is what tells
+you — and an agent — which environment a call lands in; `docs/release-checks.md`
+relies on it before it will run anything that writes.
 
 Add `-s user` to register the server for every project instead of just
 the current one (the default scope is `local`).
@@ -117,6 +122,11 @@ already published:
 Enable them from **Settings → Customize → Connectors** (the *Connectors*
 menu), then authorize when prompted.
 
+Note these two do **not** follow the `autods-public-*` alias convention above, and
+"AutoDS" pointing at *staging* while "AutoDS Prod" points at production is exactly
+the ambiguity that convention exists to remove. For a `docs/release-checks.md` run,
+add the CLI servers by their canonical names rather than relying on these.
+
 ### Codex
 
 Codex's default OAuth callback uses a random port and path, which can
@@ -126,13 +136,13 @@ per-environment path. Point Codex at it in `~/.codex/config.toml`:
 
 ```toml
 # Staging
-[mcp_servers.autods-staging]
+[mcp_servers.autods-public-staging]
 url = "https://mcp-staging.autods.com/mcp"
 mcp_oauth_callback_port = 2048
 mcp_oauth_callback_url = "http://localhost:2048/callback/j1OexN-34suD"
 
 # Production
-[mcp_servers.autods]
+[mcp_servers.autods-public-prod]
 url = "https://mcp.autods.com/mcp"
 mcp_oauth_callback_port = 2048
 mcp_oauth_callback_url = "http://localhost:2048/callback/sSA0buWJ4hMg"
@@ -479,3 +489,48 @@ The app client in `E2E_COGNITO_CLIENT_ID` must have `USER_PASSWORD_AUTH`
 enabled. The write ops (`upload_products`, `publish_drafts_to_marketplace`)
 are skipped unless `E2E_INCLUDE_WRITES=1`, so a default run never mutates
 staging data. See `tests/e2e/conftest.py` for the full env-var contract.
+
+### Post-release checks
+
+`docs/release-checks.md` is the checklist for a *deployed* build — the things the
+automated suites can't see: the OAuth sign-in a real client drives, the manifest
+text reaching a client, analytics still firing. Run it against staging (and the
+read-only sections against production) after every release, and extend it in the
+same commit as any new tool, user-visible behaviour, or shipped bug fix.
+
+It is written to be **driven by an agent**: ask Claude to run the release checks
+and it asks one round of questions, hands you the browser sign-in (the only step
+it must not do itself), then runs sections S, P, C, R, W and O unattended and
+reports. Two things need a person — the fresh browser authorization, and naming
+the store W may write to (a description like "the Shopify store" is enough; the
+agent resolves it against your store list).
+
+The connected MCP servers must be named `autods-public-staging` and
+`autods-public-prod` — the checklist keys the environment off the alias, so the
+tool namespace itself says which environment a call lands in.
+
+Observability (Sentry, Mixpanel, logs) is automated too, given access:
+`scripts/fetch_logs.py` reads the deployed server's structured logs out of the
+cluster log archive on S3, so verifying the audit trail needs AWS credentials
+rather than cluster access.
+
+```bash
+uv run python scripts/fetch_logs.py --env staging --since 30m
+uv run python scripts/fetch_logs.py --env staging --since 2h --event request --status 500
+```
+
+Its section **S** (deployment identity + the unauthenticated surface) is
+automated as `tests/e2e/test_release_checks_s.py`, which probes a *deployed*
+host over the network rather than standing the app up in-process:
+
+```bash
+make release-checks                                        # staging
+
+RUN_RELEASE_CHECKS=1 MCP_RELEASE_BASE_URL=https://mcp.autods.com \
+  uv run pytest tests/e2e/test_release_checks_s.py -v -rs  # production
+```
+
+Every check is read-only and safe anywhere, and none needs credentials — section
+S is the unauthenticated surface. Per-environment expectations (Cognito Hosted UI
+domain, a registered redirect URI) live in `KNOWN_ENVIRONMENTS` in
+`tests/e2e/conftest.py`. Sections C, R, W and O remain manual/agent-driven.

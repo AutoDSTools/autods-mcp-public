@@ -1,13 +1,26 @@
-"""Fixtures for the Phase E (E3) end-to-end smoke suite.
+"""Fixtures for the end-to-end suites.
 
-These tests stand the *real* server up (real Cognito JWT verification, real
-upstream HTTP) with ``MCP_ENV=staging`` and drive it through the real MCP
-Streamable HTTP client, so they require live staging credentials and network
-access. They are therefore **opt-in**: the whole suite is skipped unless
+Two different things live under ``tests/e2e``, and they differ in *what* they
+point at:
+
+* ``test_staging_smoke.py`` (Phase E / E3) stands the **real server up in this
+  process** (real Cognito JWT verification, real upstream HTTP) with
+  ``MCP_ENV=staging`` and drives it through the real MCP Streamable HTTP
+  client. It tests the code in the checkout against live upstreams.
+* ``test_release_checks_s.py`` probes a **deployed** server over the network
+  (``https://mcp-staging.autods.com`` by default) and asserts nothing about
+  the local code except its version. It is section *S* of
+  ``docs/release-checks.md``, automated.
+
+The first group requires live staging credentials, the second only network
+access. Both are **opt-in**: the in-process suite is skipped unless
 ``RUN_STAGING_E2E=1`` and the required staging env vars are present (see
-``_REQUIRED_VARS``). This keeps ``uv run pytest`` green on a laptop / CI box
-that has no staging secrets while still giving operators a one-command
-end-to-end check (``RUN_STAGING_E2E=1 uv run pytest tests/e2e``).
+``_REQUIRED_VARS``); the deployed probes are skipped unless
+``RUN_RELEASE_CHECKS=1`` *or* ``RUN_STAGING_E2E=1``. This keeps ``uv run
+pytest`` green on a laptop / CI box that has no staging secrets while still
+giving operators a one-command end-to-end check (``RUN_STAGING_E2E=1 uv run
+pytest tests/e2e``) and a one-command post-release probe (``make
+release-checks``).
 
 Token acquisition uses Cognito ``USER_PASSWORD_AUTH`` (InitiateAuth) against a
 test user, so the app client referenced by ``E2E_COGNITO_CLIENT_ID`` must have
@@ -33,6 +46,16 @@ Optional:
 * ``E2E_INCLUDE_WRITES=1`` — also exercise the write ops (upload_products,
   publish_drafts_to_marketplace). Off by default so the smoke run never mutates
   staging data.
+
+Env vars for the deployed release checks (section S) — all optional, and no
+credentials among them; section S is the *unauthenticated* surface:
+
+* ``RUN_RELEASE_CHECKS=1`` — the gate (``RUN_STAGING_E2E=1`` also opens it).
+* ``MCP_RELEASE_BASE_URL`` — origin of the deployed server under test
+  (default ``https://mcp-staging.autods.com``). No trailing slash, no ``/mcp``.
+* ``E2E_EXPECTED_COGNITO_DOMAIN`` / ``E2E_REGISTERED_REDIRECT_URI`` — override
+  the per-environment expectations in ``KNOWN_ENVIRONMENTS`` below (needed
+  only when probing a host that table doesn't know).
 """
 
 import base64
@@ -41,6 +64,7 @@ import hmac
 import os
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -212,3 +236,108 @@ def _allow_e2e_env_vars() -> Iterator[None]:
     ``RUN_STAGING_E2E`` vars fall outside it and so survive untouched. This
     fixture documents that dependency and is a no-op placeholder for it."""
     yield
+
+
+# --------------------------------------------------------------------------
+# Deployed-server probes (docs/release-checks.md section S)
+# --------------------------------------------------------------------------
+
+DEFAULT_RELEASE_BASE_URL = "https://mcp-staging.autods.com"
+
+# An unregistered redirect URI, used to prove the DCR shim actually rejects.
+# It must never appear in any environment's MCP_REGISTRATION_REDIRECT_URIS.
+UNREGISTERED_REDIRECT_URI = "https://release-check.invalid/oauth/callback"
+
+
+@dataclass(frozen=True)
+class DeployedEnvironment:
+    """Per-environment facts an S check compares the live answers against.
+
+    These mirror the helm values in ``autods-mcp-deploy``
+    (``values-staging.yaml`` / ``values-prod.yaml``). They're duplicated here
+    rather than derived because the point of the check is to catch the
+    deployment drifting from what it's supposed to be — deriving them from the
+    server's own answer would make every assertion trivially true.
+    """
+
+    cognito_hosted_ui_base_url: str
+    # A redirect URI that *is* on this environment's allowlist. Claude Code's
+    # fixed loopback callback is registered in every environment, so it's the
+    # stable choice.
+    registered_redirect_uri: str
+
+
+KNOWN_ENVIRONMENTS: dict[str, DeployedEnvironment] = {
+    "mcp-staging.autods.com": DeployedEnvironment(
+        cognito_hosted_ui_base_url="https://auth-staging.autods.com",
+        registered_redirect_uri="http://localhost:2048/callback",
+    ),
+    "mcp.autods.com": DeployedEnvironment(
+        cognito_hosted_ui_base_url="https://auth.autods.com",
+        registered_redirect_uri="http://localhost:2048/callback",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ReleaseTarget:
+    """The deployed server under test, plus what it is expected to answer."""
+
+    base_url: str
+    cognito_hosted_ui_base_url: str | None
+    registered_redirect_uri: str | None
+
+    @property
+    def host(self) -> str:
+        return urlsplit(self.base_url).netloc
+
+    @property
+    def mcp_url(self) -> str:
+        return f"{self.base_url}/mcp"
+
+    @property
+    def prm_url(self) -> str:
+        return f"{self.base_url}/.well-known/oauth-protected-resource"
+
+    @property
+    def as_metadata_url(self) -> str:
+        return f"{self.base_url}/.well-known/oauth-authorization-server"
+
+    @property
+    def registration_url(self) -> str:
+        return f"{self.base_url}/oauth/register"
+
+
+@pytest.fixture(scope="session")
+def release_target() -> ReleaseTarget:
+    """Resolve which deployment to probe, or skip the section."""
+    if os.environ.get("RUN_RELEASE_CHECKS") != "1" and os.environ.get("RUN_STAGING_E2E") != "1":
+        pytest.skip("release checks are opt-in; set RUN_RELEASE_CHECKS=1 to run them")
+
+    base_url = os.environ.get("MCP_RELEASE_BASE_URL", DEFAULT_RELEASE_BASE_URL).rstrip("/")
+    known = KNOWN_ENVIRONMENTS.get(urlsplit(base_url).netloc)
+    return ReleaseTarget(
+        base_url=base_url,
+        cognito_hosted_ui_base_url=(
+            os.environ.get("E2E_EXPECTED_COGNITO_DOMAIN") or (known.cognito_hosted_ui_base_url if known else None)
+        ),
+        registered_redirect_uri=(
+            os.environ.get("E2E_REGISTERED_REDIRECT_URI") or (known.registered_redirect_uri if known else None)
+        ),
+    )
+
+
+@pytest.fixture(scope="session")
+def probe(release_target: ReleaseTarget) -> Iterator[httpx.Client]:
+    """A plain HTTP client for the deployed server — the ``curl`` of section S.
+
+    ``follow_redirects=False`` so a redirect is a finding, not something the
+    client papers over, and no ``Origin`` header is sent (the Origin allowlist
+    middleware only rejects a *foreign* Origin, and real ``curl`` sends none).
+    """
+    with httpx.Client(
+        timeout=30,
+        follow_redirects=False,
+        headers={"user-agent": "autods-mcp-release-checks"},
+    ) as client:
+        yield client

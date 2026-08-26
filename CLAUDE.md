@@ -215,6 +215,8 @@ this checklist and update whatever it touches **in the same commit**:
 | adds/changes a manifest tool, `base_url_key`, or a boot-time lint (D5) | the **Tools are data** section here *and* the **Manifests** section in `README.md` |
 | changes a command, workflow, or convention (lint/test/run, commit format, Python rules) | the corresponding section here |
 | fixes a bug or incident whose root cause was non-obvious, or adds a guard/workaround that looks removable but isn't | a **Gotchas & hard-won lessons** bullet here (and a **Troubleshooting** entry in `README.md` if an operator/client would hit the symptom) |
+| adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
+| adds a fixture the checklist needs (a store, an entitlement, a supplier id) or a step that makes an agent stop and ask mid-run | a check in section `P` of `docs/release-checks.md`, or a rule that lets the run continue with a `skipped` |
 
 Rule of thumb: if you added an invariant a reviewer would flag if broken (a
 secret that must not leak, a fail-open path, a stateless-transport assumption),

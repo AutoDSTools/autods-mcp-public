@@ -240,7 +240,7 @@ exceed the client's ~10s connect timeout. Note it as upstream latency, not an au
 failure — but if it reproduces on **every** connect, it is a regression.
 
 **C3 — Handshake payload.** In the connected session, list the tools.
-Expected: exactly the **11** tools below, and the server instructions arrive with them.
+Expected: exactly the **12** tools below, and the server instructions arrive with them.
 
 Verify the instructions with the script, not with the client's UI:
 
@@ -524,8 +524,19 @@ query that window; without it O2 and O3 devolve into scanning.
 Run this section **last**: every check here looks for traces of the calls R and W
 just made.
 
-**O1 — Sentry.** `sentry.autods.com` shows the new `release` tag (from `__version__`)
-on events for this environment, and no new error class since the deploy.
+**O1 — Sentry.** No new error class since the deploy, and — *if this environment
+produced any event at all* — the new `release` tag (from `__version__`) on it.
+
+Take the release half as conditional, because on a healthy run there is nothing to
+read it from: `capture_tool_error` fires only on an upstream **5xx or unexpected
+3xx** (`mapped.log_full is not None`), and `capture_tool_exception` only on a
+transport failure or an `internal_error`. A mapped **4xx** and every
+`invalid_arguments` rejection reach Sentry not at all. So a clean environment
+emits zero events, `release:autods-mcp-public@<version>` legitimately matches
+nothing, and that is a `skipped (no event in this environment to carry the tag)` —
+**not** a pass, and not a fault either. Only an environment that *did* error owes
+you a release tag, and a tag reading an *older* version there is the finding this
+check exists for.
 
 Use the `sentry` MCP server — the one whose connection arguments carry
 `--host=sentry.autods.com`. A connector named "Sentry" that points at `sentry.io` or
@@ -547,6 +558,12 @@ wrong reading:
   tags are also where you read the release: `release: autods-mcp-public@<version>`.
   `user_context: [Filtered]` and an event with no request body are the scrubber and
   `max_request_body_size="never"` doing their jobs — worth a glance while you're there.
+- **"First seen" in the issue *listing* is clamped to the query period, so it reads
+  as recent for an issue that is months old.** A 24h search reported both live issues
+  as "first seen 23 hours ago"; `get_sentry_resource` dates them to 2026-07-09.
+  Never conclude "this error class is new since the deploy" from the listing — that
+  is what the `firstSeen:` query below is for, and the issue resource is where the
+  real timestamp lives.
 
 For "no new error class since the deploy", `search_issues` with
 `environment:<env> firstSeen:-24h` is the query that works — an empty result is the
@@ -575,8 +592,14 @@ run made (this run: 22 calls, 22 events); add the `$distinct_id` breakdown to co
 they are keyed to the P1 account and not filed anonymously under a `$device:` id.
 
 **O3 — Logs.** Each tool call above produced exactly one `tool_call` line with
-`request_id`, `user_sub`, `tool_name`, `op_id`, `upstream_status`, `latency_ms`.
-No request or response bodies in the logs.
+`request_id`, `cognito_username`, `autods_user_id`, `tool_name`, `op_id`,
+`upstream_status`, `upstream_url`, `latency_ms`. No request or response bodies in
+the logs.
+
+The caller field is **`cognito_username`** (which holds `claims.sub`, not a
+username — see the gotcha in `CLAUDE.md`), alongside `autods_user_id` and `email`.
+There is no `user_sub` key; grepping for one finds nothing on a perfectly healthy
+line.
 
 The pods ship stdout to `s3://autods-cluster-logs`, so this needs AWS credentials,
 not cluster access. `scripts/fetch_logs.py` handles the archive layout:
@@ -592,9 +615,12 @@ Assert three things: **one** `tool_call` line per call the run made (join on the
 `x-request-id` values collected during the run), each carrying the documented
 fields, and **no request or response bodies anywhere** in the output. The footer
 prints a per-event tally (`scanned events: request=9, tool_call=7`), so the
-one-line-per-call count is read off it rather than counted by hand.
+one-line-per-call count is read off it rather than counted by hand. The header and
+footer go to **stderr** and the entries to stdout, so redirect them apart
+(`>out.txt 2>meta.txt`) — merging with `2>&1` splices the footer onto the middle of
+a data line, where `tail` will not find it and it looks like no footer printed.
 
-Two properties of this script decide whether the answer means anything:
+Three properties of this script decide whether the answer means anything:
 
 * **`--event` defaults to `all`.** It used to default to `tool_call`, which made a
   seemingly unfiltered call hide every `request` line — the reading that turned
@@ -605,6 +631,13 @@ Two properties of this script decide whether the answer means anything:
   minutes, so two back-to-back `--since 40m` calls cover *different* periods — one
   can even resolve to a window ending in the future, returning zero entries from a
   perfectly healthy archive.
+* **`--request-id` matches the *whole* id, but the entries print only its first 8
+  characters.** Copying `32b97934` out of the output and passing it back filters
+  everything away — `0 entries matched`, exit 2, indistinguishable from a healthy
+  empty window. Since this check tells you to join on the ids collected during the
+  run, that is the main path, not a corner: take full ids from `--json` (the
+  `request_id` field) or from the `x-request-id` response header, never from the
+  text display.
 
 The archive lags a few minutes — if the window comes back empty, wait and retry
 once before recording anything.

@@ -27,8 +27,11 @@ from autods_mcp_server.manifests import (
     INSTRUCTIONS_TARGET,
     InstructionsTooLargeError,
     Manifest,
+    Playbook,
     assert_instructions_within_limit,
     build_instructions,
+    build_playbook_index,
+    build_playbook_registry,
     build_registry,
     load_manifests,
 )
@@ -151,12 +154,18 @@ async def test_instructions_reach_a_real_client(
     ``InitializeResult.instructions`` of a real MCP client handshake."""
     settings = mcp_settings(manifest_dir=bundled_manifest_dir)
     app, runtime = make_mcp_app(settings)
-    expected = build_instructions(load_manifests(bundled_manifest_dir))
+    expected = build_instructions(
+        load_manifests(bundled_manifest_dir),
+        playbook_index=build_playbook_index(build_playbook_registry(bundled_manifest_dir)),
+    )
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
         assert session.instructions == expected
 
     assert expected.startswith("## AutoDS MCP — start here")
+    # RD-100: the generated chain index is appended last, after the
+    # hand-written server index.
+    assert expected.endswith("call `get_playbook` for the runbook.")
 
 
 async def test_no_manifests_advertises_no_instructions(
@@ -172,8 +181,13 @@ async def test_no_manifests_advertises_no_instructions(
 # --- P0 guards on the committed manifest text -------------------------------
 
 
-def _all_text(manifests: list[Manifest]) -> str:
-    """Every string the manifests ship to a client, in one blob."""
+def _all_text(manifests: list[Manifest], playbooks: list[Playbook] | None = None) -> str:
+    """Every string the manifests and playbooks ship to a client, in one blob.
+
+    Playbook text is included because it ships the same way manifest text does —
+    a runbook naming a tool this server doesn't serve is the same failure, one
+    channel over.
+    """
     parts: list[str] = []
     for manifest in manifests:
         parts.append(manifest.instructions)
@@ -181,6 +195,8 @@ def _all_text(manifests: list[Manifest]) -> str:
             parts.extend([operation.summary, operation.description, operation.notes or ""])
             parts.append(json.dumps(operation.body_schema or {}))
             parts.extend(parameter.description or "" for parameter in operation.parameters)
+    for playbook in playbooks or []:
+        parts.append(playbook.model_dump_json())
     return "\n".join(parts)
 
 
@@ -243,8 +259,16 @@ _TOOL_SHAPED = re.compile(r"\b(?:get|list|search|upload|publish|update|create|de
 def test_bundled_instructions_are_within_the_target(bundled_manifest_dir: Path) -> None:
     """Baseline before RD-90 was 7,828 chars across five manifests. The cap is
     what keeps the four manifests still to be added (RD-69, RD-89, RD-94, RD-95)
-    from compounding it, and what RD-100's playbook index has to fit inside."""
-    text = build_instructions(load_manifests(bundled_manifest_dir))
+    from compounding it, and what RD-100's playbook index has to fit inside.
+
+    Measured *with* the generated playbook index, because that is what a client
+    receives — the whole point of putting the runbooks behind ``get_playbook``
+    is that a chain costs one index line here rather than its body.
+    """
+    text = build_instructions(
+        load_manifests(bundled_manifest_dir),
+        playbook_index=build_playbook_index(build_playbook_registry(bundled_manifest_dir)),
+    )
 
     assert 0 < len(text) <= INSTRUCTIONS_TARGET
 
@@ -259,9 +283,11 @@ def test_manifest_text_names_no_unregistered_tool(bundled_manifest_dir: Path) ->
     dropped; a confident call to a missing tool the moment it ships.
     """
     manifests = load_manifests(bundled_manifest_dir)
+    playbooks = build_playbook_registry(bundled_manifest_dir).list_playbooks()
     registered = {operation.operation_id for operation in build_registry(bundled_manifest_dir).list_operations()}
 
-    mentioned = set(_TOOL_SHAPED.findall(_all_text(manifests))) - _NON_TOOL_TOKENS - _vocabulary(manifests)
+    text = _all_text(manifests, playbooks)
+    mentioned = set(_TOOL_SHAPED.findall(text)) - _NON_TOOL_TOKENS - _vocabulary(manifests)
 
     assert mentioned <= registered, f"manifest text names unregistered tools: {sorted(mentioned - registered)}"
 

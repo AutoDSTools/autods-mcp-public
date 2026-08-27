@@ -9,8 +9,10 @@ cached locally so you only authorize in the browser once.
 Usage:
     uv run python scripts/mcp_call.py list                  # list tool names
     uv run python scripts/mcp_call.py instructions          # print the server instructions from the handshake
+    uv run python scripts/mcp_call.py resources             # list the resource URIs the server advertises
     uv run python scripts/mcp_call.py token                 # print an access token (for reuse: export T=$(...))
     uv run python scripts/mcp_call.py list_stores_api
+    uv run python scripts/mcp_call.py get_playbook '{"name":"product_import"}'
     uv run python scripts/mcp_call.py get_bulk_action_items '{"store_ids":"1","bulk_action_id":123}'
 
 Env:
@@ -164,6 +166,13 @@ async def run_call(url: str, token: str, operation: str, arguments: dict) -> int
                 # InitializeResult — i.e. exactly the block a real client puts in
                 # the model's system prompt (RD-90).
                 print(client.instructions or "(the server advertised no instructions)")
+                return 0
+            if operation in ("resources", "resources/list"):
+                # The playbook mirror (RD-100). Also the quickest check that the
+                # server is declaring the ``resources`` capability at all.
+                listed = await client.list_resources()
+                for resource in listed.resources:
+                    print(f"{resource.uri}\t{resource.mime_type}\t{resource.title or resource.name}")
                 return 0
             result = await client.call_tool(operation, arguments)
             # ``by_alias``: 2.x model fields are snake_case, so a bare

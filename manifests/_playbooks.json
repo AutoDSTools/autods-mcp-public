@@ -1,0 +1,33 @@
+{
+  "server_name": "autods-playbooks",
+  "domain": "playbooks",
+  "instructions": "",
+  "operations": [
+    {
+      "operation_id": "get_playbook",
+      "handler": "playbook",
+      "summary": "Get the runbook for one multi-tool playbook.",
+      "description": "",
+      "notes": "Read-only, and answered by this server — it makes no call on your behalf and changes nothing. A playbook is a chain of tools that only finishes the job together: it names the steps in order, what each step needs from the step before it, what is left unfinished if you stop partway, and what to do when a step fails. Call this before starting a chain, and again if you lose track of where you are in one. Response: {name, title, when_to_use, entry_operation, done_when, steps: [...], body}. Each step carries its position (`step` of `of`), the `operation_id` to call, its `goal`, the `next` operations, and — where they apply — `requires` (which input comes from which earlier response), `incomplete_alone` (what stays broken if you stop there) and `on_failure` (whether the step may be retried blind, what it may have left behind, and which read operation establishes whether it landed). `body` is the markdown runbook: polling cadence, status meanings and the recovery table.",
+      "tags": [
+        "playbooks"
+      ],
+      "parameters": [
+        {
+          "name": "name",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "The playbook to fetch. The allowed values are the registered playbooks."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Playbook",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

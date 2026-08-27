@@ -18,6 +18,11 @@ from typing import Any
 from mcp import types
 from pydantic import BaseModel, Field, create_model
 
+from autods_mcp_server.manifests.playbooks import (
+    HANDLER_PLAYBOOK,
+    PlaybookRegistry,
+    render_description_tail,
+)
 from autods_mcp_server.manifests.schema import ManifestOperation, SchemaType
 
 # autods-mcp ``schema_type`` -> Python type used for the generated pydantic field.
@@ -63,6 +68,18 @@ class BusinessErrorsError(ValueError):
     """An operation's ``business_errors`` block can never fire, or is undocumented."""
 
 
+class OperationHandlerError(ValueError):
+    """An operation names both a local handler and an upstream, or neither."""
+
+
+# The parameter a ``handler: "playbook"`` operation takes. Its ``enum`` is the
+# registered playbook names, injected at boot — which is what makes the enum the
+# index: ``inputSchema`` is the most reliably delivered channel there is, so the
+# list of playbooks reaches the model even in a client that drops ``instructions``
+# entirely.
+_PLAYBOOK_NAME_PARAM = "name"
+
+
 def build_input_model(operation: ManifestOperation) -> type[BaseModel]:
     """Build a pydantic model describing one operation's tool input.
 
@@ -89,20 +106,31 @@ def build_input_model(operation: ManifestOperation) -> type[BaseModel]:
     return create_model(f"{operation.operation_id}_Input", **fields)
 
 
-def _build_description(operation: ManifestOperation) -> str:
+def _build_description(operation: ManifestOperation, playbooks: PlaybookRegistry | None = None) -> str:
     """Compose a human/LLM-facing description from the manifest text fields.
 
     ``notes`` carry the most actionable guidance the generator produced (enum
     meanings, body shape, side effects), so they're appended when present.
+
+    When the operation is a step of a playbook (RD-100), a single bounded line
+    is appended pointing at ``get_playbook``. Bounded on purpose: this text
+    rides in the tool definitions on every turn, many turns before the situation
+    it describes arises, so it is a pointer and never a step body. The chain
+    itself is delivered lazily by ``get_playbook``, and the per-step nudge rides
+    on the call result, where it lands exactly when it is relevant.
     """
     parts = [operation.summary.strip(), operation.description.strip()]
     if operation.notes:
         parts.append(operation.notes.strip())
+    if playbooks is not None:
+        tail = render_description_tail(playbooks.steps_for(operation.operation_id))
+        if tail:
+            parts.append(tail)
     description = " ".join(part for part in parts if part)
     return description or operation.operation_id
 
 
-def _build_input_schema(operation: ManifestOperation) -> dict[str, Any]:
+def _build_input_schema(operation: ManifestOperation, playbooks: PlaybookRegistry | None = None) -> dict[str, Any]:
     """The tool ``inputSchema``: the param model's JSON schema, with the
     ``body`` property replaced by ``operation.body_schema`` when present.
 
@@ -114,16 +142,23 @@ def _build_input_schema(operation: ManifestOperation) -> dict[str, Any]:
     schema = build_input_model(operation).model_json_schema()
     if operation.has_json_body and operation.body_schema is not None:
         schema.setdefault("properties", {})["body"] = dict(operation.body_schema)
+    if operation.handler == HANDLER_PLAYBOOK and playbooks is not None:
+        # The registered names are runtime data, so they can't be authored in
+        # the manifest; injecting them here is what keeps the enum and the
+        # committed playbook files from drifting apart.
+        name_schema = schema.setdefault("properties", {}).get(_PLAYBOOK_NAME_PARAM)
+        if isinstance(name_schema, dict):
+            name_schema["enum"] = playbooks.names()
     return schema
 
 
-def to_tool(operation: ManifestOperation) -> types.Tool:
+def to_tool(operation: ManifestOperation, playbooks: PlaybookRegistry | None = None) -> types.Tool:
     """Convert a manifest operation into an MCP ``Tool`` descriptor."""
     annotations = operation.annotations
     return types.Tool(
         name=operation.operation_id,
-        description=_build_description(operation),
-        input_schema=_build_input_schema(operation),
+        description=_build_description(operation, playbooks),
+        input_schema=_build_input_schema(operation, playbooks),
         annotations=types.ToolAnnotations(
             title=annotations.title,
             read_only_hint=annotations.read_only_hint,
@@ -212,10 +247,54 @@ def _assert_business_errors_usable(operation: ManifestOperation) -> None:
         )
 
 
-def build_tools(operations: list[ManifestOperation]) -> list[types.Tool]:
+def _assert_handler_or_upstream(operation: ManifestOperation, playbooks: PlaybookRegistry | None) -> None:
+    """Exactly one of ``handler`` / ``base_url_key``, and a served handler at that.
+
+    Both halves fail silently otherwise. An operation with neither reaches the
+    dispatcher and blows up resolving an empty upstream key on the first call; an
+    operation with both looks routable and is not; a ``handler`` value nothing
+    serves would be dispatched upstream to a path that doesn't exist. The
+    ``handler: "playbook"`` case additionally needs at least one registered
+    playbook: with none, the tool's ``name`` enum is empty, so every call fails
+    validation and the tool is a dead end that still costs a tool definition.
+
+    Raises:
+        OperationHandlerError: at boot, like the other manifest lints.
+    """
+    handler = operation.handler
+    if handler is None:
+        if not operation.base_url_key:
+            raise OperationHandlerError(
+                f"Operation '{operation.operation_id}' declares neither 'handler' nor 'base_url_key'; "
+                f"an operation is either served locally or forwarded to an upstream."
+            )
+        if not operation.method or not operation.path:
+            raise OperationHandlerError(
+                f"Operation '{operation.operation_id}' is forwarded upstream but declares no 'method'/'path'."
+            )
+        return
+    if operation.base_url_key:
+        raise OperationHandlerError(
+            f"Operation '{operation.operation_id}' declares both handler '{handler}' and base_url_key "
+            f"'{operation.base_url_key}'; exactly one of the two is served."
+        )
+    if handler != HANDLER_PLAYBOOK:
+        raise OperationHandlerError(
+            f"Operation '{operation.operation_id}' names unknown handler '{handler}'; the local-handler "
+            f"registry is closed."
+        )
+    if playbooks is not None and not len(playbooks):
+        raise OperationHandlerError(
+            f"Operation '{operation.operation_id}' serves playbooks, but none are registered; its 'name' "
+            f"enum would be empty and every call would fail validation."
+        )
+
+
+def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry | None = None) -> list[types.Tool]:
     """Lint, then convert every operation to an MCP tool descriptor."""
     assert_valid_annotations(operations)
     for operation in operations:
         _assert_integer_enum_fields(operation)
         _assert_business_errors_usable(operation)
-    return [to_tool(operation) for operation in operations]
+        _assert_handler_or_upstream(operation, playbooks)
+    return [to_tool(operation, playbooks) for operation in operations]

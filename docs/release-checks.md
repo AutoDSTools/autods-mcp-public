@@ -264,7 +264,7 @@ whether the **server** sent them.
 get_current_user  list_stores_api  list_products  upload_products
 publish_drafts_to_marketplace  get_bulk_action_items
 search_products  get_winning_products  get_product_by_id
-get_similar_products  get_recommended_products
+get_similar_products  get_recommended_products  get_playbook
 ```
 
 Check the instructions text starts with `## AutoDS MCP — start here` and matches
@@ -281,6 +281,26 @@ pin the build under test.
 **C5 — Annotations.** Every read tool advertises `readOnlyHint: true`;
 `publish_drafts_to_marketplace` advertises `destructiveHint: true`. Clients gate
 confirmation prompts on these.
+
+**C6 — Playbooks are advertised and fetchable.** In the client, check that
+`get_playbook`'s `name` parameter offers an **enum** of playbook names (not a free
+string), then call `get_playbook '{"name": "product_import"}'`.
+→ an `ok: true` envelope whose `data.steps` carries three steps with derived
+`step`/`of` numbers and a non-empty `data.body`. An empty enum, or a `get_playbook`
+that answers `invalid_arguments` for a name the enum itself offered, means the
+playbook files didn't ship in the image — the chain guidance is then silently absent
+for every user even though every other tool works.
+
+**C7 — The chain hint reaches the model.** The `upload_products` description must end
+with `Step 1 of 3 in playbook "product_import" — call get_playbook for the full
+chain.`, and `list_stores_api`'s must carry no such line.
+→ if the tails are missing, agents get no signal that upload is step 1 of 3 and will
+stop after it. If a tail appears on a tool that is in no chain, the index is wrong.
+
+**C8 — Resources.** `uv run python scripts/mcp_call.py resources`
+→ lists `autods://playbook/<name>` with `text/markdown` for each playbook. An error
+about an unsupported method means the server stopped declaring the `resources`
+capability — a regression, not a client quirk.
 
 ---
 
@@ -422,6 +442,11 @@ experience.
 → `{"total_results": …, "results": […]}`. An unknown id legitimately yields
 `total_results: 0` or a documented 4xx; both pass. What must **not** happen is
 `internal_error` or a transport failure.
+On a **2xx** the envelope must also carry a `playbook` sibling of `data` reading
+`{"name": "product_import", "step": "2/3", "next": ["list_products"], …}` — this is
+step 2 of a chain, and without that field an agent has nothing telling it the import
+isn't confirmed until it reads the store back. It must **not** appear on R3's
+`list_products` (the final step) or on R1/R2 (not chain tools at all).
 
 **R11 — Bad input is refused cleanly.** Call `get_product_by_id` with
 `{"product_id": "not-a-hex-id"}` and `list_products` with no `body`.

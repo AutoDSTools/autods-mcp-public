@@ -1,0 +1,71 @@
+{
+  "name": "product_import",
+  "title": "Import products into a store and confirm they landed",
+  "when_to_use": "The user wants supplier products added to one of their stores and expects them to actually be there afterwards.",
+  "entry_operation": "upload_products",
+  "steps": [
+    {
+      "operation_id": "upload_products",
+      "goal": "Submit the chosen supplier products to the store; this starts an asynchronous bulk job and returns its id.",
+      "requires": [
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        }
+      ],
+      "then": [
+        "get_bulk_action_items"
+      ],
+      "incomplete_alone": "Nothing is in the store until the bulk job finishes.",
+      "on_failure": {
+        "idempotent": false,
+        "left_behind": "The bulk job may have started even though the call errored.",
+        "verify_with": {
+          "operation_id": "list_products",
+          "how": "product_status 1, filtered on the uploaded title"
+        },
+        "then": "If the drafts exist, poll them; otherwise resubmit unchanged.",
+        "ask_user": true
+      }
+    },
+    {
+      "operation_id": "get_bulk_action_items",
+      "goal": "Poll the bulk job until every item reports a final status, and read which items failed.",
+      "requires": [
+        {
+          "param": "bulk_action_id",
+          "from_operation": "upload_products",
+          "field": "bulk_action.id"
+        },
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        }
+      ],
+      "incomplete_alone": "Items still at status 1 or 2 mean the import is not finished.",
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the poll; a failed read changes nothing."
+      }
+    },
+    {
+      "operation_id": "list_products",
+      "goal": "Confirm the store now holds the products, at the status and price that were intended.",
+      "requires": [
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        }
+      ],
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the read; a failed read changes nothing."
+      }
+    }
+  ],
+  "done_when": "list_products returns the submitted products, at the product_status and price the user asked for.",
+  "body": "# Import products into a store\n\nThree calls. The first one only *starts* the work, so a chain that stops after it leaves the user believing products were added when nothing may have been.\n\n## 1. `upload_products` — submit\n\nNeeds a store id (`list_stores_api` → `id`) and at least one product source in the body: `new_products`, `file_url` or `finder_categories`. The `asin` of a `new_products` entry is the supplier's own product id — the bare id or the full product URL, never a search or category page.\n\n`status` in the body decides what is created: `1` (draft) leaves the products invisible to buyers until they are published; `2` (active) puts them on sale straight away. Ask which one is wanted if the user has not said — it is not recoverable by a later read, and the wrong choice is either an invisible catalogue or an unintended live listing.\n\nThe response is `{status, bulk_action}` and it arrives *before* the work happens. Keep `bulk_action.id`; it is the only handle on the job.\n\n## 2. `get_bulk_action_items` — poll to a final state\n\nCall it with that `bulk_action_id` and the same `store_ids`. Each item carries an integer status:\n\n| status | meaning | what to do |\n| --- | --- | --- |\n| 1 | created | keep polling |\n| 2 | in progress | keep polling |\n| 3 | finished | done, this item landed |\n| 4 | canceled | it will not land; report it |\n| 99 | error | it will not land; read the item's error and report it |\n\nThe job is over only when no item is left at 1 or 2. A sensible cadence is a first poll after about ten seconds, then every fifteen to thirty seconds, and stop after a few minutes of no movement rather than polling indefinitely — report what is still unfinished instead.\n\nA mixed result is normal and is *not* a failure of the call: some items reach 3 while others reach 99. Report both halves; do not resubmit the whole batch because one item failed.\n\n## 3. `list_products` — confirm\n\nFilter the store for what was submitted (by title, or by the ids the poll reported) and check the products are present with the intended `product_status` and price. This is the step that turns \"the job said finished\" into \"the user's store holds the products\", and it is the same read used to recover from an ambiguous failure in step 1.\n\n## When step 1 fails\n\nA timeout or a server error on `upload_products` is **ambiguous**: the job may have started anyway, and nothing in the error says which. Retrying blind duplicates the listing.\n\n1. Read the store with `list_products`, filtered on the title that was submitted (drafts are `product_status` 1).\n2. If the products are there, the job started — continue at step 2. The bulk id is lost, so poll by re-reading the store instead.\n3. If they are not there, the submission may be repeated unchanged.\n4. Confirm with the user before resubmitting: a duplicate listing costs them money to unwind.\n\n`get_bulk_action_items` and `list_products` are reads. A failed read changes nothing, so retry either freely.\n\n## Done\n\n`list_products` returns the submitted products, at the `product_status` and price the user asked for, and any item that ended at 4 or 99 has been reported rather than silently dropped."
+}

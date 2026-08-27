@@ -303,7 +303,8 @@ fields the public server needs — two of them per operation:
 - `base_url_key` — which upstream serves the operation (`autods_api` →
   `AUTODS_API_BASE_URL`, `products_research` → `PRODUCTS_RESEARCH_BASE_URL`).
   Set per-operation or once at the manifest level; one running server can
-  route different tools to different upstreams.
+  route different tools to different upstreams. An operation served *by this
+  server* declares `handler` instead — see **Playbooks** below.
 
 Each operation's path/query/header parameters (plus a free-form JSON `body`
 when present) are converted into a pydantic model whose JSON schema becomes
@@ -312,14 +313,15 @@ the tool's `inputSchema`.
 The manifests under `manifests/` are maintained by hand: add a new operation
 as a JSON entry with its `parameters`, `has_json_body`/`request_body_required`
 flags, `annotations` (`title` + at least one hint), and `base_url_key`. The
-server runs four startup lints and refuses to boot if any fails, so a
+server runs its startup lints and refuses to boot if any fails, so a
 malformed manifest can't reach a client: (1) every operation must have an
 `annotations.title` and at least one hint; (2) integer enum fields in a
 `body_schema` (e.g. `product_status`, `status`, `region`, `site_id`,
 `buy_site_id`, `inventory_status`) must be typed as integers, never strings;
 (3) the concatenated `instructions` (below) must be at most 6000 characters;
 (4) a `business_errors` block (below) must declare at least one path, and its
-operation's `notes` must mention `ok`.
+operation's `notes` must mention `ok`; (5) each operation declares exactly one
+of `handler` / `base_url_key`; (6) the six playbook lints (below).
 
 #### Server instructions
 
@@ -368,6 +370,78 @@ reports with a non-2xx status is mapped to a generic typed error whose detail is
 logged server-side and never echoed to the caller, so it can't be surfaced as a
 recovery hint this way.
 
+#### Playbooks (RD-100)
+
+Some goals need several tools called in order, and nothing in a single tool
+descriptor says so — an agent that stops after step 2 of 3 leaves work that
+looks done and isn't. A **playbook** declares one such chain as data, in
+`manifests/playbooks/*.json`:
+
+```json
+{
+  "name": "product_import",
+  "title": "Import products into a store and confirm they landed",
+  "when_to_use": "The user wants supplier products added to one of their stores…",
+  "entry_operation": "upload_products",
+  "steps": [
+    {
+      "operation_id": "upload_products",
+      "goal": "Submit the chosen supplier products to the store…",
+      "requires": [{"param": "store_ids", "from_operation": "list_stores_api", "field": "id"}],
+      "then": ["get_bulk_action_items"],
+      "incomplete_alone": "Nothing is in the store until the bulk job finishes.",
+      "on_failure": {
+        "idempotent": false,
+        "left_behind": "The bulk job may have started even though the call errored.",
+        "verify_with": {"operation_id": "list_products", "how": "product_status 1, filtered on the uploaded title"},
+        "then": "If the drafts exist, poll them; otherwise resubmit unchanged.",
+        "ask_user": true
+      }
+    }
+  ],
+  "done_when": "list_products returns the submitted products…",
+  "body": "…the markdown runbook…"
+}
+```
+
+Step numbers, the default successor (the next step in the list) and the
+`operation_id → steps` index are all **derived**, never authored, so renumbering
+a chain or adding an operation to a second chain can't desynchronise them. Six
+boot lints cover the rest: every referenced operation must be registered, every
+`requires[].param` must be an input its own step accepts, names must be unique
+and every step reachable from `entry_operation`, a non-final destructive step
+must say what stopping costs (`incomplete_alone`), a non-idempotent destructive
+step must name a **read-only** operation that establishes whether the write
+landed (`verify_with`), and every rendered string must fit its channel.
+
+A client meets a playbook on four channels, by when the text is needed:
+
+- **`get_playbook`** — one tool, `name` an enum of the registered playbooks,
+  returning the whole runbook. The runbook therefore costs nothing until an
+  agent enters the flow, and the enum doubles as the index of what exists.
+  It is answered by this server (no upstream call) and is otherwise an ordinary
+  tool: rate-limited, audited, tracked, and returning the usual envelope.
+- **the result envelope** — a successful call of a non-final chain step gains a
+  `playbook` field *beside* `data` (`{name, step, next, incomplete_alone,
+  runbook}`, at most 200 serialized characters), so the nudge is in context
+  exactly when the agent has just finished that step.
+- **the error text** — a failing chain step whose `on_failure` is declared gets
+  the chain consequence appended to the `isError` message ("this step is not
+  idempotent … verify with `list_products` … before retrying"). An error result
+  carries no `structuredContent`, so this is the only way to deliver it, and it
+  is the half that prevents a duplicated write.
+- **the tool `description` and `instructions`** — one bounded pointer each
+  (`Step 1 of 3 in playbook "product_import" — call get_playbook for the full
+  chain.`) and one generated index line per chain. No step bodies in either.
+
+Playbooks are also mirrored as `autods://playbook/<name>` resources with
+`mimeType: text/markdown`, for hosts that let a user attach a resource:
+
+```bash
+uv run python scripts/mcp_call.py resources
+uv run python scripts/mcp_call.py get_playbook '{"name":"product_import"}'
+```
+
 ### Self-identity (RD-68)
 
 The caller's own AutoDS identity (`id`, `name`, `email`) is resolved by the
@@ -394,7 +468,10 @@ breaks auth or a tool call.
    params and the JSON body, forwards `Authorization: Bearer …`, and
    returns a structured `{ operation_id, status, ok, data }` envelope — plus a
    `business_error` sibling when the operation declares one and the payload
-   matches.
+   matches, and a `playbook` sibling when the tool is a non-final step of a
+   chain. An operation that declares a `handler` instead of a `base_url_key`
+   skips step 3 entirely: it is answered locally, after the same rate limiting,
+   validation, analytics and audit, and returns the same envelope shape.
 
 ## Hardening (Phase F)
 

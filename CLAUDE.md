@@ -58,16 +58,19 @@ Module map (`src/autods_mcp_server/`):
   and a DCR shim `POST /oauth/register` RFC 7591 that hands back the pre-created
   `COGNITO_PUBLIC_CLIENT_ID` because Cognito doesn't speak DCR).
 - `manifests/` — `schema.py` Pydantic models, `loader.py` (`load_manifests`,
-  `ManifestRegistry`), and `instructions.py` (concatenates the per-manifest
-  `instructions` and enforces the size cap).
+  `ManifestRegistry`), `instructions.py` (concatenates the per-manifest
+  `instructions` and enforces the size cap), and `playbooks.py` (RD-100: the
+  multi-tool chains from `manifests/playbooks/`, their registry, their boot
+  lints, and every string rendered from them).
 - `tools.py` — converts manifest operations to MCP `Tool` descriptors and runs the boot
   lint (D5).
 - `dispatch.py` — `OperationDispatcher` resolves the upstream base URL, substitutes path
   params, attaches query/header params + JSON body, forwards the caller's bearer token,
   and returns a `{ operation_id, status, ok, data }` envelope.
 - `mcp_transport.py` — builds the runtime and mounts the **stateless** Streamable HTTP
-  transport behind the auth dependency; the `call_tool` handler applies rate limiting and
-  emits the audit log.
+  transport behind the auth dependency; the `call_tool` handler applies rate limiting,
+  emits the audit log, branches to the local-handler seam (RD-100), and attaches the
+  playbook hints. Also serves the playbook resource mirror (`resources/list`+`read`).
 - `errors.py` — MCP tool error construction + upstream error mapping.
 - `business_errors.py` — detects a business rejection reported *inside* an HTTP
   200 payload (per-operation config is manifest data) and renders it as the
@@ -90,9 +93,11 @@ Tools are defined by JSON manifests under `manifests/` (`MCP_MANIFEST_DIR`), mai
 hand. To add a tool, add a JSON operation entry — do **not** write a Python function.
 Each operation needs `operation_id`, `method`, `path`, `parameters`,
 `has_json_body`/`request_body_required`, `base_url_key` (`autods_api` or
-`products_research`), and `annotations`.
+`products_research`), and `annotations`. The exception is a **locally-handled**
+operation (RD-100), which declares `handler` instead of `base_url_key` and carries no
+`method`/`path` at all — see **Playbooks** below.
 
-Four boot-time lints refuse to start the server, so a malformed manifest can't reach a
+Boot-time lints refuse to start the server, so a malformed manifest can't reach a
 client:
 
 - Every operation must have an `annotations.title` **and** at least one hint
@@ -106,6 +111,10 @@ client:
   `notes` must mention `ok` (RD-90). Both failures are otherwise silent: a block with no
   paths can never match, and a block nobody documented populates a field the model was
   never told to read.
+- Exactly one of `handler` / `base_url_key` per operation; a forwarding operation needs
+  `method` + `path`; `handler` must name a handler the closed local registry serves
+  (RD-100).
+- The six playbook lints (RD-100), below.
 
 ### Where text goes: the four tiers
 
@@ -117,7 +126,7 @@ convenient to edit:
 |---|---|---|
 | 1 | `inputSchema` (parameter `description`, `enum`) | anything needed to form *this* call — enum values, `min-max` syntax, id formats |
 | 2 | tool `description` / `notes` | this tool's observable contract: async-then-poll, response shape, the enums needed to *read* a response |
-| 3 | playbook body (RD-100, lazy) | multi-tool chains, state machines, polling cadence, recovery matrices |
+| 3 | playbook `body` (lazy — fetched by `get_playbook`) | multi-tool chains, state machines, polling cadence, recovery matrices |
 | 4 | `instructions` | **index only**: where to start, and the two or three server-wide invariants |
 
 Tiers 1–2 arrive attached to the tool. Tier 4 is the expensive one: `instructions` rides in
@@ -157,6 +166,85 @@ boot lint above enforces that, and that `paths` is non-empty.
 This covers a rejection inside a **2xx** only. A business rejection that arrives as a
 non-2xx is not deliverable to the model at all (see the Gotcha below), so don't describe
 one in `notes` as something the caller will be able to read.
+
+### Playbooks: multi-tool chains (RD-100)
+
+Some goals need several tools in order, and the chain is invisible from any single tool
+descriptor — an agent that stops after step 2 of 3 leaves work that looks done. A
+**playbook** is one such chain, declared as data in `manifests/playbooks/*.json` and
+loaded by its own loader (`manifests/playbooks.py`). `load_manifests` globs `*.json`
+**non-recursively**, so the subdirectory is skipped for free; a sibling
+`manifests/playbooks.json` would instead be parsed as a manifest and rejected on the
+missing `server_name`.
+
+"Playbook", not "workflow": *workflow* implies the server executes something, and it
+collides with MCP's experimental tasks primitive.
+
+**Four things are derived, never authored** — each of them would otherwise drift the
+moment a chain is renumbered or an operation joins a second chain:
+
+- `step`/`of` come from list position (the models have no such fields);
+- the default successor is the next step — author `then` only at a branch;
+- the `operation_id → [step]` index is built by the registry, so one operation can
+  participate in several playbooks;
+- every string a client sees is rendered from the same file.
+
+**`on_failure` is chain consequence, not an error catalogue.** Transport errors
+(`errors.py`), in-payload business errors (`business_errors`) and async end-states
+(`notes`) are each already delivered at the moment they happen by machinery that owns
+them; restating any of it in a playbook creates a second source that drifts and arrives
+at the wrong time. What nothing else owns is "did the write land, and is retrying safe?"
+— which is why the fields are only ones that hold regardless of *which* error arrived
+(`idempotent`, `left_behind`, `verify_with`, `then`, `ask_user`). Don't add a per-step
+list of possible errors. `ask_user` is a rare flag, not a default: hosts already gate a
+`destructiveHint` tool behind their own prompt, so reserve it for steps where the *retry*
+is the risk.
+
+Six boot lints, all fatal, all with a rejection test in `tests/mcp_server/test_playbooks.py`:
+
+1. every `operation_id` / `entry_operation` / `requires[].from_operation` / `then[]` /
+   `on_failure.verify_with.operation_id` resolves to a registered operation;
+2. `requires[].param` resolves to a declared parameter or `body_schema` property of its
+   own step's operation (which is why `requires` is structured, not prose — prose can't
+   be linted);
+3. playbook names unique; `entry_operation` is one of the steps; every step reachable
+   from it;
+4. a non-final step whose operation is `destructiveHint: true` must carry
+   `incomplete_alone`;
+5. a `destructiveHint` step with `on_failure.idempotent: false` must declare
+   `verify_with`, and that operation must be `readOnlyHint: true`. Note the *obvious*
+   verification tool is often the wrong one: polling a bulk job needs an id a failed
+   write never returned, so verification goes through a list/read operation;
+6. every rendered string fits its channel — `body` ≤ 6000, envelope hint ≤ 200
+   (serialized, compact), failure tail ≤ 320, description tail ≤ 120.
+
+**Delivery is split across three channels by when the text is needed**, and that split
+is the design, not an optimisation:
+
+| Channel | When it arrives | What it carries |
+|---|---|---|
+| `get_playbook` tool | on request | the whole runbook — zero tokens until an agent enters the flow |
+| result envelope / `isError` text | per call | the per-step nudge, in context right after step N |
+| tool `description` tail | every turn | one bounded pointer, ≤ 120 chars, no step bodies |
+| `instructions` | every turn | one generated index line per chain |
+
+`get_playbook` is a **tool**, not only a resource: tools are the one primitive every host
+exposes to the model, and its `name` **enum is the index** — `inputSchema` is the most
+reliably delivered channel there is, so the list of chains reaches the model even in a
+client that drops `instructions` entirely. Playbooks are *also* mirrored as
+`autods://playbook/<name>` resources (`text/markdown`); that mirror is what declares the
+`resources` capability, so RD-92 registers more URIs rather than declaring it again.
+
+### The local-handler seam
+
+`get_playbook` is the first operation this server answers itself. An operation declares
+`handler: "playbook"` instead of `base_url_key`; `call_tool` branches to a small **closed**
+handler registry *after* the rate limiter, the analytics event and argument validation, and
+*before* `dispatch` — so a local operation is metered, tracked, validated and audited
+exactly like a forwarded one, and returns the same `{operation_id, status, ok, data}`
+envelope. Keep it that way: moving the branch earlier would create an unmetered path, and a
+bare markdown `TextContent` instead of the envelope would make a local tool observably
+different from every other tool for no gain (a model reads `\n`-escaped markdown fine).
 
 ### Keep descriptions implementation-agnostic
 
@@ -290,7 +378,27 @@ RD-50 :: Logging cleanup ::
   breaks. Empty per-manifest `instructions` is legitimate — don't add a non-empty lint.
 - **Transport is stateless** (`stateless=True`) by design — production runs many
   replicas × workers, so no MCP session is pinned to a worker. Don't reintroduce
-  session state.
+  session state. This is also why the playbook hint has no "show it once" dedup: there
+  is no session to remember in. A Redis "once per user per hour" gate is possible and
+  is deliberately not worth it — if a hint needs deduping, it is too long.
+- **A playbook hint rides beside `data`, never inside it** (RD-100) — the same rule as
+  `business_error`, for the same reason: `data` is the upstream payload verbatim and
+  `dispatch.py` stays a pure forwarder. The hint is emitted only on a successful call of
+  a non-final chain step, so a non-playbook envelope is byte-identical to pre-RD-100
+  (`test_success_result_shape_matches_the_1x_wire_format` pins that).
+- **The success path and the failure path are different code paths, and the failure one
+  is the half that pays off** (RD-100). `error_result` returns a flat `TextContent` with
+  no `data` and no `structuredContent`, so `on_failure` guidance can only be *appended to
+  the error text* — it cannot ride on the dict. It is attached on the two ambiguous
+  failures (upstream unreachable, mapped upstream error) and nowhere else: a rate-limit or
+  `invalid_arguments` rejection sent nothing upstream, so there is no chain consequence to
+  report. A step with no `on_failure` produces an error byte-identical to today's.
+- **The failure tail's budget (320) is larger than the envelope hint's (200) on purpose**
+  (RD-100). The envelope hint is serialized twice per call and repeats on *every* poll of
+  a polling step; the failure tail fires once per failure, rides in `content` only, and is
+  what prevents a duplicated write — so it can afford to name the verification tool and
+  how to use it. Both are boot lints, not runtime truncation: half a sentence about a
+  duplicated write is worse than a deploy that refuses to start.
 - **OpenTelemetry stays inert** (RD-99): mcp 2.x hard-depends on `opentelemetry-api`
   and instruments its request path, but with no `opentelemetry-sdk` installed the API
   hands back non-recording spans — nothing is collected or exported, and Sentry remains
@@ -402,6 +510,18 @@ production incident; don't undo the guard without understanding why it's there.
   behaviour (which typed error arrives, and what it actually means) is what the `notes`
   must describe — not the upstream's intent. Don't widen the error mapping to echo 3xx/4xx
   bodies instead: those carry internal hostnames and are sanitized for that reason.
+- **Registering `on_list_resources` is what declares the `resources` capability** —
+  `Server.get_capabilities` derives the whole capability block from which handlers exist,
+  so adding a resource handler changes the handshake for every client, not just the ones
+  that ask for a resource. That is fine and intended here (RD-100 landed the capability;
+  RD-92 adds URIs), but it means you cannot add a resource handler "just to try it" on a
+  branch that ships. Relatedly, `ReadResourceResult` contents need an explicit
+  `mime_type`: a bare string advertises `text/plain` and the markdown is lost.
+- **A locally-handled operation must not inherit the manifest-level `base_url_key`**
+  (RD-100). The registry resolves the manifest default onto every operation that doesn't
+  set one; left unguarded, a `handler` operation would silently acquire an upstream and
+  the "exactly one of the two" lint could never fire. The `if operation.handler is None`
+  guard in `loader.py` is what keeps that lint meaningful — it looks removable and isn't.
 - **`operations_count` in a manifest is cosmetic** — the model uses `extra="ignore"` and
   drops it; it's never validated and silently drifts. The real count guarantee is the
   tool-count assertions in the tests; update those by hand when you add/remove an operation.

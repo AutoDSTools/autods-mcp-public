@@ -55,6 +55,7 @@ from autods_mcp_server.auth import UserContext, get_current_user
 from autods_mcp_server.business_errors import BUSINESS_ERROR_KEY, detect_business_errors
 from autods_mcp_server.dispatch import (
     DispatchError,
+    DispatchResult,
     MissingArgumentError,
     OperationDispatcher,
     UnknownOperationError,
@@ -82,6 +83,17 @@ from autods_mcp_server.manifests import (
     build_instructions,
     load_manifests,
 )
+from autods_mcp_server.manifests.playbooks import (
+    HANDLER_PLAYBOOK,
+    PLAYBOOK_KEY,
+    PlaybookRegistry,
+    assert_playbooks_valid,
+    build_playbook_index,
+    build_playbook_registry,
+    render_failure_hint,
+    render_playbook_payload,
+    render_success_hint,
+)
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
 from autods_mcp_server.redis_client import create_redis
 from autods_mcp_server.sentry import (
@@ -99,12 +111,17 @@ _USER_CONTEXT_STATE_KEY = "mcp_user_context"
 
 _audit_logger = get_logger("autods_mcp_server.audit")
 
+# URI scheme + media type of the playbook resource mirror (RD-100 P3).
+_PLAYBOOK_RESOURCE_SCHEME = "autods://playbook/"
+_PLAYBOOK_MIME_TYPE = "text/markdown"
+
 
 @dataclass
 class McpRuntime:
     """Everything needed to serve the MCP transport for one app instance."""
 
     registry: ManifestRegistry
+    playbooks: PlaybookRegistry
     server: Server
     session_manager: StreamableHTTPSessionManager
     dispatcher: OperationDispatcher
@@ -194,11 +211,64 @@ def _remote_endpoint(registry: ManifestRegistry, op_id: str) -> str:
     ``autods_api POST /products/{store_ids}/``) — never the substituted URL,
     which would embed store ids / query values (high cardinality + request
     data). Falls back to the tool name if the op can't be resolved.
+
+    A locally-handled operation has no upstream, so it reports
+    ``local <handler> <op_id>`` — same shape, same event, no pretend URL.
     """
     operation = registry.get(op_id)
     if operation is None:
         return op_id
+    if operation.handler is not None:
+        return f"local {operation.handler} {operation.operation_id}"
     return f"{operation.base_url_key} {operation.method.upper()} {operation.path}"
+
+
+def _playbook_result(playbooks: PlaybookRegistry, op_id: str, arguments: dict[str, Any]) -> DispatchResult:
+    """The ``get_playbook`` local handler.
+
+    Returns the same ``DispatchResult`` envelope a forwarded call produces, so
+    everything downstream — the audit line, the success-result shape, the
+    business-error pass — treats it identically and the client cannot tell a
+    local operation from a forwarded one. A bare markdown ``TextContent`` would
+    read more prettily, but a uniform envelope is worth more than unescaped
+    newlines (a model reads ``\\n``-escaped markdown fine).
+
+    Raises:
+        MissingArgumentError: unknown/missing name. The tool's ``name`` enum
+            normally rejects that at validation; this is the defensive path, and
+            it reuses the dispatcher's own input-validation error so the caller
+            gets the usual ``invalid_arguments`` rather than an internal error.
+    """
+    name = arguments.get("name")
+    if not isinstance(name, str) or not name:
+        raise MissingArgumentError(f"Operation '{op_id}' requires parameter 'name'.")
+    playbook = playbooks.get(name)
+    if playbook is None:
+        raise MissingArgumentError(
+            f"Unknown playbook '{name}'. Registered playbooks: {', '.join(playbooks.names()) or 'none'}."
+        )
+    return DispatchResult(operation_id=op_id, status=200, ok=True, data=render_playbook_payload(playbook))
+
+
+def _with_failure_hint(result: types.CallToolResult, hint: str | None) -> types.CallToolResult:
+    """Append a playbook's chain-consequence guidance to an error result.
+
+    The failure path is a *different* code path from the success path and the
+    half that actually pays off: ``error_result`` returns a flat ``TextContent``
+    with no ``data`` and no ``structuredContent``, so guidance can only ride on
+    the text. Without a hint the result is returned untouched — an error on a
+    step with no ``on_failure``, or on a tool in no playbook at all, is
+    byte-identical to what it was before playbooks existed.
+    """
+    if hint is None:
+        return result
+    block = result.content[0]
+    if not isinstance(block, types.TextContent):  # pragma: no cover - error results are always text
+        return result
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=f"{block.text}\n{hint}")],
+        is_error=True,
+    )
 
 
 def _success_result(payload: dict[str, Any]) -> types.CallToolResult:
@@ -221,6 +291,7 @@ def _success_result(payload: dict[str, Any]) -> types.CallToolResult:
 
 def _build_server(
     registry: ManifestRegistry,
+    playbooks: PlaybookRegistry,
     dispatcher: OperationDispatcher,
     rate_limiter: RateLimiter,
     mixpanel: MixpanelClient,
@@ -238,7 +309,7 @@ def _build_server(
     system prompt — so passing it here is the whole delivery mechanism for that
     channel.
     """
-    tools = build_tools(registry.list_operations())  # D5 lint runs here.
+    tools = build_tools(registry.list_operations(), playbooks)  # D5 + RD-100 lints run here.
     validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
 
     async def on_list_tools(
@@ -246,6 +317,45 @@ def _build_server(
         _params: types.PaginatedRequestParams | None,
     ) -> types.ListToolsResult:
         return types.ListToolsResult(tools=tools)
+
+    # RD-100 resource mirror. Every playbook is also readable as
+    # ``autods://playbook/<name>`` with ``mimeType: text/markdown``, for hosts
+    # that let a *user* attach a resource. It is a mirror, not the delivery
+    # mechanism: ``resources/`` is host-mediated and behaves unevenly across
+    # clients, which is why the runbook ships as a tool. Registering
+    # ``on_list_resources`` is what declares the ``resources`` capability in the
+    # handshake — RD-92 adds URIs to this list rather than declaring it again.
+    resources = [
+        types.Resource(
+            uri=f"{_PLAYBOOK_RESOURCE_SCHEME}{playbook.name}",
+            name=playbook.name,
+            title=playbook.title,
+            description=playbook.when_to_use,
+            mime_type=_PLAYBOOK_MIME_TYPE,
+        )
+        for playbook in playbooks.list_playbooks()
+    ]
+
+    async def on_list_resources(
+        _ctx: ServerRequestContext[Any, Any],
+        _params: types.PaginatedRequestParams | None,
+    ) -> types.ListResourcesResult:
+        return types.ListResourcesResult(resources=resources)
+
+    async def on_read_resource(
+        _ctx: ServerRequestContext[Any, Any],
+        params: types.ReadResourceRequestParams,
+    ) -> types.ReadResourceResult:
+        uri = str(params.uri)
+        name = uri.removeprefix(_PLAYBOOK_RESOURCE_SCHEME) if uri.startswith(_PLAYBOOK_RESOURCE_SCHEME) else ""
+        playbook = playbooks.get(name) if name else None
+        if playbook is None:
+            raise ValueError(f"Unknown resource '{uri}'.")
+        # ``mime_type`` is set explicitly: handing back a bare string would
+        # advertise ``text/plain`` and lose the markdown the body is written in.
+        return types.ReadResourceResult(
+            contents=[types.TextResourceContents(uri=params.uri, mime_type=_PLAYBOOK_MIME_TYPE, text=playbook.body)]
+        )
 
     async def on_call_tool(
         ctx: ServerRequestContext[Any, Any],
@@ -345,9 +455,27 @@ def _build_server(
                     )
                     return error_result(ERROR_INVALID_ARGUMENTS, validation_error)
 
+            # The playbook step this call is part of, if any. Looked up once:
+            # it decides whether a hint rides on the success envelope and
+            # whether the chain-consequence tail rides on an error.
+            step_refs = playbooks.steps_for(name)
+            step_ref = step_refs[0] if step_refs else None
+
             start = time.perf_counter()
             try:
-                result = await dispatcher.dispatch(name, arguments, user_context)
+                # RD-100: the local-handler seam. It sits *after* the rate
+                # limiter, the analytics event and argument validation, and
+                # before the dispatcher — so a locally-served operation is
+                # metered, tracked, validated and audited exactly like a
+                # forwarded one, and the envelope it returns is
+                # indistinguishable. The handler registry is closed (the boot
+                # lint rejects any other value), so this can't become an
+                # arbitrary dispatch table.
+                operation = registry.get(name)
+                if operation is not None and operation.handler == HANDLER_PLAYBOOK:
+                    result = _playbook_result(playbooks, name, arguments)
+                else:
+                    result = await dispatcher.dispatch(name, arguments, user_context)
             except MissingArgumentError as exc:
                 # Our own input validation — the message is safe to surface.
                 emit(
@@ -371,9 +499,16 @@ def _build_server(
                     tool_name=name,
                     upstream_url=exc.upstream_url or None,
                 )
-                return error_result(
-                    ERROR_UPSTREAM_UNREACHABLE,
-                    "The upstream service could not be reached. Please try again later.",
+                # The ambiguous failure, and the one the chain hint exists for:
+                # an async write may have started even though no response came
+                # back. "Retry on failure" without a way to check for partial
+                # success duplicates the write.
+                return _with_failure_hint(
+                    error_result(
+                        ERROR_UPSTREAM_UNREACHABLE,
+                        "The upstream service could not be reached. Please try again later.",
+                    ),
+                    render_failure_hint(step_ref) if step_ref is not None else None,
                 )
             except (UnknownOperationError, DispatchError) as exc:
                 # UnknownOperationError shouldn't happen (the tool name came off
@@ -401,11 +536,19 @@ def _build_server(
                 # hint lands *beside* ``data``, so ``data`` remains the upstream
                 # payload verbatim; an operation without a ``business_errors``
                 # block gets an untouched envelope.
-                operation = registry.get(name)
                 if operation is not None:
                     business_error = detect_business_errors(operation, payload.get("data"))
                     if business_error is not None:
                         payload[BUSINESS_ERROR_KEY] = business_error
+                # RD-100: the per-step nudge, on the one channel that puts it in
+                # front of the model at the moment it has just finished step N.
+                # Same placement rule as ``business_error`` — beside ``data``,
+                # never inside it. Absent on a non-chain tool and on a final
+                # step, so a non-playbook envelope is byte-identical to before.
+                if step_ref is not None:
+                    hint = render_success_hint(step_ref)
+                    if hint is not None:
+                        payload[PLAYBOOK_KEY] = hint
                 return _success_result(payload)
 
             # F3 — map an upstream non-2xx to a safe, typed MCP error.
@@ -435,7 +578,13 @@ def _build_server(
                     upstream_status=result.status,
                     detail=mapped.log_full,
                 )
-            return mapped.result
+            # A mapped upstream error is ambiguous for exactly the same reason a
+            # transport failure is: a 5xx from an endpoint that starts an async
+            # job says nothing about whether the job started.
+            return _with_failure_hint(
+                mapped.result,
+                render_failure_hint(step_ref) if step_ref is not None else None,
+            )
         except Exception as exc:  # noqa: BLE001 - deliberate catch-all, see above
             if not audited:
                 emit(
@@ -458,6 +607,8 @@ def _build_server(
         instructions=instructions or None,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
+        on_list_resources=on_list_resources,
+        on_read_resource=on_read_resource,
     )
 
 
@@ -491,6 +642,12 @@ def build_runtime(
             only (RD-90) — likewise fatal at boot.
         InstructionsTooLargeError: if the concatenated manifest ``instructions``
             exceed the size budget (RD-90) — likewise fatal at boot.
+        OperationHandlerError: if an operation names both a local handler and an
+            upstream, or neither (RD-100) — likewise fatal at boot.
+        PlaybookError: if a playbook names an operation this server doesn't
+            serve, has an unreachable step, leaves a destructive step's
+            consequences undeclared, or renders text over a channel's size
+            budget (RD-100) — likewise fatal at boot.
     """
     # Manifests are read once: the registry indexes their operations, and the
     # server ``instructions`` are the concatenation of their text blocks in the
@@ -498,7 +655,13 @@ def build_runtime(
     # client's prompt cache depends on).
     manifests = load_manifests(settings.mcp_manifest_dir)
     registry = ManifestRegistry(manifests)
-    instructions = build_instructions(manifests)
+    # RD-100: the chains, from the ``playbooks/`` subdirectory of the same
+    # manifest dir. ``load_manifests`` globs non-recursively, so the two loaders
+    # never see each other's files. Lints run against the operation registry —
+    # a chain can only name tools this server actually serves.
+    playbooks = build_playbook_registry(settings.mcp_manifest_dir)
+    assert_playbooks_valid(playbooks, registry)
+    instructions = build_instructions(manifests, playbook_index=build_playbook_index(playbooks))
     assert_instructions_within_limit(instructions)
     http_client = http_client or create_http_client()
     redis = redis if redis is not None else create_redis(settings)
@@ -517,7 +680,7 @@ def build_runtime(
         if identity_resolver is not None
         else build_identity_resolver(settings, redis, self_identity_resolver)
     )
-    server = _build_server(registry, dispatcher, rate_limiter, mixpanel, instructions)
+    server = _build_server(registry, playbooks, dispatcher, rate_limiter, mixpanel, instructions)
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
     # stays off so the spec's SSE framing is still used for the single
@@ -525,6 +688,7 @@ def build_runtime(
     session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
     return McpRuntime(
         registry=registry,
+        playbooks=playbooks,
         server=server,
         session_manager=session_manager,
         dispatcher=dispatcher,

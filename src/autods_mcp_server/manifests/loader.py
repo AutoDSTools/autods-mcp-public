@@ -52,8 +52,12 @@ class ManifestRegistry:
                     )
                 # Resolve the effective upstream now so every consumer reads a
                 # concrete key and never has to know about manifest-level
-                # inheritance.
-                operation.base_url_key = operation.base_url_key or manifest.base_url_key
+                # inheritance. A locally-handled operation (RD-100) has no
+                # upstream at all, so it is deliberately left without one rather
+                # than inheriting the manifest default — the "exactly one of
+                # handler / base_url_key" lint would otherwise never fire.
+                if operation.handler is None:
+                    operation.base_url_key = operation.base_url_key or manifest.base_url_key
                 self._operations[operation.operation_id] = operation
 
     def list_operations(self) -> list[ManifestOperation]:

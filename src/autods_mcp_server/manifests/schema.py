@@ -85,8 +85,10 @@ class ManifestOperation(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     operation_id: str
-    method: str
-    path: str
+    # Empty for a locally-handled operation, which never builds an upstream
+    # request. The lint in ``tools.py`` requires both on a forwarding operation.
+    method: str = ""
+    path: str = ""
     summary: str = ""
     description: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -113,7 +115,16 @@ class ManifestOperation(BaseModel):
     annotations: ToolAnnotations = Field(default_factory=ToolAnnotations)
     # Which upstream serves this op. ``None`` means "inherit the manifest-level
     # default"; the registry resolves it to a concrete value at load time.
+    # Left ``None`` (and *not* filled in from the manifest default) when
+    # ``handler`` is set — such an operation has no upstream.
     base_url_key: str | None = None
+    # RD-100: the local handler that serves this operation instead of the
+    # upstream dispatcher. ``None`` — the overwhelmingly common case — means the
+    # operation is forwarded. The set of valid values is a closed registry in
+    # ``mcp_transport``, and a boot lint requires exactly one of ``handler`` /
+    # ``base_url_key`` per operation: a "local" operation that also names an
+    # upstream, or a forwarded one that names neither, is a packaging error.
+    handler: str | None = None
 
 
 class Manifest(BaseModel):

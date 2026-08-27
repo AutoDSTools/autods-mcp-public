@@ -115,6 +115,7 @@ def test_build_tools_rejects_string_typed_enum_field() -> None:
             "operation_id": "bad_enum_op",
             "method": "POST",
             "path": "/x",
+            "base_url_key": "autods_api",
             "has_json_body": True,
             "request_body_required": True,
             "body_schema": {
@@ -136,6 +137,10 @@ def _business_errors_op(**overrides: Any) -> ManifestOperation:
         "notes": "`ok` is a transport-level signal only: a rejected scan still answers 200.",
         "business_errors": {"paths": ["scraper_error.errorCode"], "codes": {"PRODUCT_OOS": "hint"}},
         "annotations": {"title": "Scan Offer", "readOnlyHint": True},
+        # Set explicitly: these operations bypass the registry (which resolves
+        # the manifest-level default), and ``build_tools`` requires exactly one
+        # of ``base_url_key`` / ``handler`` (RD-100).
+        "base_url_key": "autods_api",
     }
     payload.update(overrides)
     return ManifestOperation.model_validate(payload)

@@ -47,7 +47,7 @@ class InstructionsTooLargeError(ValueError):
     """The concatenated manifest ``instructions`` exceed the hard size limit."""
 
 
-def build_instructions(manifests: list[Manifest]) -> str:
+def build_instructions(manifests: list[Manifest], *, playbook_index: str = "") -> str:
     """Concatenate the per-manifest ``instructions``, in the order given.
 
     Callers pass the list straight from ``load_manifests``, which reads files in
@@ -58,8 +58,16 @@ def build_instructions(manifests: list[Manifest]) -> str:
 
     Manifests with empty (or whitespace-only) ``instructions`` contribute
     nothing — not even a separator.
+
+    ``playbook_index`` (RD-100) is the *generated* chain index, appended last so
+    the hand-written index reads first. It is generated rather than authored
+    because a hand-written list of chains is a second source that drifts from
+    the playbook files; and it is an index rather than the chains themselves
+    because the runbooks are behind ``get_playbook`` precisely to keep them out
+    of this channel.
     """
     blocks = [manifest.instructions.strip() for manifest in manifests]
+    blocks.append(playbook_index.strip())
     return _SEPARATOR.join(block for block in blocks if block)
 
 

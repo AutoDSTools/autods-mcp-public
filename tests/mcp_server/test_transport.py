@@ -60,8 +60,9 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 5 AutoDSApi ops + 5 ProductsResearch ops + 1 users op (get_current_user).
-    assert len(by_name) == 11
+    # 5 AutoDSApi ops + 5 ProductsResearch ops + 1 users op (get_current_user)
+    # + 1 locally-served op (get_playbook).
+    assert len(by_name) == 12
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
@@ -98,6 +99,15 @@ async def test_tool_call_forwards_bearer_to_upstream(
         "status": 200,
         "ok": True,
         "data": {"task_id": "abc"},
+        # RD-100: upload_products is step 1 of the `product_import` chain, so
+        # the envelope carries the per-step nudge beside `data`.
+        "playbook": {
+            "name": "product_import",
+            "step": "1/3",
+            "next": ["get_bulk_action_items"],
+            "incomplete_alone": "Nothing is in the store until the bulk job finishes.",
+            "runbook": 'get_playbook("product_import")',
+        },
     }
     assert captured["url"] == "https://autods-api.test/products/store-1/"
     assert captured["auth"] == f"Bearer {access_token}"
@@ -117,7 +127,14 @@ async def test_success_result_shape_matches_the_1x_wire_format(
     live clients could see with *nothing raising anywhere* if it drifted (a
     compact ``json.dumps``, a different block order, a missing
     ``structuredContent``). The literal below was captured from a 1.29.0 run of
-    this exact call, so it pins the bytes rather than the intent.
+    this call, so it pins the bytes rather than the intent.
+
+    The call is ``publish_drafts_to_marketplace`` rather than the originally
+    captured ``upload_products`` because that operation has since become step 1
+    of a playbook, and a chain step's envelope carries a ``playbook`` sibling of
+    ``data`` (RD-100). Only the ``operation_id`` differs from the capture — this
+    is the *un-extended* envelope, which is what has to stay byte-stable, and
+    the test below pins the extended one separately.
     """
 
     def upstream(_request: httpx.Request) -> httpx.Response:
@@ -126,23 +143,24 @@ async def test_success_result_shape_matches_the_1x_wire_format(
     settings = mcp_settings(manifest_dir=bundled_manifest_dir)
     app, runtime = make_mcp_app(settings, upstream_handler=upstream)
 
-    body = {"region": 1, "status": 1, "buy_site_id": 1, "new_products": [{"asin": "B0X"}]}
+    body = {"product_status": 1}
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        result = await session.call_tool("upload_products", {"store_ids": "store-1", "body": body})
+        result = await session.call_tool("publish_drafts_to_marketplace", {"store_ids": "store-1", "body": body})
 
     payload = {
-        "operation_id": "upload_products",
+        "operation_id": "publish_drafts_to_marketplace",
         "status": 200,
         "ok": True,
         "data": {"task_id": "abc", "nested": {"n": 1}, "list": [1, 2]},
     }
     assert result.is_error is False
+    # AC: an operation in no playbook gets an envelope identical to pre-RD-100.
     assert result.structured_content == payload
     assert len(result.content) == 1
     block = result.content[0]
     assert block.type == "text"
     assert block.text == (
-        '{\n  "operation_id": "upload_products",\n  "status": 200,\n  "ok": true,\n'
+        '{\n  "operation_id": "publish_drafts_to_marketplace",\n  "status": 200,\n  "ok": true,\n'
         '  "data": {\n    "task_id": "abc",\n    "nested": {\n      "n": 1\n    },\n'
         '    "list": [\n      1,\n      2\n    ]\n  }\n}'
     )

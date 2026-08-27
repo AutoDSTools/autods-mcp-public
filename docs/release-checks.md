@@ -240,9 +240,25 @@ exceed the client's ~10s connect timeout. Note it as upstream latency, not an au
 failure — but if it reproduces on **every** connect, it is a regression.
 
 **C3 — Handshake payload.** In the connected session, list the tools.
-Expected: exactly the **11** tools below, and the server instructions arrive with them
-(in Claude Code they appear under *MCP Server Instructions*; `uv run python
-scripts/mcp_call.py instructions` prints exactly what the handshake carried).
+Expected: exactly the **11** tools below, and the server instructions arrive with them.
+
+Verify the instructions with the script, not with the client's UI:
+
+```bash
+MCP_URL=https://mcp-staging.autods.com/mcp uv run python scripts/mcp_call.py instructions
+MCP_URL=https://mcp-staging.autods.com/mcp uv run python scripts/mcp_call.py list
+```
+
+`mcp_call.py` defaults to `http://localhost:2049/mcp`, so **without `MCP_URL` it
+probes localhost** and fails with a connection traceback that looks like a server
+outage. It reuses a cached token and only opens a browser once that token expires.
+
+Whether the instructions *also* show up in the client's own UI is not a signal
+either way: a client may surface them (Claude Code has an *MCP Server Instructions*
+section) or never render them at all — when its tools are loaded lazily, that
+section can be absent for a server whose handshake carried the text correctly.
+Absence there is a client-side display question; the script above is what decides
+whether the **server** sent them.
 
 ```
 get_current_user  list_stores_api  list_products  upload_products
@@ -541,15 +557,32 @@ The pods ship stdout to `s3://autods-cluster-logs`, so this needs AWS credential
 not cluster access. `scripts/fetch_logs.py` handles the archive layout:
 
 ```bash
-uv run python scripts/fetch_logs.py --env staging --since 30m
+# absolute bounds — use the UTC window recorded around P1..W (see above)
+uv run python scripts/fetch_logs.py --env staging \
+  --since 2026-08-27T08:25 --until 2026-08-27T09:00
 uv run python scripts/fetch_logs.py --env staging --since 30m --request-id <id>,<id>
 ```
 
 Assert three things: **one** `tool_call` line per call the run made (join on the
 `x-request-id` values collected during the run), each carrying the documented
-fields, and **no request or response bodies anywhere** in the output. The archive
-lags a few minutes — if the window comes back empty, wait and retry once before
-recording anything.
+fields, and **no request or response bodies anywhere** in the output. The footer
+prints a per-event tally (`scanned events: request=9, tool_call=7`), so the
+one-line-per-call count is read off it rather than counted by hand.
+
+Two properties of this script decide whether the answer means anything:
+
+* **`--event` defaults to `all`.** It used to default to `tool_call`, which made a
+  seemingly unfiltered call hide every `request` line — the reading that turned
+  O4 into a false pass. The header now echoes the filters in force, and a run that
+  matches nothing says whether a filter or the archive lag is responsible.
+* **Prefer absolute `--since`/`--until` for anything that goes in the report.** A
+  relative window is resolved when the process starts, and a wide scan takes
+  minutes, so two back-to-back `--since 40m` calls cover *different* periods — one
+  can even resolve to a window ending in the future, returning zero entries from a
+  perfectly healthy archive.
+
+The archive lags a few minutes — if the window comes back empty, wait and retry
+once before recording anything.
 
 **O4 — No `/mcp` 500 flood.** A burst of ~60s `500`s / `ClientDisconnect` on `POST
 /mcp` is the symptom of the transport hanging on a drained request body, not client
@@ -558,13 +591,24 @@ the request body (Sentry integrations, middleware) and confirm
 `max_request_body_size="never"` is still in `init_sentry`.
 
 ```bash
-uv run python scripts/fetch_logs.py --env staging --since 2h --event request --status 500
+uv run python scripts/fetch_logs.py --env staging \
+  --since 2026-08-27T06:30 --until 2026-08-27T09:35 --event request --status 500
 ```
 
-Widen `--since` to cover the deploy window, not just the run — the flood this
-catches happens when traffic arrives, which may be well before the checks. The run
-itself is corroborating evidence: ~25 POSTs to `/mcp` with none hanging ~60s says
-the hang is not active *now*, which is not the same as "there was no burst".
+The 500 status lives on `status_code` for a `request` entry (`upstream_status` is
+the tool-call field); `--status` checks both, so the recipe above is right — but if
+you filter by hand in `--json` output, read `status_code`.
+
+Widen the window to cover the deploy, not just the run — the flood this catches
+happens when traffic arrives, which may be well before the checks. Scanning ~3
+hours is ~200 objects and takes several minutes, so run it in the background rather
+than under a short `timeout`; a killed scan (exit 143) is not a pass.
+
+An empty result is the pass, and it now distinguishes itself from a mistake: the
+footer says whether the window held `request` events that a filter excluded, or
+held nothing at all. The run itself is corroborating evidence: ~25 POSTs to `/mcp`
+with none hanging ~60s says the hang is not active *now*, which is not the same as
+"there was no burst".
 
 ---
 
@@ -613,3 +657,36 @@ This file is meant to grow. Extend it in the **same commit** as the change:
 - **Anything that forced Claude to stop and ask mid-run** → either a question moved
   into the opening round, or a rule that lets the run continue with a `skipped`. A
   run that needs the human twice is a bug in this file.
+
+### When *not* to touch it
+
+Growth is not the goal — coverage of post-release failure is. The question to ask is
+whether a *deployed* build could give a wrong answer while every test still passes.
+If not, it does not belong here:
+
+- **An upstream incident that says nothing about this server's contract.** Hand it to
+  the upstream owner. The staging products-search 500 (`AttributeError` inside
+  `/marketplace/api/products/`) broke the most important read path in a run and
+  earned no new check: R5 caught it exactly as written, so a second check would only
+  restate what already worked.
+- **A finding whose fix hasn't landed.** It belongs in the report and the ticket
+  until then. `get_similar_products` answering with ~1.6 MB is a genuine defect, but
+  R8 already says to note an oversized payload; it earns an edit when the server
+  gains a projection or a cap — i.e. when what a client observably gets back changes.
+- **A run result.** Verdicts, store ids, draft ids, bulk-action numbers go in the
+  report. This file is the *procedure*; pasting outcomes into it corrupts the next
+  run's baseline.
+- **An environment- or account-specific value.** Never hardcode a store or product
+  id. If a run needs one, add a *resolution rule* to `P` — that is what P5 and P6
+  are — so the checklist stays runnable by anyone.
+- **Anything a test already proves.** Provable in-process with mocks → `tests/`.
+  Provable against a deployed host with no credentials or fixtures → extend
+  `tests/e2e/test_release_checks_s.py`, which is why section S is automated. Prose
+  here is the last resort, not the first.
+- **A check that just failed.** See *Rules for the run*: the arguments in this file
+  **are** the contract under test. Relaxing them after a failure destroys the thing
+  being measured.
+- **Thoroughness for its own sake.** Every check costs wall-clock and rate-limit
+  budget (60/min and 1000/hour per user; a full run is roughly 25 calls). A check
+  with no crisp pass/fail is worse than no check — it lands an ungradeable line in
+  the report and teaches readers to skim.

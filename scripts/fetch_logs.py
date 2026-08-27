@@ -14,10 +14,22 @@ Options:
     --env         staging | prod (required)
     --since       ISO-8601 UTC, or a relative window like ``30m`` / ``2h`` (required)
     --until       ISO-8601 UTC (default: now)
-    --event       structured event name, or ``all`` (default: tool_call)
+    --event       structured event name, or ``all`` (default: all)
     --status      keep only entries whose upstream_status/status_code equals this
     --request-id  comma-separated request ids to keep
     --json        emit raw JSON lines instead of the table
+
+Two things that have produced wrong readings, both now surfaced in the output:
+
+* ``--event`` used to default to ``tool_call``, so a call that looked unfiltered
+  silently hid every ``request`` line and made O4's 500-flood check answer "no
+  data" instead of "no 500s". The default is ``all``; the active filters are
+  echoed in the header, and a run that matches nothing says which filter (or the
+  archive lag) is the likely reason.
+* A **relative** ``--since`` is resolved once, when the process starts. A wide
+  window takes minutes to scan, so back-to-back relative queries do *not* cover
+  the same period — pass absolute ``--since``/``--until`` when the window has to
+  be reproducible (e.g. joining a report to a run).
 
 Layout of the archive, which is what this script encapsulates:
 
@@ -37,6 +49,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 BUCKET = "autods-cluster-logs"
@@ -131,6 +144,16 @@ def _matches(entry: dict, args: argparse.Namespace, since: datetime, until: date
     return not (args.request_ids and entry.get("request_id") not in args.request_ids)
 
 
+def _describe_filters(args: argparse.Namespace) -> str:
+    """Human-readable list of the filters actually in force, for the header/footer."""
+    active = [f"event={args.event}"]
+    if args.status is not None:
+        active.append(f"status={args.status}")
+    if args.request_ids:
+        active.append(f"request-id={len(args.request_ids)} id(s)")
+    return " ".join(active)
+
+
 def _first(entry: dict, *keys: str, default: str = "-"):
     """First key present with a non-``None`` value — ``0`` / ``0.0`` are real values."""
     for key in keys:
@@ -155,7 +178,7 @@ def main() -> int:
     parser.add_argument("--env", required=True, choices=("staging", "prod"))
     parser.add_argument("--since", required=True, help="ISO-8601 UTC, or a relative window like 30m / 2h")
     parser.add_argument("--until", default=None, help="ISO-8601 UTC (default: now)")
-    parser.add_argument("--event", default="tool_call", help="structured event name, or 'all'")
+    parser.add_argument("--event", default="all", help="structured event name, or 'all' (default: all)")
     parser.add_argument("--status", type=int, default=None)
     parser.add_argument("--request-id", default="", help="comma-separated request ids")
     parser.add_argument("--json", action="store_true", help="emit raw JSON lines")
@@ -174,18 +197,43 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"# {len(keys)} objects, {args.env}, {since:%Y-%m-%dT%H:%M}Z..{until:%Y-%m-%dT%H:%M}Z", file=sys.stderr)
+    # Echo the filters, not just the window: a silently-applied --event filter is
+    # what made a "no data" answer look like "nothing happened" (see the docstring).
+    print(
+        f"# {len(keys)} objects, {args.env}, {since:%Y-%m-%dT%H:%M}Z..{until:%Y-%m-%dT%H:%M}Z"
+        f", filters: {_describe_filters(args)}",
+        file=sys.stderr,
+    )
 
     matched = 0
+    seen_events: Counter = Counter()
     for key in keys:
         for entry in _entries(_read_object(key)):
+            seen_events[entry.get("event")] += 1
             if not _matches(entry, args, since, until):
                 continue
             matched += 1
             print(json.dumps(entry) if args.json else _format(entry))
 
-    print(f"# {matched} entries", file=sys.stderr)
-    return 0 if matched else 2
+    if matched:
+        # Per-event tally, so "exactly one tool_call line per call" (O3) is
+        # readable off the footer instead of being counted by hand.
+        tally = ", ".join(f"{name}={count}" for name, count in sorted(seen_events.items()) if name)
+        print(f"# {matched} entries matched; scanned events: {tally}", file=sys.stderr)
+        return 0
+
+    print(f"# 0 entries matched out of {sum(seen_events.values())} scanned", file=sys.stderr)
+    if seen_events:
+        present = ", ".join(f"{name}={count}" for name, count in sorted(seen_events.items()) if name)
+        print(f"#   the window does hold events ({present}) — a filter excluded them all.", file=sys.stderr)
+        print(f"#   active filters: {_describe_filters(args)}", file=sys.stderr)
+    else:
+        print(
+            "#   the objects held no app events at all — the archive lags a few "
+            "minutes, so retry, or widen the window.",
+            file=sys.stderr,
+        )
+    return 2
 
 
 if __name__ == "__main__":

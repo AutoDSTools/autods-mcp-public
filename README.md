@@ -517,7 +517,17 @@ rather than cluster access.
 ```bash
 uv run python scripts/fetch_logs.py --env staging --since 30m
 uv run python scripts/fetch_logs.py --env staging --since 2h --event request --status 500
+uv run python scripts/fetch_logs.py --env staging \
+  --since 2026-08-27T08:25 --until 2026-08-27T09:00   # reproducible window
 ```
+
+It prints every structured event by default (`--event all`) and echoes the filters
+in force, because the earlier `tool_call` default silently hid `request` lines and
+turned a 500-flood check into a false pass. A relative `--since` is resolved at
+process start and a wide scan takes minutes, so pass absolute bounds whenever the
+window has to be reproducible — for example when joining log lines to a recorded
+run. When nothing matches, the footer says whether a filter excluded the events or
+the window genuinely held none (the archive lags a few minutes).
 
 Its section **S** (deployment identity + the unauthenticated surface) is
 automated as `tests/e2e/test_release_checks_s.py`, which probes a *deployed*

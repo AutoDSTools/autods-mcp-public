@@ -302,6 +302,15 @@ stop after it. If a tail appears on a tool that is in no chain, the index is wro
 about an unsupported method means the server stopped declaring the `resources`
 capability — a regression, not a client quirk.
 
+**C9 — The polling cadence is delivered.** `get_bulk_action_items`' description must
+state the numbers (first poll ~10s, then every ~15s, stop after 10 attempts / ~3 min)
+and the 1/2 → 3/4/99 state machine; the instructions from C3 must carry the same
+cadence in the "writes are asynchronous" invariant.
+→ this is the only thing standing between an agent and either one poll or forty (see
+`docs/polling-conventions.md`). Losing it is user-visible — an import reported as done
+while it is still running — even though every call still returns 200. If the two
+channels state *different* numbers, that is the regression, not a cosmetic drift.
+
 ---
 
 ## P — Account readiness (run before R; decides what R and W can do)
@@ -480,9 +489,12 @@ Writes are asynchronous — this is the job being *accepted*, not done.
 → items appear and progress. `ok: true` on W1 with nothing ever landing here is the
 classic false-success, and the whole reason `ok` is documented as transport-level only.
 
-Poll on a **bounded** schedule so an unattended run can't spin: every ~10s, at most
-12 times (~2 min). If it hasn't reached 3 or 99 by then, record
-`inconclusive (still <status> after 2 min)` and move on — a slow job is not the same
+Poll on the **documented** cadence, which is also what keeps an unattended run from
+spinning: first poll ~10s after W1, then every ~15s, at most 10 attempts (~3 min).
+Those are the numbers the tool's own `notes` state (RD-91,
+`docs/polling-conventions.md`) — polling faster here would test a cadence no agent is
+told to use. If it hasn't reached 3 or 99 by then, record
+`inconclusive (still <status> after 3 min)` and move on — a slow job is not the same
 finding as a job that never lands, and only W3 depends on the result.
 
 **W3 — `publish_drafts_to_marketplace`** on the drafts W1 created, targeted by id:

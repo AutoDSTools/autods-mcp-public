@@ -346,6 +346,27 @@ arrive attached to the tool, which is cheaper and more reliable. An empty
 `instructions` is normal for a domain that has nothing to add. The 6000-char
 boot lint is what keeps the channel from growing back.
 
+#### Polling conventions (RD-91)
+
+Some upstream operations accept work and finish it later — `upload_products` returns a
+`bulk_action` before anything is in the store. The web app watches those over
+Pusher/SSE; this server has no push channel, so an MCP client polls instead, and the
+cadence is part of the manifest text rather than something the server enforces (no
+per-operation timeout, no blocking wait).
+
+The documented cadence, stated numerically because vague guidance produces either one
+poll or forty: **first poll ~10 s** after the write, **then every ~15 s**, stopping
+after **10 attempts or ~3 min** — then report what is still unfinished. It replaces the
+browser's 3 s / 120 s loop, which is right for a page and wrong for an agent (a tool
+round-trip is already seconds, and each attempt costs a model turn).
+
+It is delivered on three channels at once — the polling tool's `notes`, the playbook
+runbook, and one clause of the server `instructions` — and
+`tests/mcp_server/test_polling_conventions.py` asserts all three carry the same
+numbers and that they arrive at a real client.
+`docs/polling-conventions.md` holds the whole convention: the cadence, the completion
+state machines, the scrapers' three-state read, and the rate-limit budget behind it.
+
 #### Business errors inside a 200
 
 Some upstreams answer a request they refused with HTTP 200 and an error code
@@ -490,7 +511,12 @@ choice here:
   lives in Redis via an atomic Lua script so the limit holds
   cluster-wide; on a Redis outage the limiter *fails open*. Local dev
   with no `REDIS_URL` falls back to an in-process limiter. On exceed,
-  the tool returns a `rate_limited` error with a retry-after hint.
+  the tool returns a `rate_limited` error with a retry-after hint. Both
+  buckets cover every operation, reads included: at the documented
+  polling cadence one flow costs ~12–14 calls and draws 4 polls/min, so
+  the minute bucket binds at roughly ten concurrent flows and the hour
+  bucket at seventy flows per hour (RD-91 review in
+  `docs/polling-conventions.md`).
 - **Audit logging.** Every tool call emits one structured `tool_call`
   line: `request_id`, `user_sub`, `tool_name`, `op_id`, `upstream_url`,
   `upstream_status`, `latency_ms`, and `error_type` on failure. Never a

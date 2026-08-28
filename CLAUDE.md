@@ -167,6 +167,35 @@ This covers a rejection inside a **2xx** only. A business rejection that arrives
 non-2xx is not deliverable to the model at all (see the Gotcha below), so don't describe
 one in `notes` as something the caller will be able to read.
 
+### Polling conventions for async operations (RD-91)
+
+Several upstream operations accept work and finish it later; the web app watches them
+over Pusher/SSE and this server has **no push channel**, so each becomes a polling
+loop the agent drives — one tool call per attempt, one model turn per call. The
+decision is **thin tools plus documented agent-side polling**: no per-operation
+dispatcher timeout, no server-side blocking wait, nothing in `dispatch.py`. The
+documentation *is* the feature, which makes an undelivered number the whole bug.
+
+The cadence is stated as numbers, never as "poll periodically" (which produces either
+one poll or forty): **first poll ~10s** after the write, **then every ~15s**, ceiling
+**10 attempts or ~3 min**, then report what is unfinished rather than polling on. For
+the scraper tools, `full_scrape=true` on the **first attempt only** — which is exactly
+what the frontend hook does. The browser's own 3 s / 120 s cadence is retired in
+documentation: a tool round-trip is already seconds, so a 3 s loop spends the
+conversation re-reading the same unfinished job.
+
+By tier: the numbers belong in the polling tool's `notes` (tier 2) and the playbook
+`body` (tier 3), with **one** clause in `instructions` (tier 4) and nothing in tier 1.
+`get_bulk_action_items` + `product_import` are the reference implementation; a new
+polling tool should read like them, and
+`tests/mcp_server/test_polling_conventions.py` asserts the numbers arrive at a client
+on all three channels (and that no channel disagrees).
+
+`docs/polling-conventions.md` is the single source for the cadence, the two completion
+state machines (bulk action; store quote `new → in_progress → ready → linked` /
+`cannot_be_sourced`), the scrapers' three-state read, and the rate-limit arithmetic
+behind them. Write against that file rather than re-deriving the numbers.
+
 ### Playbooks: multi-tool chains (RD-100)
 
 Some goals need several tools in order, and the chain is invisible from any single tool
@@ -304,6 +333,7 @@ this checklist and update whatever it touches **in the same commit**:
 | changes a command, workflow, or convention (lint/test/run, commit format, Python rules) | the corresponding section here |
 | fixes a bug or incident whose root cause was non-obvious, or adds a guard/workaround that looks removable but isn't | a **Gotchas & hard-won lessons** bullet here (and a **Troubleshooting** entry in `README.md` if an operator/client would hit the symptom) |
 | adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
+| adds a tool that has to be polled, or changes the cadence / a completion state machine | `docs/polling-conventions.md` (the numbers live there **once**), plus the `notes` and playbook `body` that state them, plus the delivery test |
 | adds a fixture the checklist needs (a store, an entitlement, a supplier id) or a step that makes an agent stop and ask mid-run | a check in section `P` of `docs/release-checks.md`, or a rule that lets the run continue with a `skipped` |
 
 Rule of thumb: if you added an invariant a reviewer would flag if broken (a
@@ -369,7 +399,13 @@ RD-50 :: Logging cleanup ::
   `latency_ms`, `error_type`). Never log request/response bodies.
 - **Rate limiting**: two per-`user.sub` token buckets (60/min, 1000/hour by default) in
   `call_tool`; Redis-backed via an atomic Lua script that mirrors `evaluate_buckets()`,
-  fails open on Redis outage, falls back to in-process locally.
+  fails open on Redis outage, falls back to in-process locally. **The buckets stay
+  shared across all operations** (RD-91): a `readOnlyHint` exemption was considered and
+  rejected, because polls are precisely the calls a runaway loop makes, so exempting
+  them removes the only limit that would ever notice. Reviewed against the documented
+  cadence — one flow draws 4 polls/min, ~12–14 calls end to end, so 60/min binds at
+  ~10 concurrent flows and 1000/hour at ~70 flows — see `docs/polling-conventions.md`.
+  Revisit only on a real `error_type=rate_limited` for a legitimate session.
 - **Manifest text is tiered by required reliability, not by convenience** (RD-90): tier 1
   `inputSchema` → tier 2 `description`/`notes` → tier 3 playbook → tier 4 `instructions`
   (see **Tools are data**). `instructions` is an index with a hard 6000-char boot lint
@@ -510,6 +546,23 @@ production incident; don't undo the guard without understanding why it's there.
   behaviour (which typed error arrives, and what it actually means) is what the `notes`
   must describe — not the upstream's intent. Don't widen the error mapping to echo 3xx/4xx
   bodies instead: those carry internal hostnames and are sanitized for that reason.
+- **The scrapers' error path is snake_case on the wire, and a mis-cased
+  `business_errors` path never matches** (RD-91). `ScraperErrorAPI` is
+  `error_code` / `error_msg` / `retries`; the `scraper_error.errorCode` spelling in the
+  illustrative block above (and in `README.md`) is the *frontend's* camelised view — its
+  request helper renames the keys. A path that doesn't match produces no error anywhere:
+  the boot lint only checks that `paths` is non-empty, so the operation ships looking
+  protected and the `business_error` field simply never appears. Confirm the path against
+  a live response. Same class of trap in the two scan endpoints: `/offers/scan` reports a
+  freshly queued id in `not_in_db`, `/products/scan` files it under `no_info` and leaves
+  `not_in_db` empty — documenting one shape for both makes "queued" unobservable for
+  products. Details in `docs/polling-conventions.md`.
+- **A failed async sourcing request has no error status — the record disappears**
+  (RD-91). `alibaba_1688_request` rolls back by *deleting* the store quote and reports
+  the error only over SSE, which this server cannot see. So a poller must treat "the
+  quote that was there is gone" (or never appeared) as failure; waiting for
+  `cannot_be_sourced` waits forever. Any tool that documents that chain has to say so —
+  and note `{"status": "ok"}` from the trigger is the task being *queued*, nothing more.
 - **Registering `on_list_resources` is what declares the `resources` capability** —
   `Server.get_capabilities` derives the whole capability block from which handlers exist,
   so adding a resource handler changes the handshake for every client, not just the ones

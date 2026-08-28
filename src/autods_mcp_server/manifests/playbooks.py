@@ -39,6 +39,19 @@ creates a second source that drifts and arrives at the wrong time. What nothing
 else owns is the *chain consequence* of a failed step — "did the write land, and
 is retrying safe?". That is the failure mode this field exists for: an agent
 told merely to retry a non-idempotent, asynchronous write duplicates it.
+
+**An operation in several chains renders a vaguer hint, not a guessed one.** One
+operation can be a step of many playbooks — ``upload_products`` is step 1 of the
+plain import and a middle step of the sourcing chain — and nothing in a request
+says which chain the caller is following. The transport is stateless by design,
+so there is no session to have remembered it in either. Both result-carried hints
+therefore state the specific step *only* when the operation belongs to exactly
+one chain; with several they fall back to naming the candidates and pointing at
+``get_playbook``, and the failure tail keeps only the clauses every candidate
+agrees on. Picking the first chain and stating its step number and
+``incomplete_alone`` as fact reads better and is a confident lie — precisely
+about what an unfinished chain has left broken, which is the one thing this
+module exists to get right.
 """
 
 import json
@@ -347,7 +360,9 @@ def render_description_tail(refs: list[PlaybookStepRef]) -> str:
     One line, no step bodies: this text rides in the tool definitions, which is
     the wrong channel for anything situational. When an operation belongs to
     several chains the line names them all instead of picking one — which chain
-    the agent is in is not knowable from the descriptor.
+    the agent is in is not knowable from the descriptor. The names need no
+    deduping: lint 3 rejects an operation appearing twice in one playbook, so two
+    refs for one operation always come from two different files.
     """
     if not refs:
         return ""
@@ -361,14 +376,8 @@ def render_description_tail(refs: list[PlaybookStepRef]) -> str:
     return f"A step in playbooks {names} — call get_playbook for the full chain."
 
 
-def render_success_hint(ref: PlaybookStepRef) -> dict[str, Any] | None:
-    """The ``playbook`` envelope field for a step that has work after it.
-
-    ``None`` for a final step: a chain that is over has nothing to nudge, and an
-    "you are done" field on every terminal call is pure cost.
-    """
-    if ref.is_final:
-        return None
+def _render_one_success_hint(ref: PlaybookStepRef) -> dict[str, Any]:
+    """The specific hint, for an operation that belongs to exactly one chain."""
     hint: dict[str, Any] = {
         "name": ref.playbook.name,
         "step": ref.label,
@@ -380,20 +389,50 @@ def render_success_hint(ref: PlaybookStepRef) -> dict[str, Any] | None:
     return hint
 
 
+def render_success_hint(refs: list[PlaybookStepRef]) -> dict[str, Any] | None:
+    """The ``playbook`` envelope field for a call that has chain work after it.
+
+    Takes *every* step that calls this operation, because the honest answer
+    depends on how many there are. The transport is stateless and nothing in a
+    request says which chain the agent is following, so when an operation belongs
+    to several chains the server cannot know which one this call belongs to.
+
+    Three cases:
+
+    * **No chain work left** (every candidate step is final) — ``None``. A chain
+      that is over has nothing to nudge, and an "you are done" field on every
+      terminal call is pure cost.
+    * **Exactly one chain** — the specific hint: step number, successors and
+      ``incomplete_alone``. Byte-identical to what a single-playbook deployment
+      has always sent.
+    * **Several chains** — a deliberately vaguer hint that names the candidates
+      and points at ``get_playbook``, and asserts nothing else. Picking the first
+      chain and stating its step number and ``incomplete_alone`` as fact is the
+      tempting alternative and it is wrong: an agent importing a TikTok product
+      would be told "nothing is in the store yet" when the truth for its chain is
+      "listed at cost with no supplier attached". A pointer costs one extra call;
+      a confident wrong warning costs the user money. Only chains with work left
+      are named — one that is over is not something to be nudged towards.
+    """
+    pending = [ref for ref in refs if not ref.is_final]
+    if not pending:
+        return None
+    if len(refs) == 1:
+        return _render_one_success_hint(refs[0])
+    return {
+        "in": [ref.playbook.name for ref in pending],
+        "step_depends_on_chain": True,
+        "runbook": "get_playbook(<the chain you are in, from `in`>)",
+    }
+
+
 def hint_size(hint: dict[str, Any]) -> int:
     """Serialized size of an envelope hint, as the size lint measures it."""
     return len(json.dumps(hint, separators=(",", ":"), ensure_ascii=False))
 
 
-def render_failure_hint(ref: PlaybookStepRef) -> str | None:
-    """The chain-consequence tail appended to a failing step's error text.
-
-    ``None`` when the step declares no ``on_failure`` — and then the error the
-    client receives is byte-identical to what it was before playbooks existed.
-    """
-    on_failure = ref.step.on_failure
-    if on_failure is None:
-        return None
+def _render_one_failure_hint(ref: PlaybookStepRef, on_failure: OnFailure) -> str:
+    """The specific tail, for an operation that belongs to exactly one chain."""
     parts = [f'Playbook "{ref.playbook.name}" step {ref.label}:']
     parts.append("this step is idempotent." if on_failure.idempotent else "this step is not idempotent.")
     if on_failure.left_behind:
@@ -404,6 +443,68 @@ def render_failure_hint(ref: PlaybookStepRef) -> str | None:
     if on_failure.ask_user:
         parts.append("Ask the user before retrying.")
     return " ".join(parts)
+
+
+def _render_merged_failure_hint(refs: list[PlaybookStepRef]) -> str:
+    """The tail for an operation in several chains: only what holds in all of them.
+
+    Every clause errs towards caution, because this is the string that stops a
+    duplicated write and the server does not know which chain the caller is in:
+
+    * **idempotent** — "not idempotent" if *any* candidate says so. Telling an
+      agent a blind retry is safe when one chain says it isn't is the one mistake
+      that costs the user a duplicate listing.
+    * **left_behind** / **verify_with** — emitted only when every candidate that
+      declared ``on_failure`` says the same thing. The verification tool is the
+      most valuable clause here and in practice the chains agree on it (it is a
+      property of the write, not of the recipe), so this usually survives.
+    * **then** — never merged. What the chain does next is the one genuinely
+      chain-scoped field, so it is replaced by a pointer to ``get_playbook``.
+    * **ask_user** — set if *any* candidate sets it.
+
+    A candidate that declares no ``on_failure`` at all contributes nothing: a
+    missing declaration is not evidence that retrying is safe. It is still named,
+    so the caller can see its own chain in the list.
+    """
+    declared = [ref.step.on_failure for ref in refs if ref.step.on_failure is not None]
+    names = ", ".join(f'"{ref.playbook.name}"' for ref in refs)
+    parts = [f"Playbook step in {names}:"]
+    idempotent = all(on_failure.idempotent for on_failure in declared)
+    parts.append("this step is idempotent." if idempotent else "this step is not idempotent.")
+    left_behind = {on_failure.left_behind for on_failure in declared}
+    if len(left_behind) == 1 and (agreed := next(iter(left_behind))):
+        parts.append(agreed)
+    verifiers = {
+        (on_failure.verify_with.operation_id, on_failure.verify_with.how) if on_failure.verify_with else None
+        for on_failure in declared
+    }
+    if len(verifiers) == 1 and (verifier := next(iter(verifiers))) is not None:
+        parts.append(f"Verify with {verifier[0]} ({verifier[1]}).")
+    parts.append("Recovery differs by chain — call get_playbook for yours.")
+    if any(on_failure.ask_user for on_failure in declared):
+        parts.append("Ask the user before retrying.")
+    return " ".join(parts)
+
+
+def render_failure_hint(refs: list[PlaybookStepRef]) -> str | None:
+    """The chain-consequence tail appended to a failing call's error text.
+
+    ``None`` when no candidate step declares ``on_failure`` — and then the error
+    the client receives is byte-identical to what it was before playbooks existed.
+
+    As with the success hint, the specific form is used only when the operation
+    belongs to exactly one chain. With several, the tail states just what holds
+    across all of them (see :func:`_render_merged_failure_hint`) — including when
+    only one of them declared ``on_failure``, since that chain's ``then`` still
+    cannot be asserted for a caller who may be in another.
+    """
+    declared = [ref for ref in refs if ref.step.on_failure is not None]
+    if not declared:
+        return None
+    if len(refs) == 1:
+        ref = declared[0]
+        return _render_one_failure_hint(ref, ref.step.on_failure)
+    return _render_merged_failure_hint(refs)
 
 
 # Lead-in for the generated ``instructions`` section. Hand-written once, here,
@@ -507,22 +608,67 @@ def _assert_requires_resolve(playbook: Playbook, registry: ManifestRegistry) -> 
 
 
 def _assert_steps_reachable(playbook: Playbook) -> None:
-    """Lint 3b: ``entry_operation`` is a step, and every step is reachable.
+    """Lint 3b: the chain's own graph — no operation twice, and every reference
+    between steps (``entry_operation``, ``then[]``) names a step, with all of them
+    reachable from the entry.
 
-    An unreachable step is silently dead documentation — it renders into
-    ``get_playbook``'s payload and its operation's description tail, but no
-    successor ever points at it, so nothing tells an agent to get there.
+    This is where every *chain-local* reference is checked. Lint 1 asks a different
+    question of a different set: ``requires[].from_operation`` and
+    ``on_failure.verify_with`` legitimately point outside the chain (the pilot's
+    step 1 takes ``store_ids`` from ``list_stores_api``, which is used by
+    everything and is deliberately not a step), so all lint 1 can ask of those is
+    that the operation is registered. ``entry_operation`` and ``then[]`` are the
+    two that must resolve *within* the playbook, and both are enforced here.
+
+    A ``then`` naming a registered operation that is not a step used to pass every
+    lint, because the walk below simply skipped successors it could not find. The
+    result reached clients: the step stopped counting as final, so it emitted a
+    hint whose ``next`` recommended a tool outside the chain — in the case that
+    surfaced it, a destructive publish — and read as "step 3 of 3, next: …", which
+    is incoherent for numbering that comes from list position. Only one shape of
+    it was caught, and by accident: a dangling successor that *replaces* a valid
+    one orphans the rest of the chain and trips the reachability check, while one
+    added *beside* a valid one is invisible.
+
+    An unreachable step is the other half: silently dead documentation. It renders
+    into ``get_playbook``'s payload and its operation's description tail, but no
+    successor points at it, so nothing tells an agent to get there.
+
+    One operation may belong to several *playbooks* but not appear twice in the
+    same one: every reference between steps is keyed by ``operation_id``, so a
+    second occurrence has no addressable identity. Left unchecked it fails as a
+    confusing *unreachable* error (the reverse index keeps only the first
+    position), and it renders the operation's description tail as
+    ``playbooks "x", "x"``. Rejecting it by name is the honest version: a chain
+    that genuinely calls one tool twice needs a step key that isn't the operation
+    id, which is a schema change, not an authoring accident.
     """
     if not playbook.steps:
         raise PlaybookError(f"Playbook '{playbook.name}' declares no steps.")
     index_by_operation: dict[str, int] = {}
     for index, step in enumerate(playbook.steps):
-        index_by_operation.setdefault(step.operation_id, index)
+        if step.operation_id in index_by_operation:
+            raise PlaybookError(
+                f"Playbook '{playbook.name}' lists operation '{step.operation_id}' twice (steps "
+                f"{index_by_operation[step.operation_id] + 1} and {index + 1}); steps are addressed by "
+                f"operation_id, so a repeated one cannot be pointed at, numbered or rendered."
+            )
+        index_by_operation[step.operation_id] = index
     if playbook.entry_operation not in index_by_operation:
         raise PlaybookError(
             f"Playbook '{playbook.name}' entry_operation '{playbook.entry_operation}' is not one of its "
             f"steps; step numbering is positional, so the entry point has to be a step."
         )
+    for step in playbook.steps:
+        for successor in step.then:
+            if successor not in index_by_operation:
+                raise PlaybookError(
+                    f"Playbook '{playbook.name}' step '{step.operation_id}' names successor "
+                    f"'{successor}', which is not a step of this playbook. 'then' is the next step in "
+                    f"*this* chain, so a registered operation outside it is not a successor: it would "
+                    f"stop this step counting as final and put a tool the chain never contains into the "
+                    f"'next' the client is handed. Add it as a step, or drop it."
+                )
 
     reachable: set[int] = set()
     frontier = [index_by_operation[playbook.entry_operation]]
@@ -531,10 +677,11 @@ def _assert_steps_reachable(playbook: Playbook) -> None:
         if index in reachable:
             continue
         reachable.add(index)
+        # Every successor resolves: the authored ``then`` was checked above, and
+        # the positional default is a step by construction. No missing-key guard,
+        # so a future reference kind cannot go quietly missing here.
         for successor in PlaybookStepRef(playbook, index).next_operations:
-            target = index_by_operation.get(successor)
-            if target is not None:
-                frontier.append(target)
+            frontier.append(index_by_operation[successor])
 
     unreachable = [playbook.steps[i].operation_id for i in range(len(playbook.steps)) if i not in reachable]
     if unreachable:
@@ -590,9 +737,11 @@ def _assert_text_within_budgets(playbook: Playbook) -> None:
     truncated at runtime — half a sentence about a duplicated write is worse
     than a deploy that refuses to start.
 
-    The description tail is *not* checked here: it is the one rendered string
-    that depends on every playbook at once (an operation in two chains renders a
-    different line), so it is checked once over the merged index instead.
+    What is checked here is the *specific* rendering — the one this file's author
+    controls on their own. The strings that depend on every playbook at once (the
+    description tail, and the merged hints an operation in several chains renders)
+    are checked over the merged index instead, since no single file can be blamed
+    for them.
     """
     if len(playbook.body) > BODY_MAX_CHARS:
         raise PlaybookError(
@@ -601,7 +750,7 @@ def _assert_text_within_budgets(playbook: Playbook) -> None:
         )
     for index, step in enumerate(playbook.steps):
         ref = PlaybookStepRef(playbook, index)
-        hint = render_success_hint(ref)
+        hint = render_success_hint([ref])
         if hint is not None and hint_size(hint) > ENVELOPE_HINT_MAX_CHARS:
             raise PlaybookError(
                 f"Playbook '{playbook.name}' step '{step.operation_id}' renders a "
@@ -609,7 +758,7 @@ def _assert_text_within_budgets(playbook: Playbook) -> None:
                 f"it is serialized twice per call and repeats on every poll, so 'incomplete_alone' has "
                 f"to be one short sentence."
             )
-        failure = render_failure_hint(ref)
+        failure = render_failure_hint([ref])
         if failure is not None and len(failure) > FAILURE_HINT_MAX_CHARS:
             raise PlaybookError(
                 f"Playbook '{playbook.name}' step '{step.operation_id}' renders a {len(failure)}-char "
@@ -630,14 +779,34 @@ def assert_playbooks_valid(playbooks: PlaybookRegistry, registry: ManifestRegist
         _assert_steps_reachable(playbook)
         _assert_destructive_steps_declare_consequences(playbook, registry)
         _assert_text_within_budgets(playbook)
-    # The description tail is the one rendered string that depends on *all*
-    # playbooks at once (an operation in two chains renders a different line),
-    # so its cap is checked once over the merged index.
+    # Three rendered strings depend on *all* playbooks at once, because an
+    # operation in two chains renders differently from the same file: the
+    # description tail, and both hints in their merged form. Their caps are
+    # therefore checked over the merged index — no single file can be blamed, and
+    # a per-file check would pass right up until the second chain landed.
     for operation_id in {step.operation_id for pb in playbooks.list_playbooks() for step in pb.steps}:
-        tail = render_description_tail(playbooks.steps_for(operation_id))
+        refs = playbooks.steps_for(operation_id)
+        tail = render_description_tail(refs)
         if len(tail) > DESCRIPTION_TAIL_MAX_CHARS:
             raise PlaybookError(
                 f"Operation '{operation_id}' renders a {len(tail)}-char playbook description tail, over "
                 f"the {DESCRIPTION_TAIL_MAX_CHARS}-char limit; the description carries a pointer, never "
                 f"a step body."
+            )
+        if len(refs) < 2:
+            continue  # The specific rendering; already checked against its own file.
+        # The merged *success* hint is deliberately not checked. It carries only
+        # the chain names plus a fixed pointer, and the description tail above
+        # carries the same names in a longer sentence under a tighter cap — so the
+        # tail always overruns first and a check here could never fire. That is a
+        # coupling, not a coincidence: ``test_the_tail_cap_subsumes_the_merged_hint_cap``
+        # pins the headroom, so lengthening the hint's fixed text fails loudly and
+        # tells you to reinstate this check.
+        merged_failure = render_failure_hint(refs)
+        if merged_failure is not None and len(merged_failure) > FAILURE_HINT_MAX_CHARS:
+            raise PlaybookError(
+                f"Operation '{operation_id}' is a step in {len(refs)} playbooks and renders a "
+                f"{len(merged_failure)}-char merged failure tail, over the {FAILURE_HINT_MAX_CHARS}-char "
+                f"limit; the merged tail keeps only what the chains agree on, so shorten the shared "
+                f"'left_behind' / 'verify_with' text or a playbook name."
             )

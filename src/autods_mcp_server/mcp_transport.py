@@ -455,11 +455,13 @@ def _build_server(
                     )
                     return error_result(ERROR_INVALID_ARGUMENTS, validation_error)
 
-            # The playbook step this call is part of, if any. Looked up once:
-            # it decides whether a hint rides on the success envelope and
-            # whether the chain-consequence tail rides on an error.
+            # Every playbook step that calls this operation — all of them, not
+            # the first: an operation can belong to several chains, and nothing
+            # in the request says which one the caller is following. The
+            # renderers decide what is honest to say for the set (a specific
+            # step for one chain, the candidates plus a get_playbook pointer for
+            # several), so this stays a plain lookup. Empty for a non-chain tool.
             step_refs = playbooks.steps_for(name)
-            step_ref = step_refs[0] if step_refs else None
 
             start = time.perf_counter()
             try:
@@ -508,7 +510,7 @@ def _build_server(
                         ERROR_UPSTREAM_UNREACHABLE,
                         "The upstream service could not be reached. Please try again later.",
                     ),
-                    render_failure_hint(step_ref) if step_ref is not None else None,
+                    render_failure_hint(step_refs),
                 )
             except (UnknownOperationError, DispatchError) as exc:
                 # UnknownOperationError shouldn't happen (the tool name came off
@@ -545,10 +547,9 @@ def _build_server(
                 # Same placement rule as ``business_error`` — beside ``data``,
                 # never inside it. Absent on a non-chain tool and on a final
                 # step, so a non-playbook envelope is byte-identical to before.
-                if step_ref is not None:
-                    hint = render_success_hint(step_ref)
-                    if hint is not None:
-                        payload[PLAYBOOK_KEY] = hint
+                hint = render_success_hint(step_refs)
+                if hint is not None:
+                    payload[PLAYBOOK_KEY] = hint
                 return _success_result(payload)
 
             # F3 — map an upstream non-2xx to a safe, typed MCP error.
@@ -583,7 +584,7 @@ def _build_server(
             # job says nothing about whether the job started.
             return _with_failure_hint(
                 mapped.result,
-                render_failure_hint(step_ref) if step_ref is not None else None,
+                render_failure_hint(step_refs),
             )
         except Exception as exc:  # noqa: BLE001 - deliberate catch-all, see above
             if not audited:

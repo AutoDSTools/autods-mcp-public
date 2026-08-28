@@ -178,7 +178,10 @@ documentation *is* the feature, which makes an undelivered number the whole bug.
 
 The cadence is stated as numbers, never as "poll periodically" (which produces either
 one poll or forty): **first poll ~10s** after the write, **then every ~15s**, ceiling
-**10 attempts or ~3 min**, then report what is unfinished rather than polling on. For
+**10 attempts (~2.5 min)**, then report what is unfinished rather than polling on. The
+ceiling is the *attempt count* and the duration is derived from it (10 s + 9 × 15 s), so
+the two move together — a second, independent time bound is either wrong or redundant,
+and `test_no_channel_ships_a_superseded_ceiling` keeps the retired one out. For
 the scraper tools, `full_scrape=true` on the **first attempt only** — which is exactly
 what the frontend hook does. The browser's own 3 s / 120 s cadence is retired in
 documentation: a tool round-trip is already seconds, so a 3 s loop spends the
@@ -236,8 +239,11 @@ Six boot lints, all fatal, all with a rejection test in `tests/mcp_server/test_p
 2. `requires[].param` resolves to a declared parameter or `body_schema` property of its
    own step's operation (which is why `requires` is structured, not prose — prose can't
    be linted);
-3. playbook names unique; `entry_operation` is one of the steps; every step reachable
-   from it;
+3. the chain's own graph: playbook names unique; no operation twice within one playbook
+   (steps are addressed by `operation_id`, so a repeat has no identity to point at — it
+   belongs in a second playbook or behind a schema change, not in the same list);
+   **`entry_operation` and every `then[]` entry name a step of this playbook**; every
+   step reachable from the entry;
 4. a non-final step whose operation is `destructiveHint: true` must carry
    `incomplete_alone`;
 5. a `destructiveHint` step with `on_failure.idempotent: false` must declare
@@ -245,7 +251,49 @@ Six boot lints, all fatal, all with a rejection test in `tests/mcp_server/test_p
    verification tool is often the wrong one: polling a bulk job needs an id a failed
    write never returned, so verification goes through a list/read operation;
 6. every rendered string fits its channel — `body` ≤ 6000, envelope hint ≤ 200
-   (serialized, compact), failure tail ≤ 320, description tail ≤ 120.
+   (serialized, compact), failure tail ≤ 320, description tail ≤ 120. The specific
+   rendering is checked per file; the description tail and the merged failure tail are
+   checked over the *merged index*, since an operation joining a second chain changes
+   them without either file mentioning the other. There is deliberately no merged
+   envelope-hint check: the tail carries the same names under a tighter cap, so it always
+   overruns first (pinned by `test_the_tail_cap_subsumes_the_merged_hint_cap`).
+
+`then[]` appears in both lint 1 and lint 3 on purpose, because the references a playbook
+makes do not share one domain. `requires[].from_operation` and `on_failure.verify_with`
+point *outside* the chain by design — the pilot's step 1 takes `store_ids` from
+`list_stores_api`, which everything uses and which is deliberately not a step — so all
+that can be asked of them is that the operation is registered (lint 1). `entry_operation`
+and `then[]` must resolve *within* the playbook, and lint 3 is where that is enforced.
+A `then` naming a registered non-step used to pass everything: the step stopped counting
+as final, so the client got a hint whose `next` recommended a tool the chain never
+contains (a destructive publish, in the case that surfaced it) and which read "step 3 of
+3, next: …". Only one shape was caught, by accident — a dangling successor that *replaces*
+a valid one orphans the chain and trips reachability, while one added *beside* a valid one
+was invisible.
+
+### An operation in several chains gets a vaguer hint, never a guessed one
+
+One operation can be a step of several playbooks — `upload_products` is step 1 of the
+plain import and a middle step of the sourcing chain. Nothing in a request says which
+chain the caller is following, and the transport is stateless, so there is no session
+that could have remembered. Both result-carried hints therefore give the specific step
+**only** when the operation belongs to exactly one chain:
+
+- **success hint** — with several candidates it drops to `{in: [names],
+  step_depends_on_chain: true, runbook: …}` and asserts nothing else. Only chains with
+  work left are named.
+- **failure tail** — merged rather than dropped, because it is the half that prevents a
+  duplicated write. Every clause that holds in *all* candidates survives (and the
+  cautious reading wins: "not idempotent" if any chain says so, `ask_user` if any chain
+  sets it); `then` is chain-scoped and becomes a `get_playbook` pointer. A candidate that
+  declares no `on_failure` contributes nothing — a missing declaration is not evidence
+  that retrying is safe — but is still named.
+
+Taking `steps_for(op)[0]` and stating its step number and `incomplete_alone` as fact is
+the tempting alternative and it is a confident lie: an agent in the sourcing chain would
+be told "nothing is in the store yet" when the truth for its chain is "listed at cost
+with no supplier attached" — the exact outcome playbooks exist to prevent. A pointer
+costs one extra call.
 
 **Delivery is split across three channels by when the text is needed**, and that split
 is the design, not an optimisation:
@@ -422,6 +470,11 @@ RD-50 :: Logging cleanup ::
   `dispatch.py` stays a pure forwarder. The hint is emitted only on a successful call of
   a non-final chain step, so a non-playbook envelope is byte-identical to pre-RD-100
   (`test_success_result_shape_matches_the_1x_wire_format` pins that).
+- **Both hint renderers take *every* candidate step, and never the first one** — they are
+  handed `playbooks.steps_for(name)` whole, and decide what is honest to say for the set
+  (see **An operation in several chains…** above). `steps_for(name)[0]` looks equivalent
+  while there is one playbook and starts lying the day a second one shares an operation,
+  which is the day it matters. Don't narrow the call site back to a single ref.
 - **The success path and the failure path are different code paths, and the failure one
   is the half that pays off** (RD-100). `error_result` returns a flat `TextContent` with
   no `data` and no `structuredContent`, so `on_failure` guidance can only be *appended to

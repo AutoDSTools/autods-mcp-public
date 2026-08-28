@@ -297,13 +297,21 @@ chain.`, and `list_stores_api`'s must carry no such line.
 → if the tails are missing, agents get no signal that upload is step 1 of 3 and will
 stop after it. If a tail appears on a tool that is in no chain, the index is wrong.
 
+Once a **second** playbook ships, add the shared-step half: for a tool that is a step of
+two chains, the description tail names both, and a successful call's `playbook` envelope
+field carries `in: [both names]` with **no** `step` and **no** `incomplete_alone`. A step
+number or a single chain's warning there means the server went back to picking the first
+match, which reads perfectly and is wrong for whichever chain the caller is actually in —
+grade it `fail`, not cosmetic. Until then this half is `skipped` (one chain exists, so
+there is nothing to be ambiguous about).
+
 **C8 — Resources.** `uv run python scripts/mcp_call.py resources`
 → lists `autods://playbook/<name>` with `text/markdown` for each playbook. An error
 about an unsupported method means the server stopped declaring the `resources`
 capability — a regression, not a client quirk.
 
 **C9 — The polling cadence is delivered.** `get_bulk_action_items`' description must
-state the numbers (first poll ~10s, then every ~15s, stop after 10 attempts / ~3 min)
+state the numbers (first poll ~10s, then every ~15s, stop after 10 attempts / ~2.5 min)
 and the 1/2 → 3/4/99 state machine; the instructions from C3 must carry the same
 cadence in the "writes are asynchronous" invariant.
 → this is the only thing standing between an agent and either one poll or forty (see
@@ -490,11 +498,13 @@ Writes are asynchronous — this is the job being *accepted*, not done.
 classic false-success, and the whole reason `ok` is documented as transport-level only.
 
 Poll on the **documented** cadence, which is also what keeps an unattended run from
-spinning: first poll ~10s after W1, then every ~15s, at most 10 attempts (~3 min).
+spinning: first poll ~10s after W1, then every ~15s, at most 10 attempts (~2.5 min).
 Those are the numbers the tool's own `notes` state (RD-91,
 `docs/polling-conventions.md`) — polling faster here would test a cadence no agent is
-told to use. If it hasn't reached 3 or 99 by then, record
-`inconclusive (still <status> after 3 min)` and move on — a slow job is not the same
+told to use. The bound to count is the **attempts**; record the elapsed time you
+actually reached rather than the nominal one. If it hasn't reached 3 or 99 by then,
+record `inconclusive (still <status> after N attempts / <elapsed>)` and move on — a slow
+job is not the same
 finding as a job that never lands, and only W3 depends on the result.
 
 **W3 — `publish_drafts_to_marketplace`** on the drafts W1 created, targeted by id:

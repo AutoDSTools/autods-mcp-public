@@ -272,7 +272,188 @@ def test_one_operation_can_belong_to_two_playbooks(tmp_path: Path) -> None:
     # chain the agent is in is not knowable from a tool descriptor.
     tail = render_description_tail(refs)
     assert '"demo"' in tail and '"other"' in tail
+    # Each chain named exactly once. Guaranteed by lint 3 rejecting a repeated
+    # operation within one playbook, which is what keeps the rendering honest
+    # without a dedupe pass that could never fire.
+    assert tail.count('"demo"') == 1 and tail.count('"other"') == 1
     assert len(tail) <= DESCRIPTION_TAIL_MAX_CHARS
+
+
+# --- ambiguity: an operation in several chains -------------------------------
+#
+# The server is stateless and nothing in a request says which chain the caller is
+# following, so for a shared operation the honest hint is a vaguer one. The
+# alternative — state the first chain's step number and ``incomplete_alone`` as
+# fact — is a confident lie about what an unfinished chain left broken.
+
+
+def _shared_write_env(tmp_path: Path) -> Path:
+    """Two chains that both start with the same destructive write, disagreeing on
+    every chain-scoped field: what stopping costs, what the write leaves behind,
+    what to do next, and whether to ask first."""
+    first = _chain(
+        name="import_only",
+        steps=[
+            {
+                "operation_id": "write_thing",
+                "goal": "Write the thing.",
+                "incomplete_alone": "Nothing is stored until it is read back.",
+                "on_failure": {
+                    "idempotent": False,
+                    "left_behind": "The write may have landed.",
+                    "verify_with": {"operation_id": "read_things", "how": "filter on the title"},
+                    "then": "If it is there, continue; otherwise write again.",
+                    "ask_user": True,
+                },
+            },
+            {"operation_id": "read_things", "goal": "Read it back."},
+        ],
+        entry_operation="write_thing",
+    )
+    second = _chain(
+        name="sourced_import",
+        steps=[
+            {
+                "operation_id": "write_thing",
+                "goal": "Write the thing as part of the longer flow.",
+                "incomplete_alone": "The thing is live at cost with no supplier attached.",
+                "on_failure": {
+                    "idempotent": False,
+                    "left_behind": "A partial listing may exist at the wrong price.",
+                    "verify_with": {"operation_id": "read_things", "how": "filter on the title"},
+                    "then": "Do not write again until the supplier link is checked.",
+                },
+            },
+            {"operation_id": "write_other", "goal": "Attach the supplier."},
+            {"operation_id": "read_things", "goal": "Confirm."},
+        ],
+        entry_operation="write_thing",
+    )
+    return _write_env(tmp_path, {"a_import_only.json": first, "b_sourced_import.json": second})
+
+
+def test_a_shared_step_gets_the_candidates_not_the_first_chain(tmp_path: Path) -> None:
+    """The success hint names the chains it could be and stops there. The step
+    number, the successors and ``incomplete_alone`` all differ between the two,
+    so asserting any of them would be right half the time at best."""
+    playbooks = build_playbook_registry(_shared_write_env(tmp_path))
+
+    hint = render_success_hint(playbooks.steps_for("write_thing"))
+
+    assert hint == {
+        "in": ["import_only", "sourced_import"],
+        "step_depends_on_chain": True,
+        "runbook": "get_playbook(<the chain you are in, from `in`>)",
+    }
+    # Specifically: neither chain's own warning is presented as the truth.
+    assert "Nothing is stored" not in json.dumps(hint)
+    assert "live at cost" not in json.dumps(hint)
+    assert hint_size(hint) <= ENVELOPE_HINT_MAX_CHARS
+
+
+def test_a_shared_step_that_is_final_in_every_chain_gets_no_hint(tmp_path: Path) -> None:
+    """A chain that is over is not a candidate — there is nothing to nudge
+    towards. Both chains end on ``read_things``, so it stays absent entirely."""
+    playbooks = build_playbook_registry(_shared_write_env(tmp_path))
+
+    assert render_success_hint(playbooks.steps_for("read_things")) is None
+
+
+def test_the_shared_chains_are_a_shippable_configuration(tmp_path: Path) -> None:
+    """The ambiguity above is not a synthetic impossibility — the two chains pass
+    every boot lint, which is why the renderers have to cope with it at all."""
+    directory = _shared_write_env(tmp_path)
+
+    assert_playbooks_valid(build_playbook_registry(directory), build_registry(directory))
+
+
+def test_a_shared_step_merges_only_what_the_chains_agree_on(tmp_path: Path) -> None:
+    """The failure tail is the half that prevents a duplicated write, so it is
+    merged rather than dropped: every clause that holds in both chains survives,
+    the chain-scoped ``then`` becomes a pointer, and the cautious reading wins."""
+    playbooks = build_playbook_registry(_shared_write_env(tmp_path))
+
+    tail = render_failure_hint(playbooks.steps_for("write_thing"))
+
+    assert tail == (
+        'Playbook step in "import_only", "sourced_import": this step is not idempotent. '
+        "Verify with read_things (filter on the title). "
+        "Recovery differs by chain — call get_playbook for yours. "
+        "Ask the user before retrying."
+    )
+    # The verification tool is what stops the duplicate write, and it survives
+    # because it is a property of the write rather than of the recipe.
+    assert "read_things" in tail
+    # left_behind disagrees, so neither version is asserted…
+    assert "may have landed" not in tail and "wrong price" not in tail
+    # …and neither is either chain's next move.
+    assert "continue; otherwise" not in tail and "supplier link is checked" not in tail
+    # ask_user is set in one chain only: the cautious reading wins.
+    assert tail.endswith("Ask the user before retrying.")
+    assert len(tail) <= FAILURE_HINT_MAX_CHARS
+
+
+def test_a_shared_step_is_called_not_idempotent_if_any_chain_says_so(tmp_path: Path) -> None:
+    """Telling an agent a blind retry is safe when one chain says it is not is
+    the single mistake that costs the user a duplicate listing."""
+    idempotent_everywhere = _chain(
+        name="cautious",
+        steps=[
+            {
+                "operation_id": "write_thing",
+                "goal": "w",
+                "incomplete_alone": "x",
+                "on_failure": {"idempotent": True, "then": "Just retry."},
+            },
+            {"operation_id": "read_things", "goal": "r"},
+        ],
+        entry_operation="write_thing",
+    )
+    directory = _write_env(tmp_path, {"a.json": _chain(), "b.json": idempotent_everywhere})
+    playbooks = build_playbook_registry(directory)
+
+    tail = render_failure_hint(playbooks.steps_for("write_thing"))
+
+    assert "this step is not idempotent." in tail
+    assert "this step is idempotent." not in tail
+
+
+def test_a_shared_step_with_one_undeclared_on_failure_still_merges(tmp_path: Path) -> None:
+    """A chain that declares no ``on_failure`` contributes nothing — a missing
+    declaration is not evidence that retrying is safe — but it is still named, so
+    a caller in that chain can see itself in the list."""
+    silent = _chain(
+        name="silent",
+        steps=[
+            {"operation_id": "write_thing", "goal": "w", "incomplete_alone": "x"},
+            {"operation_id": "read_things", "goal": "r"},
+        ],
+        entry_operation="write_thing",
+    )
+    directory = _write_env(tmp_path, {"a.json": _chain(), "b_silent.json": silent})
+    playbooks = build_playbook_registry(directory)
+
+    tail = render_failure_hint(playbooks.steps_for("write_thing"))
+
+    assert '"demo", "silent"' in tail
+    assert "this step is not idempotent." in tail
+    assert "Recovery differs by chain" in tail
+
+
+def test_an_unshared_operation_is_unaffected(tmp_path: Path) -> None:
+    """The specific rendering is what a single-chain deployment has always sent,
+    and it must not change shape just because the renderers now take a list."""
+    playbooks = build_playbook_registry(_write_env(tmp_path, {"demo.json": _chain()}))
+    refs = playbooks.steps_for("write_thing")
+
+    assert render_success_hint(refs) == {
+        "name": "demo",
+        "step": "1/2",
+        "next": ["read_things"],
+        "incomplete_alone": "The thing is unconfirmed until it is read back.",
+        "runbook": 'get_playbook("demo")',
+    }
+    assert render_failure_hint(refs).startswith('Playbook "demo" step 1/2: this step is not idempotent.')
 
 
 # --- the boot lints ---------------------------------------------------------
@@ -334,9 +515,53 @@ def test_lint_rejects_an_entry_operation_that_is_not_a_step(tmp_path: Path) -> N
         _lint(tmp_path, {"demo.json": _chain(entry_operation="write_other")})
 
 
+def test_lint_rejects_a_then_naming_an_operation_that_is_not_a_step(tmp_path: Path) -> None:
+    """``then`` is the next step in *this* chain, so a registered operation outside
+    it is not a successor. Unchecked, this reached clients: the step stopped
+    counting as final, so it emitted a hint whose ``next`` recommended a tool the
+    chain never contains, reading as "step 2 of 2, next: write_other"."""
+    playbook = _chain()
+    playbook["steps"][1]["then"] = ["write_other"]
+
+    with pytest.raises(PlaybookError, match="not a step of this playbook"):
+        _lint(tmp_path, {"demo.json": playbook})
+
+
+def test_lint_rejects_a_dangling_then_beside_a_valid_one(tmp_path: Path) -> None:
+    """The shape nothing used to catch. A dangling successor that *replaces* a
+    valid one orphans the rest of the chain and trips the reachability check; one
+    added *beside* a valid one leaves the graph intact and rode straight into the
+    client's ``next``. It was rejected only when the extra name happened to push
+    the rendered hint past its size cap, which is luck, not a check — so this
+    asserts the successor error specifically, not merely that something raised."""
+    playbook = _chain()
+    playbook["steps"][0]["then"] = ["read_things", "write_other"]
+
+    with pytest.raises(PlaybookError, match="not a step of this playbook"):
+        _lint(tmp_path, {"demo.json": playbook})
+
+
 def test_lint_rejects_a_playbook_with_no_steps(tmp_path: Path) -> None:
     with pytest.raises(PlaybookError, match="no steps"):
         _lint(tmp_path, {"demo.json": _chain(steps=[], entry_operation="read_things")})
+
+
+def test_lint_rejects_the_same_operation_twice_in_one_playbook(tmp_path: Path) -> None:
+    """One operation may belong to several playbooks but not appear twice in one:
+    ``then`` / ``entry_operation`` / ``next_operations`` all address a step by
+    ``operation_id``, so a second occurrence cannot be pointed at. Without this
+    lint it surfaced as a confusing *unreachable* error (the reverse index keeps
+    only the first position) and rendered the tail as ``playbooks "x", "x"``."""
+    playbook = _chain(
+        steps=[
+            {"operation_id": "write_thing", "goal": "w", "incomplete_alone": "x"},
+            {"operation_id": "read_things", "goal": "r"},
+            {"operation_id": "read_things", "goal": "confirm again"},
+        ]
+    )
+
+    with pytest.raises(PlaybookError, match="twice"):
+        _lint(tmp_path, {"demo.json": playbook})
 
 
 def test_lint_rejects_an_unreachable_step(tmp_path: Path) -> None:
@@ -426,6 +651,64 @@ def test_lint_rejects_an_oversized_description_tail(tmp_path: Path) -> None:
 
     with pytest.raises(PlaybookError, match="description tail"):
         _lint(tmp_path, files)
+
+
+def test_lint_rejects_an_oversized_merged_failure_tail(tmp_path: Path) -> None:
+    """The merged tail replaces each chain's short ``then`` with a fixed pointer
+    and prefixes every chain name, so it can overrun 320 while each chain's own
+    rendering fits comfortably. Like the description tail, no single file is at
+    fault, so it is checked over the merged index."""
+    shared_failure = {
+        "idempotent": False,
+        "left_behind": "A partial listing may exist at the wrong price, with no supplier attached to it yet. " * 2,
+        "verify_with": {"operation_id": "read_things", "how": "filter on the submitted title"},
+        "then": "Retry.",
+    }
+    files = {
+        f"{index}.json": _chain(
+            name=f"chain_number_{index}",
+            entry_operation="write_thing",
+            steps=[
+                {"operation_id": "write_thing", "goal": "w", "incomplete_alone": "x", "on_failure": shared_failure},
+                {"operation_id": "read_things", "goal": "r"},
+            ],
+        )
+        for index in range(2)
+    }
+    # Each chain on its own is inside the budget — only the merge overruns.
+    single = render_failure_hint([PlaybookStepRef(Playbook.model_validate(files["0.json"]), 0)])
+    assert len(single) <= FAILURE_HINT_MAX_CHARS
+
+    with pytest.raises(PlaybookError, match="merged failure tail"):
+        _lint(tmp_path, files)
+
+
+def test_the_tail_cap_subsumes_the_merged_hint_cap() -> None:
+    """Why there is no merged-envelope-hint lint: the description tail carries the
+    same chain names in a longer sentence under a tighter cap (120 vs 200), so it
+    always overruns first. This pins that headroom at the worst case — two chains
+    with the longest names the tail cap allows. If it fails, the merged hint's
+    fixed text grew and the lint in ``assert_playbooks_valid`` must come back."""
+    name = "n" * 26  # the longest that keeps a two-chain tail inside its cap
+    refs = [
+        PlaybookStepRef(
+            Playbook.model_validate(
+                _chain(
+                    name=f"{name}{index}",
+                    entry_operation="write_thing",
+                    steps=[
+                        {"operation_id": "write_thing", "goal": "w", "incomplete_alone": "x"},
+                        {"operation_id": "read_things", "goal": "r"},
+                    ],
+                )
+            ),
+            0,
+        )
+        for index in range(2)
+    ]
+
+    assert len(render_description_tail(refs)) <= DESCRIPTION_TAIL_MAX_CHARS
+    assert hint_size(render_success_hint(refs)) < ENVELOPE_HINT_MAX_CHARS
 
 
 def test_the_committed_playbooks_pass_every_lint(bundled_manifest_dir: Path) -> None:
@@ -672,21 +955,42 @@ async def test_the_envelope_hint_rides_beside_data_not_inside_it(
     assert '"playbook"' in result.content[0].text
 
 
+async def test_the_ambiguous_hint_reaches_a_real_client(
+    mcp_settings, make_mcp_app, tmp_path: Path, access_token
+) -> None:
+    """The RD-90 lesson applied to the ambiguous case: assert the vaguer hint
+    arrives over a real session, not just that the renderer produces it. This is
+    the wiring that changed — the transport now hands the renderers every
+    candidate step instead of the first one."""
+    settings = mcp_settings(manifest_dir=_shared_write_env(tmp_path))
+    app, runtime = make_mcp_app(settings, upstream_handler=_ok_upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool("write_thing", {"store_id": "s1", "body": {"title": "t"}})
+
+    hint = result.structured_content["playbook"]
+    assert hint["in"] == ["import_only", "sourced_import"]
+    assert "step" not in hint and "incomplete_alone" not in hint
+    # The claim a first-match pick would have shipped, delivered to nobody.
+    assert "live at cost" not in result.content[0].text
+
+
 def test_every_rendered_hint_fits_its_channel(bundled_manifest_dir: Path) -> None:
-    """The caps, asserted on what a client actually receives."""
+    """The caps, asserted on what a client actually receives — which is the
+    rendering over *every* chain the operation is in, not the one its own file
+    would produce alone."""
     playbooks = build_playbook_registry(bundled_manifest_dir)
     for playbook in playbooks.list_playbooks():
         for index in range(len(playbook.steps)):
             ref = PlaybookStepRef(playbook, index)
-            hint = render_success_hint(ref)
+            refs = playbooks.steps_for(ref.step.operation_id)
+            hint = render_success_hint(refs)
             if hint is not None:
                 assert hint_size(hint) <= ENVELOPE_HINT_MAX_CHARS
-            failure = render_failure_hint(ref)
+            failure = render_failure_hint(refs)
             if failure is not None:
                 assert len(failure) <= FAILURE_HINT_MAX_CHARS
-            assert len(render_description_tail(playbooks.steps_for(ref.step.operation_id))) <= (
-                DESCRIPTION_TAIL_MAX_CHARS
-            )
+            assert len(render_description_tail(refs)) <= DESCRIPTION_TAIL_MAX_CHARS
 
 
 async def test_a_chain_tool_description_carries_the_bounded_pointer(

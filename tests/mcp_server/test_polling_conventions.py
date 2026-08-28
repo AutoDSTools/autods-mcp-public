@@ -38,11 +38,20 @@ from tests.mcp_server.conftest import mcp_client_session
 # wording assertion: the four numbers are the contract, the sentences around them
 # differ per channel by design (tier 2 states a tool's contract, tier 3 a runbook
 # step, tier 4 a one-clause invariant).
-CADENCE_TOKENS = ("~10s", "~15s", "10 attempts", "~3 min")
+CADENCE_TOKENS = ("~10s", "~15s", "10 attempts", "~2.5 min")
 
 # The frontend interval and ceiling (``useSourcingProducts.jsx``: timeoutLimit
 # 3000, REQUEST_TIMEOUT 120000), retired in documentation by RD-91.
 RETIRED_FRONTEND_CADENCE = ("every 3 s", "every 3 seconds", "3000", "120 s", "120 seconds")
+
+# Numbers that once stated the ceiling and no longer do. Asserted *absent*, not
+# merely "the right one is present": the tokens above cannot catch a stale
+# duration sitting next to a correct one, and two ceilings in one channel is the
+# same undelivered-number bug as no ceiling at all. ``~3 min`` was the original
+# ceiling — 10 attempts at this cadence is ~2.4 min, so the minutes could never
+# bind and the checklist quoting them told an operator to record an elapsed time
+# the run had not reached.
+SUPERSEDED_CEILINGS = ("~3 min", "3 minutes", "whichever comes first")
 
 # The bulk-action state machine. 1/2 are non-final, 3/4/99 final — the distinction
 # an agent needs in order to stop, and the one an author is tempted to compress
@@ -155,6 +164,16 @@ def test_no_channel_ships_the_retired_frontend_cadence(bundled_manifest_dir: Pat
     that loop spends the conversation re-reading the same unfinished job. It is
     also the number an author is most likely to copy from the web app."""
     assert retired not in _all_shipped_text(bundled_manifest_dir)
+
+
+@pytest.mark.parametrize("superseded", SUPERSEDED_CEILINGS)
+def test_no_channel_ships_a_superseded_ceiling(bundled_manifest_dir: Path, superseded: str) -> None:
+    """A stale duration beside a correct one is invisible to the presence
+    assertions above — every channel would still contain ``10 attempts`` and
+    ``~2.5 min`` and the test would pass while the text stated two ceilings. The
+    ceiling is the attempt count and the duration is derived from it, so a second
+    number is always either wrong or redundant."""
+    assert superseded not in _all_shipped_text(bundled_manifest_dir)
 
 
 def test_the_cadence_is_stated_numerically_not_vaguely(bundled_manifest_dir: Path) -> None:

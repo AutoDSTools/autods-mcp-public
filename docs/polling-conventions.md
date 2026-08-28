@@ -24,8 +24,15 @@ either one poll or forty:
 | --- | --- |
 | first poll | **~10 s** after the call that started the work |
 | subsequent polls | every **~15 s** |
-| ceiling | **10 attempts** or **~3 min**, whichever comes first |
+| ceiling | **10 attempts** — **~2.5 min** at this cadence |
 | on hitting the ceiling | report what is unfinished and its last status; stop |
+
+The ceiling is the **attempt count**; the duration is its consequence, not a second
+independent bound. 10 s + 9 × 15 s = 145 s, so the tenth attempt lands at ~2.4 min and a
+little later once the round-trips are counted — which is why it is written as *~2.5 min*
+and why the two numbers must move together. An earlier draft said "10 attempts or ~3 min,
+whichever comes first"; the minutes could never bind, and the checklist that quoted them
+told an operator to record an elapsed time the run had not reached.
 | `full_scrape` (scraper tools only) | `true` on the **first** attempt only |
 
 These numbers deliberately **retire the frontend cadence in documentation.**
@@ -182,7 +189,7 @@ change with the `settings.py` + `README.md` update the ticket asks for.
 ## Checklist for a new polling tool
 
 1. Cadence and ceiling in the tool's `notes`, numerically (~10 s, ~15 s, 10 attempts,
-   ~3 min) — copy the phrasing from `get_bulk_action_items` rather than inventing new
+   ~2.5 min) — copy the phrasing from `get_bulk_action_items` rather than inventing new
    numbers.
 2. The state machine in the `notes`: which states are non-final, which are final, and
    which field carries the result or the error.

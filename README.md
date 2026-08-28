@@ -356,7 +356,8 @@ per-operation timeout, no blocking wait).
 
 The documented cadence, stated numerically because vague guidance produces either one
 poll or forty: **first poll ~10 s** after the write, **then every ~15 s**, stopping
-after **10 attempts or ~3 min** — then report what is still unfinished. It replaces the
+after **10 attempts** (~2.5 min at that cadence) — then report what is still unfinished.
+The attempt count is the ceiling; the duration follows from it. It replaces the
 browser's 3 s / 120 s loop, which is right for a page and wrong for an agent (a tool
 round-trip is already seconds, and each attempt costs a model turn).
 
@@ -454,6 +455,15 @@ A client meets a playbook on four channels, by when the text is needed:
 - **the tool `description` and `instructions`** — one bounded pointer each
   (`Step 1 of 3 in playbook "product_import" — call get_playbook for the full
   chain.`) and one generated index line per chain. No step bodies in either.
+
+One tool can be a step of several chains, and nothing in a request says which one
+the caller is following (the transport is stateless, so there is no session that
+could have remembered). Where that happens, both result-carried hints say less
+rather than guessing: the envelope hint names the candidate chains and points at
+`get_playbook` instead of stating a step number, and the error text keeps only the
+clauses every candidate agrees on — resolving the disagreements towards caution,
+so "not idempotent" wins over "idempotent". A confident wrong answer about what an
+unfinished chain left behind is worse than one extra call.
 
 Playbooks are also mirrored as `autods://playbook/<name>` resources with
 `mimeType: text/markdown`, for hosts that let a user attach a resource:

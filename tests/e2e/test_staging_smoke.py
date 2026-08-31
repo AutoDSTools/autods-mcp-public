@@ -9,6 +9,15 @@ manifest's inputSchema is wrong).
 
 Opt-in: skipped unless ``RUN_STAGING_E2E=1`` plus the staging env vars in
 ``conftest._REQUIRED_VARS``. See ``tests/e2e/conftest.py``.
+
+**The op-name sets below are hand-maintained and must be updated whenever a
+manifest operation is added or removed** — ``test_tools_list_exposes_all_registered_ops``
+asserts ``tools/list`` equals them exactly. Because this suite is opt-in, a
+forgotten entry fails nothing in CI; it just rots until the next staging run,
+which is how ``get_current_user`` (RD-68) and ``get_playbook`` (RD-100) went
+missing here and left the file broken until RD-89. The sibling assertions to keep
+in step are the tool counts in ``tests/mcp_server/test_loader.py`` and
+``tests/mcp_server/test_transport.py``.
 """
 
 from typing import Any
@@ -17,14 +26,18 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (5 AutoDSApi ops + 5 ProductsResearch ops). Used
-# both to assert tools/list and to drive the per-op smoke calls.
+# The full registered tool set (7 AutoDSApi ops + 5 ProductsResearch ops + 1 op
+# this server answers itself). Used both to assert tools/list and to drive the
+# per-op smoke calls, so it has to track the manifests by hand — the same
+# hand-maintained count as the loader/transport assertions.
 AUTODS_OPS = {
     "list_stores_api",
     "list_products",
     "get_bulk_action_items",
     "upload_products",
     "publish_drafts_to_marketplace",
+    "get_current_user",
+    "get_user_subscription",
 }
 PRODUCTS_RESEARCH_OPS = {
     "search_products",
@@ -33,7 +46,9 @@ PRODUCTS_RESEARCH_OPS = {
     "get_similar_products",
     "get_recommended_products",
 }
-ALL_OPS = AUTODS_OPS | PRODUCTS_RESEARCH_OPS
+# Answered locally (RD-100), so it never reaches an upstream.
+LOCAL_OPS = {"get_playbook"}
+ALL_OPS = AUTODS_OPS | PRODUCTS_RESEARCH_OPS | LOCAL_OPS
 
 # Write ops: only exercised when E2E_INCLUDE_WRITES=1 (they mutate staging).
 WRITE_OPS = {"upload_products", "publish_drafts_to_marketplace"}
@@ -78,7 +93,7 @@ def _first_product_id(data: Any) -> str | None:
 
 
 async def test_tools_list_exposes_all_registered_ops(staging_app, access_token) -> None:
-    """The staging-wired server advertises exactly the 10 registered tools."""
+    """The staging-wired server advertises exactly the registered tool set."""
     app, runtime = staging_app
     async with mcp_client_session(app, runtime, token=access_token) as session:
         tools = await session.list_tools()
@@ -104,6 +119,19 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
 
         async def call(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
             return await session.call_tool(name, arguments)
+
+        # --- Parameterless reads (no fixture needed, so nothing can skip them) ---
+        _record("get_current_user", await call("get_current_user", {}), failures, frozenset())
+        # RD-89: entitlements + credit balances. Reconciles the credit balance
+        # against a separate source on a short timeout, so it is the slowest read
+        # here — that is expected, not a failure.
+        subscription = await call("get_user_subscription", {})
+        _record("get_user_subscription", subscription, failures, frozenset())
+        if not subscription.is_error:
+            data = (subscription.structured_content or {}).get("data")
+            if not isinstance(data, dict) or "user_addons" not in data:
+                failures.append("get_user_subscription: response carries no 'user_addons' list")
+        _record("get_playbook", await call("get_playbook", {"name": "product_import"}), failures, frozenset())
 
         # --- ProductsResearch reads (also discover a product id to reuse) ---
         product_id: str | None = None

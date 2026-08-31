@@ -22,6 +22,25 @@
         "readOnlyHint": true,
         "destructiveHint": false
       }
+    },
+    {
+      "operation_id": "get_user_subscription",
+      "method": "GET",
+      "path": "/subscriptions/user-subscription/",
+      "summary": "Get the current user's add-ons and credit balances.",
+      "description": "Return the caller's own subscription state: which add-ons the account holds, and the credit balances it can spend. Read-only, takes no parameters. Use it as the pre-flight check before anything that needs an entitlement or a credit balance, and as the first call when another tool answers `forbidden` — this one answers whatever the account's status is, so it can say *which* entitlement is missing.",
+      "tags": [
+        "users"
+      ],
+      "parameters": [],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Resolves the caller only. Consume the three list fields below and ignore everything else.\n\n`user_addons[]` — one entry per add-on the account holds or has held. `addon_type` is one of `orders_processor` (sourcing / Fulfilled-by-AutoDS), `product_hub` (TikTok Analytics and the product-finding hub), `virtual_assistants`, `mentorship`, `ugc`, `ols`. `status` is a numeric code: 1 = active, 2 = canceled, 3 = expired (an upstream build may render the name \"active\"/\"canceled\"/\"expired\" instead, so accept either form). An add-on counts as ACTIVE when an entry for it is present AND its `status` is neither 2 nor \"canceled\" — so `expired` still counts as active, and no entry at all means the account never held it. Do not infer activeness from `expires_at` or any other field in the entry.\n\n`user_credits[]` — entries of `{amount_of_credits, credit_type}`. `credit_type` is a numeric code delivered as a STRING: \"1\" = auto-order credits (the balance a sourcing request spends), \"2\" = product-finder credits, \"3\" = AI-rewrite credits. An absent entry is NOT a confirmed zero: the auto-order entry is omitted both when the balance is zero and when the balance source did not answer in time, and the two are indistinguishable in the response — so read a missing \"1\" entry as \"no spendable balance established\", never as \"zero, confirmed\".\n\n`user_packages[]` — plan context; its `status` reads the same way as an add-on's.\n\nEverything else in the response (ids, timestamps, nested plan and add-on catalogue records, billing and payment fields) is an internal service attribute — do not rely on, reason about, or surface it; it may change without notice.\n\nTwo properties to plan around. (1) Answering this call reconciles the account against a separate balance source under a bounded wait, so its latency is less predictable than a plain read — usually well under a second, but a few seconds is within contract and is not a fault. Call it once and keep the answer for the rest of the task; it is not a tool to poll. (2) It is permitted for every account status, which is why it still answers when other tools return `forbidden` or refuse an entitlement-gated operation. That makes it the right first call for diagnosing \"why can't I do X\".",
+      "annotations": {
+        "title": "Get User Subscription",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
     }
   ]
 }

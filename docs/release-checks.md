@@ -355,16 +355,33 @@ with the R5 body → a non-empty `data.results`.
 *Fixture:* one `results[]._id` (24-char hex) for R7–R9.
 *If empty or failing:* R7, R8, R9 are `skipped (no product id available)`.
 
-**P4 — Entitlements.** `get_winning_products` `{"offset": 0, "limit": 1, "sort":
-"-created_at"}`, and note whether the account has the **Product Finding Hub** add-on.
-All three of `offset`, `limit` and `sort` are required — omit `sort` and the schema
-gate refuses the call with `invalid_arguments` before it reaches upstream, which is
-the gate working, not an entitlement answer.
-*Why it matters:* without it, `get_winning_products` returns a limited free set and
-`get_product_by_id` on a *winning* product answers with an `upstream_error` about an
-unexpected redirect. Both are correct behaviour. Decide this **here**, once, so R6
-and R7 are graded against the right expectation instead of being filed as faults.
+**P4 — Entitlements, read rather than inferred.** `get_user_subscription` `{}` → a
+`user_addons[]` list. For each of `product_hub` (the Product Finding Hub, which also
+gates TikTok Analytics) and `orders_processor` (sourcing / Fulfilled-by-AutoDS),
+record active / not active by the tool's own rule: **an entry is present and its
+`status` is not the canceled code** (`1` = active, `2` = canceled, `3` = expired, so
+`expired` still counts as active; no entry at all means the account never held it).
+Record the raw `addon_type`/`status` pairs too, so the grading below can be re-derived
+from the report — and flag it as a finding if `status` arrives as a *name* rather than a
+number, because that is an upstream rendering change the tool's `notes` tolerate but
+callers may not.
+*Fixture:* the two entitlement flags (needed by R6, R7 and P8).
+*Why it matters:* without the Product Finding Hub, `get_winning_products` returns a
+limited free set and `get_product_by_id` on a *winning* product answers with an
+`upstream_error` about an unexpected redirect. Both are correct behaviour. Decide this
+**here**, once, so R6 and R7 are graded against the right expectation instead of being
+filed as faults.
 *Record it either way* — "no add-on" changes what R6/R7 mean, it doesn't skip them.
+*Its latency is less predictable than the other reads* (it reconciles against a separate
+balance source under a bounded wait — measured 0.35–1.3 s on staging). Anything up to a
+few seconds is within contract; only a timeout is a finding.
+*If this check fails:* fall back to inferring the Product Finding Hub from
+`get_winning_products` `{"offset": 0, "limit": 1, "sort": "-created_at"}` — a limited
+result set means no add-on — and record P4 as `fail` with the inference noted. All
+three arguments are required there; omitting `sort` gets an `invalid_arguments`
+rejection, which is the schema gate working, not an entitlement answer. Note that
+`get_user_subscription` is permitted for every account status, so a `forbidden` here
+is a real finding rather than an entitlement answer.
 
 **P5 — Resolve the write target** (only when the human authorized writes). Match
 their description — "the Shopify store", a name, a URL — against the P2 list on
@@ -395,6 +412,17 @@ with `product_status: 1` → record the draft ids that already exist.
 *Why:* W3 must publish only the drafts W1 created, and this snapshot is what makes
 the diff possible. Without it, W3 cannot run safely.
 
+**P8 — Spendable credits.** Read `user_credits[]` off the **P4 response** — don't call
+again. Record `amount_of_credits` for `credit_type` `"1"` (auto-order credits, the
+balance a sourcing request spends). The code arrives as a *string*, not an integer;
+matching on `1` finds nothing.
+*Fixture:* the auto-order balance, for grading any check that spends credits.
+*If no `"1"` entry is present:* record `skipped (no spendable auto-order balance
+established)` — **not** "zero credits". The entry is omitted both when the balance is
+genuinely zero and when the balance source didn't answer inside the timeout, and the
+response cannot tell the two apart. Either way, treat a later insufficient-credits
+refusal as an account gap, not a release regression.
+
 ---
 
 ## R — Read paths (the operations users actually run)
@@ -407,6 +435,11 @@ the calls — reuse the responses and grade them a second time against a differe
 question: **P asked whether the account has the data; R asks whether the response
 still has the documented shape.** Everything from R3 on uses the fixtures P
 resolved, and is `skipped` when P didn't produce one.
+
+`get_user_subscription` has no R check on purpose: P4 and P8 already grade its
+documented shape (`user_addons[]` with `addon_type`/`status`, `user_credits[]` with a
+string `credit_type`), and it is the one read whose *entitlement* answer the rest of
+the run is graded against — so re-asking it in R would only repeat P.
 
 **R1 — `get_current_user` `{}`.**
 → `data` is a single-element list with a numeric `id`, `name`, `email` matching the

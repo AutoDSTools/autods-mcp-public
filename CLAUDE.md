@@ -136,6 +136,12 @@ also the *least* reliable, since surfacing it at all is client discretion. Hence
 cap, and hence the rule that a long enum table belongs on the parameter that takes it, not
 here.
 
+When an operation takes **no parameters at all** there is no tier-1 slot, and the tier-2
+`notes` is where its enum tables go — not tier 4. `get_user_subscription` (RD-89) is the
+reference: the add-on-type and credit-type tables it documents are needed to *read* its
+response, not to form the call, so `notes` was always their home; the absence of a
+parameter just removes the alternative.
+
 The server-wide index lives in `manifests/_server.json` — a manifest with no operations,
 carrying only the tier-4 block. Everything else is per-domain, and an **empty**
 `instructions` is the normal case for a domain whose whole contract is tier 1/2
@@ -378,6 +384,7 @@ this checklist and update whatever it touches **in the same commit**:
 | adds a new env var (new `validation_alias` in `settings.py`) | the **Configuration** table *and* narrative in `README.md`, and `.env.example` |
 | adds or changes a user-facing feature (analytics, Sentry, a new transport behavior, …) | the relevant `README.md` section (narrative) *and* a **Conventions** bullet here if it carries an invariant a future editor must not break |
 | adds/changes a manifest tool, `base_url_key`, or a boot-time lint (D5) | the **Tools are data** section here *and* the **Manifests** section in `README.md` |
+| adds or removes a manifest **operation** | all three hand-maintained tool inventories — `tests/mcp_server/test_loader.py`, `tests/mcp_server/test_transport.py`, and `tests/e2e/test_staging_smoke.py` (the last is opt-in, so nothing fails if you skip it — see the `operations_count` gotcha) |
 | changes a command, workflow, or convention (lint/test/run, commit format, Python rules) | the corresponding section here |
 | fixes a bug or incident whose root cause was non-obvious, or adds a guard/workaround that looks removable but isn't | a **Gotchas & hard-won lessons** bullet here (and a **Troubleshooting** entry in `README.md` if an operator/client would hit the symptom) |
 | adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
@@ -630,13 +637,49 @@ production incident; don't undo the guard without understanding why it's there.
   guard in `loader.py` is what keeps that lint meaningful — it looks removable and isn't.
 - **`operations_count` in a manifest is cosmetic** — the model uses `extra="ignore"` and
   drops it; it's never validated and silently drifts. The real count guarantee is the
-  tool-count assertions in the tests; update those by hand when you add/remove an operation.
+  hand-maintained tool inventories in the tests, and there are **three** of them —
+  adding or removing an operation means editing all three in the same commit:
+  `tests/mcp_server/test_loader.py` (operation count), `tests/mcp_server/test_transport.py`
+  (advertised-tool count), and `tests/e2e/test_staging_smoke.py` (`AUTODS_OPS` /
+  `PRODUCTS_RESEARCH_OPS` / `LOCAL_OPS`, which `test_tools_list_exposes_all_registered_ops`
+  asserts `tools/list` equals **exactly**). Only the first two run in CI. The e2e file is
+  opt-in (`RUN_STAGING_E2E=1`), so forgetting it fails nothing locally and the staleness
+  only surfaces the next time someone runs the staging smoke — which is how it silently
+  missed both `get_current_user` (RD-68) and `get_playbook` (RD-100) and sat broken until
+  RD-89. Grep for the previous tool count before assuming you've found every site.
 - **New read tools must mirror `products_research.json` conventions**, which are
   load-bearing, not stylistic: enum-valued query params list allowed values in the
   `description` (not a JSON `enum`), `"min-max"` range filters are typed `str`, and
   `product_id`/`internal_id` stay distinct params. Verify enum value sets and example
   ranges against *live* upstream data — an enum narrower than the API silently rejects
   valid calls (e.g. a percentage field mistakenly documented as a 0–1 fraction).
+- **`/subscriptions/user-subscription/` renders three enums three different ways, and
+  only a live call tells you which** (RD-89). In one response body: `addon_type` is a
+  name (`"product_hub"`), add-on and package `status` is an **integer** (`1` active, `2`
+  canceled, `3` expired), and `credit_type` is a numeric code delivered as a **string**
+  (`"1"`/`"2"`/`"3"`). The string is explicable from the source — the repo builds the
+  entry with `CreditType.<x>.value` (an int) into a field declared `fields.String`, so
+  marshmallow stringifies it — and it breaks the server-wide "enums are integers"
+  invariant, so an agent matching on `1` finds nothing. `status` is the one that caught
+  us out: with the versions AutoDSApi currently pins, `marshmallow_sqlalchemy` maps a
+  `Column(Enum(IntEnum))` to `fields.Enum`, which dumps **by name** — so reading the
+  schema predicts `"canceled"` while staging actually returns `2`. Deployed AutoDSApi is
+  evidently on an older mapping, which also means the rendering can flip on an
+  AutoDSApi dependency bump with nothing here failing. Hence the tool's `notes` document
+  the numeric codes *and* tell the caller to accept the name form, and release-check P4
+  asks for the raw pairs and flags a name as a finding. Verify a response-side enum
+  against a live call, never against the schema — same lesson as the `EnumField(...,
+  use_name=True)` red herring above.
+- **An absent credit entry is not a zero balance** (RD-89). The auto-order entry is
+  appended only under `if autods_user.auto_order_credits:` — falsy — and the attribute
+  defaults to `None` and is *left* at `None` when the balance source raises inside its
+  5 s timeout. So a **zero** balance and an **unavailable** balance both render as a
+  missing entry, indistinguishably; the staging account that verified RD-89 has
+  `orders_processor` active and no `"1"` entry at all, so this is the common case, not
+  the edge. Reading "no entry" as "0 credits" reports a confirmed empty wallet for what
+  may be a timed-out upstream — the `notes` and release-check P8 both say "no spendable
+  balance established" instead. Same class of trap as the mis-cased `business_errors`
+  path: nothing fails, the field is just quietly absent.
 - **The dispatcher is a pure forwarder** — `dispatch._parse_response` returns
   `response.json()` verbatim. You cannot trim or reshape a response via manifest text; that
   needs an upstream change. Don't add per-operation response logic — it breaks "tools are

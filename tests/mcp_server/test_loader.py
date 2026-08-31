@@ -35,8 +35,9 @@ def test_loads_vendored_products_manifest(bundled_manifest_dir: Path) -> None:
 
     operations = registry.list_operations()
     # 5 AutoDSApi ops (products/stores/bulk_actions) + 5 ProductsResearch ops
-    # + 1 users op (get_current_user) + 1 locally-served op (get_playbook).
-    assert len(operations) == 12
+    # + 2 users ops (get_current_user, get_user_subscription)
+    # + 1 locally-served op (get_playbook).
+    assert len(operations) == 13
     assert all(isinstance(op, ManifestOperation) for op in operations)
 
     op = registry.get("upload_products")

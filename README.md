@@ -484,6 +484,37 @@ downstream consumers (e.g. log/analytics enrichment). It **fails open**: any
 dispatch error, non-2xx, or unparseable payload resolves to `None` and never
 breaks auth or a tool call.
 
+### Entitlements and credit balances (RD-89)
+
+`get_current_user` deliberately exposes only `id`/`name`/`email`, so it cannot
+answer "may this account do X". `get_user_subscription` (`manifests/users.json`,
+AutoDSApi `GET /subscriptions/user-subscription/`) is the read that can: one
+parameterless call returns `user_addons[]` (which add-ons the account holds),
+`user_credits[]` (the balances it can spend) and `user_packages[]` (plan
+context). It is the pre-flight call for an entitlement-gated flow, and the first
+call to make when another tool answers `forbidden` — it is permitted for every
+account status, so it still answers when the others refuse.
+
+Three things about the response are documented in the tool's `notes` because a
+caller gets them wrong otherwise:
+
+- **Active means present and not canceled.** `expired` (`3`) still counts as
+  active — this mirrors how the platform itself decides — and a missing entry
+  means the account never held the add-on.
+- **The enum renderings in one response are not uniform.** `addon_type` is a
+  name (`"product_hub"`), add-on/package `status` is an integer (`1`/`2`/`3`),
+  and `credit_type` is a numeric code delivered as a *string* (`"1"` =
+  auto-order credits, `"2"` = product-finder, `"3"` = AI-rewrite) — the one
+  place an AutoDS enum arrives neither as an integer nor as a name.
+- **An absent credit entry is not a confirmed zero.** The auto-order entry is
+  omitted both when the balance is zero and when the upstream balance source
+  didn't answer inside its timeout, and the response can't distinguish them.
+
+Answering the call reconciles the account against that separate balance source
+under a bounded wait, so its latency is less predictable than a plain read
+(0.35–1.3 s measured against staging, with a few seconds still in contract).
+Call it once per task and keep the answer — it is not a polling tool.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated
@@ -602,6 +633,15 @@ The app client in `E2E_COGNITO_CLIENT_ID` must have `USER_PASSWORD_AUTH`
 enabled. The write ops (`upload_products`, `publish_drafts_to_marketplace`)
 are skipped unless `E2E_INCLUDE_WRITES=1`, so a default run never mutates
 staging data. See `tests/e2e/conftest.py` for the full env-var contract.
+
+**"Every registered tool" is a hand-maintained list, not a discovered one.** The
+op-name sets at the top of `tests/e2e/test_staging_smoke.py` are what
+`test_tools_list_exposes_all_registered_ops` asserts `tools/list` equals exactly,
+so **adding a manifest operation means editing that file too** — alongside the
+tool-count assertions in `tests/mcp_server/test_loader.py` and
+`test_transport.py`. Because this suite is opt-in, omitting it breaks nothing in
+CI: the list simply goes stale and the next staging run fails on a tool that has
+been shipping for months.
 
 ### Post-release checks
 

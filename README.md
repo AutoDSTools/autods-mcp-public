@@ -649,7 +649,9 @@ been shipping for months.
 automated suites can't see: the OAuth sign-in a real client drives, the manifest
 text reaching a client, analytics still firing. Run it against staging (and the
 read-only sections against production) after every release, and extend it in the
-same commit as any new tool, user-visible behaviour, or shipped bug fix.
+same commit as any new tool, user-visible behaviour, or shipped bug fix. A new
+tool means one more edit that is easy to miss: the tool count and list in its
+**C3** check, which nothing lints and nothing executes.
 
 It is written to be **driven by an agent**: ask Claude to run the release checks
 and it asks one round of questions, hands you the browser sign-in (the only step

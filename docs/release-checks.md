@@ -240,7 +240,7 @@ exceed the client's ~10s connect timeout. Note it as upstream latency, not an au
 failure — but if it reproduces on **every** connect, it is a regression.
 
 **C3 — Handshake payload.** In the connected session, list the tools.
-Expected: exactly the **12** tools below, and the server instructions arrive with them.
+Expected: exactly the **13** tools below, and the server instructions arrive with them.
 
 Verify the instructions with the script, not with the client's UI:
 
@@ -261,8 +261,8 @@ Absence there is a client-side display question; the script above is what decide
 whether the **server** sent them.
 
 ```
-get_current_user  list_stores_api  list_products  upload_products
-publish_drafts_to_marketplace  get_bulk_action_items
+get_current_user  get_user_subscription  list_stores_api  list_products
+upload_products  publish_drafts_to_marketplace  get_bulk_action_items
 search_products  get_winning_products  get_product_by_id
 get_similar_products  get_recommended_products  get_playbook
 ```

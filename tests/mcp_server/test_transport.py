@@ -60,9 +60,9 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 5 AutoDSApi ops + 5 ProductsResearch ops + 2 users ops
+    # 5 AutoDSApi ops + 6 ProductsResearch ops + 2 users ops
     # (get_current_user, get_user_subscription) + 1 locally-served op (get_playbook).
-    assert len(by_name) == 13
+    assert len(by_name) == 14
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
@@ -72,6 +72,37 @@ async def test_products_manifest_lists_annotated_tools(
     assert by_name["get_current_user"].annotations.read_only_hint is True
     # The RD-89 entitlement/credit read is advertised read-only.
     assert by_name["get_user_subscription"].annotations.read_only_hint is True
+    # The RD-108 category tree is advertised read-only, with its title.
+    assert by_name["get_categories"].annotations.title == "Get Categories"
+    assert by_name["get_categories"].annotations.read_only_hint is True
+
+
+async def test_get_categories_notes_reach_the_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-108: the three things a caller gets wrong arrive *at a client*.
+
+    ``get_categories`` takes no parameters, so it has no tier-1 slot at all and
+    every one of these lives in its tier-2 ``notes``. A manifest field nothing
+    reads is invisible rather than harmless (RD-90), so this asserts against the
+    descriptor a real session receives, not against the manifest file.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_description = {tool.name: tool.description for tool in tools.tools}
+    description = by_description["get_categories"]
+    # 1. The id is what the search_products category filter takes.
+    assert "categories.autods_category_id.$id" in description
+    # 2. A label is unique only among siblings, so matching one anywhere is wrong.
+    assert "unique only among its immediate siblings" in description
+    # 3. A parent id covers the whole subtree, so an agent can start broad.
+    assert "subtree" in description
+    # The pointer back is on search_products too, or the tree is a dead end.
+    assert "get_categories" in by_description["search_products"]
 
 
 async def test_tool_call_forwards_bearer_to_upstream(

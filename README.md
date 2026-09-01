@@ -515,6 +515,31 @@ under a bounded wait, so its latency is less predictable than a plain read
 (0.35–1.3 s measured against staging, with a few seconds still in contract).
 Call it once per task and keep the answer — it is not a polling tool.
 
+### Category ids for product search (RD-108)
+
+`search_products` can restrict a search to a product category, but the filter
+takes a 24-character hex id — and until this tool there was no way to obtain
+one through MCP, so the filter was documentation for something a client could
+not do. `get_categories` (`manifests/products_research.json`, ProductsResearch
+`GET /categories/`) is the lookup: one parameterless read returning the whole
+tree as `{value, label, children}` nodes.
+
+Its `notes` carry the three things a caller gets wrong, all of which fail
+silently rather than erroring:
+
+- **`value` is the only unique key.** It is exactly what the `search_products`
+  category filter takes (`value_type: "objectId"`, `op: "="`).
+- **`label` is unique only among siblings.** `Clothing`, `Pants`, `Shorts`,
+  `Shoes` and `Accessories` each exist under `Women`, `Men`, `Girls` and
+  `Boys`; `Mirrors` exists under two unrelated parents. Resolving a category by
+  matching a label anywhere in the tree picks one of several unrelated
+  subtrees and returns a confident wrong answer.
+- **A parent id matches its whole subtree**, so the useful move is to filter by
+  the broadest category that fits the intent rather than to collect leaf ids.
+
+The tree arrives in a single response (there is no paging and no way to request
+one branch) and changes a few times a year, so it is a call-once-per-task read.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated

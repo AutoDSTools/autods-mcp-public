@@ -34,10 +34,10 @@ def test_loads_vendored_products_manifest(bundled_manifest_dir: Path) -> None:
     registry = build_registry(bundled_manifest_dir)
 
     operations = registry.list_operations()
-    # 5 AutoDSApi ops (products/stores/bulk_actions) + 5 ProductsResearch ops
+    # 5 AutoDSApi ops (products/stores/bulk_actions) + 6 ProductsResearch ops
     # + 2 users ops (get_current_user, get_user_subscription)
     # + 1 locally-served op (get_playbook).
-    assert len(operations) == 13
+    assert len(operations) == 14
     assert all(isinstance(op, ManifestOperation) for op in operations)
 
     op = registry.get("upload_products")
@@ -58,6 +58,7 @@ def test_loads_products_research_manifest(bundled_manifest_dir: Path) -> None:
         "get_product_by_id",
         "get_similar_products",
         "get_recommended_products",
+        "get_categories",
     }
     for operation_id in expected:
         op = registry.get(operation_id)

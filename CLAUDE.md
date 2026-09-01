@@ -140,7 +140,9 @@ When an operation takes **no parameters at all** there is no tier-1 slot, and th
 `notes` is where its enum tables go — not tier 4. `get_user_subscription` (RD-89) is the
 reference: the add-on-type and credit-type tables it documents are needed to *read* its
 response, not to form the call, so `notes` was always their home; the absence of a
-parameter just removes the alternative.
+parameter just removes the alternative. `get_categories` (RD-108) is the same shape — the
+tree's contract (ids are the unique key, labels are not, a parent covers its subtree) is
+all about reading the response and feeding it to *another* tool's filter.
 
 The server-wide index lives in `manifests/_server.json` — a manifest with no operations,
 carrying only the tier-4 block. Everything else is per-domain, and an **empty**
@@ -659,6 +661,18 @@ production incident; don't undo the guard without understanding why it's there.
   `product_id`/`internal_id` stay distinct params. Verify enum value sets and example
   ranges against *live* upstream data — an enum narrower than the API silently rejects
   valid calls (e.g. a percentage field mistakenly documented as a 0–1 fraction).
+- **The category tree hides two traps, and neither produces an error** (RD-108). (1) Its
+  **labels repeat** — `Clothing`, `Pants`, `Shorts`, `Shoes` and `Accessories` each exist
+  under `Women`, `Men`, `Girls` *and* `Boys`, and `Mirrors` under two unrelated parents —
+  so a caller resolving a category by label match picks one of several unrelated subtrees
+  and gets a confident wrong answer. Only `value` is unique; position in the tree is what
+  disambiguates a label. That is why the `notes` say so twice, and why the phrasing is
+  asserted by a test rather than left to review. (2) Upstream fetches the tree in **one
+  page of 1000 documents with no scroll**, and rebuilds it from `parent_id is None`
+  downwards — so past that cap a node whose parent fell outside it vanishes *with its
+  whole subtree*, silently, with a 200 and a well-formed response. The measured tree is
+  **270 nodes**, and that margin is the only reason this tool is trustworthy; if it ever
+  approaches 1000, the upstream fetch has to be fixed **before** anything here changes.
 - **`/subscriptions/user-subscription/` renders three enums three different ways, and
   only a live call tells you which** (RD-89). In one response body: `addon_type` is a
   name (`"product_hub"`), add-on and package `status` is an **integer** (`1` active, `2`

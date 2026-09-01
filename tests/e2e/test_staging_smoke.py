@@ -26,7 +26,7 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (7 AutoDSApi ops + 5 ProductsResearch ops + 1 op
+# The full registered tool set (7 AutoDSApi ops + 6 ProductsResearch ops + 1 op
 # this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
@@ -45,6 +45,7 @@ PRODUCTS_RESEARCH_OPS = {
     "get_product_by_id",
     "get_similar_products",
     "get_recommended_products",
+    "get_categories",
 }
 # Answered locally (RD-100), so it never reaches an upstream.
 LOCAL_OPS = {"get_playbook"}
@@ -90,6 +91,31 @@ def _first_product_id(data: Any) -> str | None:
                 if isinstance(value, str) and value:
                     return value
     return None
+
+
+def _root_categories(result: types.CallToolResult) -> list[str]:
+    """Every top-level category id, in the order the tree came back.
+
+    Deliberately strict about the node shape: the ``notes`` promise every node
+    carries ``value``/``label``/``children``, and an agent that walks the tree
+    breaks on the first node that doesn't — so a malformed root is dropped rather
+    than trusted. Order *among* the roots is not pinned by anything: upstream
+    sorts the roots ahead of the rest and nothing further, so which one lands
+    first can move. That is why this returns all of them and the caller tries
+    them in turn instead of asserting on one.
+    """
+    data = (result.structured_content or {}).get("data")
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return []
+    roots = []
+    for node in results:
+        if not isinstance(node, dict) or not {"value", "label", "children"} <= node.keys():
+            continue
+        value = node["value"]
+        if isinstance(value, str) and value:
+            roots.append(value)
+    return roots
 
 
 async def test_tools_list_exposes_all_registered_ops(staging_app, access_token) -> None:
@@ -143,6 +169,53 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         _record("search_products", search, failures, frozenset())
         if not search.is_error:
             product_id = _first_product_id((search.structured_content or {}).get("data"))
+
+        # RD-108: the category tree, and the reason it exists — a top-level id
+        # has to come back with products under it, since the filter matches a
+        # whole subtree.
+        categories = await call("get_categories", {})
+        _record("get_categories", categories, failures, frozenset())
+        root_ids = [] if categories.is_error else _root_categories(categories)
+        if not root_ids:
+            skipped.append("get_categories -> search_products (no root category id)")
+        else:
+            # Stops at the first root that matches, so the healthy path is one
+            # extra call. A single empty root is not a fault — nothing says every
+            # top-level category is stocked, and which root comes back first can
+            # move — but *every* root coming back empty means the tree or the
+            # filter contract moved and the tool documents a dead end.
+            empty_roots: list[str] = []
+            for root_id in root_ids:
+                filtered = await call(
+                    "search_products",
+                    {
+                        "body": {
+                            "order_by": {"name": "created_at", "direction": "desc"},
+                            "limit": 5,
+                            "filters": [
+                                {
+                                    "name": "categories.autods_category_id.$id",
+                                    "value": root_id,
+                                    "value_type": "objectId",
+                                    "op": "=",
+                                }
+                            ],
+                        }
+                    },
+                )
+                _record("search_products (category filter)", filtered, failures, frozenset())
+                if filtered.is_error:
+                    break
+                data = (filtered.structured_content or {}).get("data")
+                results = data.get("results") if isinstance(data, dict) else None
+                if results:
+                    break
+                empty_roots.append(root_id)
+            else:
+                failures.append(
+                    f"search_products: none of the {len(empty_roots)} top-level categories matched a "
+                    f"product; a parent id is documented to match its whole subtree"
+                )
 
         winning = await call("get_winning_products", {"offset": 0, "limit": 5, "sort": "-created_at"})
         _record("get_winning_products", winning, failures, frozenset())

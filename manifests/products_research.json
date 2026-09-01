@@ -1,7 +1,7 @@
 {
   "server_name": "autods-products-research",
   "domain": "products_research",
-  "operations_count": 5,
+  "operations_count": 6,
   "instructions": "",
   "operations": [
     {
@@ -10,7 +10,7 @@
       "path": "/products/",
       "summary": "Search the product-research catalog by filter.",
       "description": "",
-      "notes": "Read-only POST. Searches the product-research catalog and returns {results: [...], currency, region}. Winning products and deleted products are excluded automatically. The body is a filter object: `order_by` ({name, direction}) is REQUIRED; `filters` is an optional list of {name, value, value_type, op}. Free-text search is a filter with name=search_query, op=search, value_type=string. `region` is resolved from the user's settings server-side and is ignored if sent. Use `offset`/`limit` for pagination (default limit 10).",
+      "notes": "Read-only POST. Searches the product-research catalog and returns {results: [...], currency, region}. Winning products and deleted products are excluded automatically. The body is a filter object: `order_by` ({name, direction}) is REQUIRED; `filters` is an optional list of {name, value, value_type, op}. Free-text search is a filter with name=search_query, op=search, value_type=string. To restrict a search to a product category, filter on name=categories.autods_category_id.$id with value_type=objectId and op=`=`; call `get_categories` for the ids that filter takes, and note that a parent id matches every product in its whole subtree. `region` is resolved from the user's settings server-side and is ignored if sent. Use `offset`/`limit` for pagination (default limit 10).",
       "tags": [
         "products"
       ],
@@ -300,6 +300,25 @@
       "request_body_required": false,
       "annotations": {
         "title": "Get Recommended Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "get_categories",
+      "method": "GET",
+      "path": "/categories/",
+      "summary": "List the product category tree.",
+      "description": "Return the whole AutoDS product category tree in one call. Read-only, takes no parameters. This is how a category the user named becomes an id the `search_products` category filter can take.",
+      "notes": "Returns `{results: [...]}`: a tree of `{value, label, children}` nodes, top-level categories first, each leaf carrying an empty `children` list. The whole tree arrives in one response — there is no paging, and no way to request a single branch.\n\n`value` is a 24-character hex id and is the only unique key in the tree. It is exactly what the `search_products` category filter takes: `{name: \"categories.autods_category_id.$id\", value: \"<value>\", value_type: \"objectId\", op: \"=\"}`.\n\n`label` is NOT unique, and treating it as unique is the mistake this tool invites. A label is unique only among its immediate siblings: `Clothing`, `Pants`, `Shorts`, `Shoes` and `Accessories` each exist separately under `Women`, `Men`, `Girls` and `Boys`, and `Mirrors` exists under two unrelated parents. What identifies a category is its position in the tree, so resolve one by walking down from the top-level category that matches the intent — never by matching a label anywhere in the tree, which silently picks one of several unrelated categories and returns a confident wrong answer with no error.\n\nFiltering by a parent id matches every product anywhere in that parent's subtree, not only products filed directly under it. So filter by the broadest category that fits the intent: one id near the top of the tree covers everything below it, and there is no need to collect the ids of its descendants.\n\n`Other Category` is the catch-all and is always the last top-level entry; it has no children.\n\nThe tree changes a few times a year, so call this once per task and reuse the answer.",
+      "tags": [
+        "categories"
+      ],
+      "parameters": [],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Categories",
         "readOnlyHint": true,
         "destructiveHint": false
       }

@@ -240,7 +240,7 @@ exceed the client's ~10s connect timeout. Note it as upstream latency, not an au
 failure — but if it reproduces on **every** connect, it is a regression.
 
 **C3 — Handshake payload.** In the connected session, list the tools.
-Expected: exactly the **13** tools below, and the server instructions arrive with them.
+Expected: exactly the **14** tools below, and the server instructions arrive with them.
 
 Verify the instructions with the script, not with the client's UI:
 
@@ -284,7 +284,8 @@ script is what settles it; presence settles it on its own.
 get_current_user  get_user_subscription  list_stores_api  list_products
 upload_products  publish_drafts_to_marketplace  get_bulk_action_items
 search_products  get_winning_products  get_product_by_id
-get_similar_products  get_recommended_products  get_playbook
+get_similar_products  get_recommended_products  get_categories
+get_playbook
 ```
 
 Check the instructions text starts with `## AutoDS MCP — start here` and matches
@@ -523,6 +524,23 @@ isn't confirmed until it reads the store back. It must **not** appear on R3's
 → a typed `invalid_arguments` / `upstream_client_error` with a readable message —
 never `internal_error`, never a stack trace, never an internal hostname or upstream
 URL in the text.
+
+**R12 — `get_categories` `{}`, then the filter it exists for.**
+→ `data.results` is a non-empty list of `{value, label, children}` nodes, each `value`
+a 24-character hex id, with `Other Category` last and childless. Then take a top-level
+`value` — a root, not a leaf — and repeat R5 with
+`"filters": [{"name": "categories.autods_category_id.$id", "value": "<that value>",
+"value_type": "objectId", "op": "="}]`.
+→ `data.results` is non-empty, and the check passes at the first root that matches.
+One empty root is not a failure — nothing promises every top-level category is
+stocked, and the order the roots arrive in is not pinned by anything, so work down
+the list. **Every** root matching nothing is the failure this check exists for:
+supplying ids to that filter is the tool's entire purpose, and its `notes` promise a
+parent id covers the whole subtree beneath it — so an empty result hands an agent
+that followed the documentation a confident "no products in this category" for a
+category full of them. Grade the tree's shape from the same response: a node missing
+`children` is a report line, and repeated labels are expected, not a fault — they are
+documented as unique only among siblings.
 
 ---
 

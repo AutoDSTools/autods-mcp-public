@@ -253,12 +253,32 @@ MCP_URL=https://mcp-staging.autods.com/mcp uv run python scripts/mcp_call.py lis
 probes localhost** and fails with a connection traceback that looks like a server
 outage. It reuses a cached token and only opens a browser once that token expires.
 
-Whether the instructions *also* show up in the client's own UI is not a signal
-either way: a client may surface them (Claude Code has an *MCP Server Instructions*
-section) or never render them at all — when its tools are loaded lazily, that
-section can be absent for a server whose handshake carried the text correctly.
-Absence there is a client-side display question; the script above is what decides
-whether the **server** sent them.
+> **`MCP_URL` repoints the call, not the sign-in — so the two lines above are
+> staging-only.** The endpoint comes from `MCP_URL`; the token comes from
+> `Settings`, i.e. from the repo's `.env`, whose `COGNITO_DOMAIN` is
+> `auth-staging.autods.com`. Pointing `MCP_URL` at production therefore opens a
+> **staging** Cognito authorization link — and, in the silent case that actually
+> costs you the run, reuses a cached *staging* token and sends it to production,
+> which 401s and reads exactly like a broken release. For production, hand the
+> script a token and skip the OAuth flow entirely:
+>
+> ```bash
+> MCP_TOKEN=<a production access token> MCP_URL=https://mcp.autods.com/mcp \
+>   uv run python scripts/mcp_call.py instructions
+> ```
+>
+> `MCP_TOKEN` short-circuits `get_token()`, so nothing reads `.env`. Overriding
+> the Cognito settings for the run instead (`COGNITO_DOMAIN`,
+> `COGNITO_PUBLIC_CLIENT_ID`, `MCP_REGISTRATION_REDIRECT_URIS`) works too, but it
+> costs a second browser sign-in mid-run, which the opening-round rule forbids.
+
+The client's own UI is evidence in **one direction only**, and that direction is
+usable. If the client *renders* the instructions and the tool descriptors (Claude
+Code has an *MCP Server Instructions* section), the server sent them — grade C3 and
+C4 from that and skip the script. What proves nothing is their **absence**: when a
+client loads tools lazily, that section can be missing for a server whose handshake
+carried the text perfectly. So absence is a client-side display question and the
+script is what settles it; presence settles it on its own.
 
 ```
 get_current_user  get_user_subscription  list_stores_api  list_products
@@ -566,7 +586,7 @@ at the wrong instance answers cheerfully and tells you nothing.
 
 | | Needs | Verify it with |
 |---|---|---|
-| O1 | the `sentry` MCP server, on the **self-hosted** instance | `claude mcp get sentry` shows `--host=sentry.autods.com` |
+| O1 | the `sentry` MCP server, on the **self-hosted** instance | `find_organizations` returns `webUrl: https://sentry.autods.com` |
 | O2 | a Mixpanel MCP server, authorized | `claude mcp list` shows it connected |
 | O3, O4 | AWS credentials that can read `s3://autods-cluster-logs` | `scripts/fetch_logs.py` returns rows |
 
@@ -593,15 +613,33 @@ nothing, and that is a `skipped (no event in this environment to carry the tag)`
 you a release tag, and a tag reading an *older* version there is the finding this
 check exists for.
 
-Use the `sentry` MCP server — the one whose connection arguments carry
-`--host=sentry.autods.com`. A connector named "Sentry" that points at `sentry.io` or
-`mcp.sentry.dev` is the **hosted** service, a different instance entirely: it will
-answer, find nothing, and look like a pass. Confirm the host, then filter issues by
-`environment` and the release tag.
+Use the `sentry` MCP server — the one that answers for `sentry.autods.com`. A
+connector named "Sentry" that points at `sentry.io` or `mcp.sentry.dev` is the
+**hosted** service, a different instance entirely: it will answer, find nothing, and
+look like a pass. Confirm the host, then filter issues by `environment` and the
+release tag.
+
+Confirm it by asking the server, not by reading config: `find_organizations` returns
+the org with its `webUrl`/`regionUrl`, and self-hosted answers
+`https://sentry.autods.com`. `claude mcp get sentry` is the wrong instrument here —
+it prints scope and status but not the connection arguments, so it cannot tell the
+two instances apart, and a *name* proves nothing either way (this workspace carries
+both a self-hosted `sentry` and a separate hosted connector). Reading the tool
+namespace is also enough to know the server is **present**: holding
+`mcp__sentry__*` tools means it is connected, whatever `claude mcp get` says from
+the wrong directory — do not record O1 as `skipped` on the strength of that command
+alone.
 
 Two things about this self-hosted instance, both of which will otherwise cost you a
 wrong reading:
 
+- **The environment tag reads `prod`, not `production`.** It defaults to `MCP_ENV`
+  (`sentry.py`), and the deployed values are `prod` and `staging`. `environment:production`
+  is not an error and not empty-because-healthy — it matches nothing, in a project with
+  thousands of live events, and looks *exactly* like a clean environment. It is the
+  cheapest way to file a false pass on this whole section, so confirm the value on a
+  real event's tags before trusting any empty result. Same trap as `--env prod` in
+  `fetch_logs.py`, which spells it the same way.
 - **`search_events` is not available — it answers HTTP 404.** Use `search_issues`
   for the list, and `get_sentry_resource` on an issue for per-event detail.
 - **`environment:` in a `search_issues` query does not scope the issue's
@@ -622,7 +660,17 @@ wrong reading:
 
 For "no new error class since the deploy", `search_issues` with
 `environment:<env> firstSeen:-24h` is the query that works — an empty result is the
-pass.
+pass, **provided `<env>` is a value the tag actually takes**:
+
+```bash
+# production                      # staging
+environment:prod firstSeen:-24h   environment:staging firstSeen:-24h
+```
+
+An issue that *is* new in that window still has to be dated before you call it a
+regression: read its `release` tag with `get_sentry_resource`. A first-seen inside
+24h carrying the **previous** version fired on the old build and is not new since
+the deploy — it is the last gasp of what you just replaced.
 
 **O2 — Mixpanel.** *MCP Call Received* events appear for the calls you just made,
 keyed by the AutoDS user id from **P1**. Identity resolution fails **open and

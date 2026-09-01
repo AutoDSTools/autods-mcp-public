@@ -253,6 +253,42 @@ async def test_invalid_body_is_rejected_locally_without_upstream_call(
     assert upstream_calls == []
 
 
+async def test_search_products_without_filters_is_refused_locally(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-107: the one body shape the search upstream answers with a 500.
+
+    ``{order_by, limit}`` with no ``filters`` key at all is refused upstream —
+    and it is the first call an exploring agent makes, so it arrives as an
+    opaque ``upstream_error`` on a body that looks reasonable. Fixing the status
+    code belongs to the upstream, but *reaching* it does not have to happen:
+    ``filters`` is required in the ``body_schema``, so the schema gate turns it
+    into a typed ``invalid_arguments`` naming the missing field, before any
+    request is sent. The empty list — the documented unfiltered form — still
+    passes, which is the half a blanket "filters must be non-empty" would break.
+    """
+    upstream_calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(str(request.url))
+        return httpx.Response(200, json={"results": [], "region": "US", "currency": "USD"})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+    order_by = {"name": "created_at", "direction": "desc"}
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        omitted = await session.call_tool("search_products", {"body": {"order_by": order_by, "limit": 2}})
+        empty = await session.call_tool("search_products", {"body": {"order_by": order_by, "limit": 2, "filters": []}})
+
+    assert omitted.is_error is True
+    assert omitted.content[0].text.startswith("invalid_arguments: ")
+    assert "filters" in omitted.content[0].text
+    # The refused shape never reaches the upstream; the documented one does.
+    assert empty.is_error is False
+    assert upstream_calls == ["https://products-research.test/products/"]
+
+
 async def test_valid_integer_enum_body_passes_validation(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

@@ -540,6 +540,52 @@ silently rather than erroring:
 The tree arrives in a single response (there is no paging and no way to request
 one branch) and changes a few times a year, so it is a call-once-per-task read.
 
+### Product search filters (RD-107)
+
+`search_products` forwards each `filters[].name` upstream as a field name, so the
+usable filter set is the whole indexed product document — and unguessable from
+anything a client can see. The manifest documented three example names and none
+of the ones the Marketplace UI itself ships, which left an agent unable to
+reproduce even the basic Marketplace experience: no way to restrict a search to
+Marketplace (private-supplier) products, or to filter by category, price,
+shipping time, ships-from country, or supplier.
+
+The vocabulary is therefore carried in the tool's `inputSchema` — the
+`filters[]` item schema of its `body_schema`, emitted verbatim into the tool
+descriptor — and not in the server `instructions`: it is what an agent needs to
+form *this* call. It names each filterable field with the `value_type` and `op`
+that field takes, the ships-from country codes (a fixed set with no lookup
+endpoint of its own), and the comma separator `between` and `in` require.
+
+Four things in the same schema exist because the alternative is a silent wrong
+answer rather than an error:
+
+- **An unfiltered listing is `filters: []`**, and `filters` is a *required*
+  property. The previous text said to omit it, which is the one shape the
+  upstream refuses — so rather than document our way around a 500 that another
+  team owns, the schema gate refuses the body outright: the caller gets a typed
+  `invalid_arguments` naming the missing field and no upstream call is made. The
+  empty list still passes, which is the half a blanket "must be non-empty"
+  would have broken.
+- **`between` takes `"20,25"`.** The `min-max` dash form documented on
+  `get_winning_products` is not accepted here — the two tools' range syntaxes
+  are not interchangeable.
+- **`order_by.name` lists the sortable fields.** Any string is accepted and a
+  text field is then refused upstream, so `title` looked like a valid choice.
+- **`limit` caps at 50 and `offset` at 9999, the last item inside the
+  10,000-result window.** A result is roughly 2 KB, so an uncapped page could
+  exhaust a client's context in one call; an `offset` past the window used to be
+  refused upstream and is now refused by the schema. Crossing the ceiling
+  *within* the window is not refused at all — `offset: 9999, limit: 2` returns
+  one result — so the ceiling announces itself as a short page, not as an error.
+
+The response-side contract stays in `notes`, where it is needed to *read* a
+response rather than form the call: results are card-shaped (12 fields —
+`get_product_by_id` for the full document), no total count is returned, and a
+short page near the ceiling is not proof the catalog is exhausted. `condition`
+was removed outright: the search path never applied it, so the `"or"` it
+advertised silently returned nothing.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated
@@ -620,6 +666,22 @@ choice here:
   with `--callback-port 2048`; Codex needs `mcp_oauth_callback_port` / `mcp_oauth_callback_url`
   set (its default random port+path can never match). Loosening the server-side allowlist does
   not help — Cognito still rejects it.
+- **`search_products` errors on a call that looks fine, and the error type says which
+  kind of mistake it is.** Three groups, all documented on the parameters that take
+  them — a client hitting one is following stale guidance, not a server fault:
+  - `upstream_error` (an upstream **500**, no readable detail): a `between` operand in
+    `min-max` dash form. It takes `"20,25"`; the dash form is `get_winning_products`'
+    range-bucket syntax, not this tool's.
+  - `upstream_client_error` (an upstream **400**, with detail): a sort on a text field
+    such as `order_by.name: "title"`. Sortable is `created_at`,
+    `product_details.min_price`, `product_details.min_shipping_time`, `spv_param`,
+    `view_count`.
+  - `invalid_arguments` — refused by the schema gate, so no upstream call is made at
+    all: the `filters` key omitted altogether (send `filters: []` for an unfiltered
+    listing), a `limit` above 50, or an `offset` above 9999. The last two were
+    unbounded before 0.6.2 and are now capped in the schema — a `limit` of 150 used to
+    return ~278KB in one tool result, and `offset` past the 10,000-result window was
+    an opaque upstream rejection.
 - **A burst of ~60s `500`s on `POST /mcp`.** These surface as `ClientDisconnect` and are
   usually benign client-side timeouts, but a *flood* means either the transport is hanging
   (see the Sentry request-body gotcha in `CLAUDE.md`) or genuine slow upstream tool calls —

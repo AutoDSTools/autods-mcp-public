@@ -130,7 +130,7 @@ failure there does not stop the connected sections.
   `x-request-id` from an HTTP probe (or the `request_id` in the server log) is what
   ties a report to the server-side line.
 - **Pace the calls.** The limiter allows 60/min and 1000/hour per user; a full run is
-  roughly 25 calls. Run them sequentially — never fan out — so a `rate_limited` error
+  roughly 30 calls. Run them sequentially — never fan out — so a `rate_limited` error
   is a real finding rather than self-inflicted.
 - Don't retry a failing check more than once, and never "fix" arguments to make a
   check pass. The arguments in this file *are* the contract under test.
@@ -540,7 +540,86 @@ parent id covers the whole subtree beneath it — so an empty result hands an ag
 that followed the documentation a confident "no products in this category" for a
 category full of them. Grade the tree's shape from the same response: a node missing
 `children` is a report line, and repeated labels are expected, not a fault — they are
-documented as unique only among siblings.
+documented as unique only among siblings. This grades the tree and the filter as two
+separate halves; R14 is where they have to work as one.
+
+**R13 — The Marketplace search a user actually asks for.** Three `search_products`
+calls, in this order. Each is a call an exploring agent makes unprompted, and each one
+failing looks to a user like "the assistant can't search the Marketplace".
+
+1. **The unfiltered listing, and the shape that is refused.** `{"body": {"order_by":
+   {"name": "created_at", "direction": "desc"}, "limit": 2, "filters": []}}`
+   → `data.results` is a non-empty list. The empty **list** is the documented form.
+   Then repeat it with the `filters` key removed entirely
+   → a typed `invalid_arguments` naming `filters`, with **no** upstream call. That
+   body is the first thing an exploring agent tries and the upstream answers it with
+   a 500, so the schema refuses it here instead: a readable "you left out `filters`"
+   the agent can act on, rather than an opaque server error on a body that looked
+   fine. An `upstream_error` on this call means the guard is gone.
+2. **Marketplace only.** Repeat with `"filters": [{"name": "site_name", "value":
+   "private_suppliers", "value_type": "list", "op": "in"}]`
+   → `data.results` is non-empty and **every** result has `site_name` =
+   `private_suppliers` and a populated `private_supplier` object. A result from
+   another channel means the channel filter is not restricting anything, and a user
+   asked to see Marketplace products gets scraped storefronts instead.
+3. **A price range.** Repeat with `"filters": [{"name":
+   "variations.variation_details.price", "value": "20,25", "value_type": "float",
+   "op": "between"}]`
+   → `ok: true`. The separator is a **comma**; the `min-max` dash form
+   `get_winning_products` documents is refused here. If the comma form errors, every
+   "find me something under $25" request fails.
+
+Then grade the descriptor, not a call: the `search_products` `inputSchema` must name
+the filter fields on `body.filters.items.name` (at minimum `site_name`,
+`supplier_name`, `categories.autods_category_id.$id`,
+`variations.variation_details.price` and `variations.variation_details.warehouse`,
+with the ships-from country codes listed), `body.limit` must carry `maximum: 50`, and
+`body` must have **no** `condition` property. A missing vocabulary is the failure this
+whole check exists for: the fields are unguessable, so an agent that cannot read them
+off the schema silently falls back to unfiltered searches and answers a Marketplace
+question with the whole catalog.
+
+One known rough edge, to note rather than fail on: `between` with the dash form answers
+`upstream_error` (a 500) rather than a readable 4xx. It is not reachable by following
+the tool's documentation, which states the comma form on the parameter that takes it.
+
+**R14 — Browsing the Marketplace by category: the two tools together.** This is the
+request the pair exists to serve — *"show me Marketplace products in <category>"* — and
+it is the only check that runs both halves at once. `get_categories` was built as the
+prerequisite for the category filter (R12 grades each side alone); a user asking that
+question is served only if the tree's ids and the channel filter compose.
+
+Take a **Marketplace** result from R13.2 and read its `categories[]` — each entry is
+`{index, name, autods_category_id}`, the product's own path from the top of the tree
+down. Keep the entry with the **lowest `index`** (the root of that path) and its
+`autods_category_id`. Then one call, both filters together:
+
+```
+"filters": [
+  {"name": "site_name", "value": "private_suppliers", "value_type": "list", "op": "in"},
+  {"name": "categories.autods_category_id.$id", "value": "<that id>",
+   "value_type": "objectId", "op": "="}
+]
+```
+
+→ `data.results` is non-empty, every result is `site_name` = `private_suppliers`, and
+the product you took the id from is among them. All three matter, and each fails
+differently: an empty list means a parent id is *not* covering its subtree, which both
+tools' `notes` promise it does; a non-Marketplace result means the two filters are not
+being ANDed; and the source product missing from its own category means the id you
+read off a product is not the id the filter takes.
+
+Deriving the id from a product rather than picking a root out of the tree is what makes
+this check decisive. The Marketplace is a slice of the catalog, so a root chosen from
+`get_categories` can legitimately hold nothing on this account — an empty result would
+then be unreadable, neither a pass nor a fault. A category one of R13.2's own products
+sits in cannot be empty, so an empty answer is always the bug.
+
+Finally, close the loop back to R12: that `autods_category_id` must appear as a `value`
+somewhere in R12's tree. If it does not, the ids a product reports and the ids
+`get_categories` hands out have diverged, and an agent following the documented route —
+tree first, then filter — is quietly working from a vocabulary the catalog no longer
+uses, even while R12 and R13 both pass on their own.
 
 ---
 

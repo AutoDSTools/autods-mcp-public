@@ -10,7 +10,7 @@
       "path": "/products/",
       "summary": "Search the product-research catalog by filter.",
       "description": "",
-      "notes": "Read-only POST. Searches the product-research catalog and returns {results: [...], currency, region}. Winning products and deleted products are excluded automatically. The body is a filter object: `order_by` ({name, direction}) is REQUIRED; `filters` is an optional list of {name, value, value_type, op}. Free-text search is a filter with name=search_query, op=search, value_type=string. To restrict a search to a product category, filter on name=categories.autods_category_id.$id with value_type=objectId and op=`=`; call `get_categories` for the ids that filter takes, and note that a parent id matches every product in its whole subtree. `region` is resolved from the user's settings server-side and is ignored if sent. Use `offset`/`limit` for pagination (default limit 10).",
+      "notes": "Read-only POST. Searches the product-research catalog and returns `{results: [...], region, currency}`. Winning products and deleted products are excluded automatically.\n\nThe body is a filter object. `order_by` ({name, direction}) and `filters` are both REQUIRED. `filters` is a list of {name, value, value_type, op}, all combined with AND; an unfiltered listing is `filters: []` — a body with no `filters` key at all is refused before the call is made, because the upstream answers that shape with an error rather than a listing. The whole filter vocabulary, with the `value_type` and `op` each field takes, is documented on the `filters[].name` parameter; the three most useful: free text is `{name: \"search_query\", value_type: \"string\", op: \"search\"}`, the AutoDS Marketplace is `{name: \"site_name\", value: \"private_suppliers\", value_type: \"list\", op: \"in\"}`, and a category is `{name: \"categories.autods_category_id.$id\", value_type: \"objectId\", op: \"=\"}` with an id from `get_categories` (a parent id matches every product in its whole subtree). `region` is resolved from the user's settings server-side and is ignored if sent.\n\nThree things about the response a caller gets wrong otherwise:\n\n- **Results are card-shaped, not full products.** Each result carries 12 fields — the ids, `title`, `images`, `categories`, `site_name`, `supplier_name`, `private_supplier`, `product_details` and the winning-product flags. Fields you can *filter* on are not all fields you *get back*: `rating`, `description`, `brand`, `url` and the per-variation details are absent here. Call `get_product_by_id` with a result's `_id` for the full document.\n- **No total count is returned.** Page with `offset`/`limit` (default limit 10) and stop on an empty page — but read the next bullet before treating a short page as the end.\n- **Paging ends at 10,000 results, and the final page comes back short rather than empty.** An `offset` beyond that window is refused as `invalid_arguments` (it is capped at 9999 in this schema), but a page that merely runs past the ceiling from inside the window is silently truncated instead — `offset: 9999, limit: 2` returns one result. So a short page near the ceiling is not proof the catalog is exhausted; narrow the filters instead of paging on.",
       "tags": [
         "products"
       ],
@@ -24,27 +24,21 @@
       },
       "body_schema": {
         "type": "object",
-        "description": "Product-research search filter. `order_by` is required by the upstream.",
+        "description": "Product-research search filter. `order_by` and `filters` are both required; `filters: []` is the unfiltered listing.",
         "properties": {
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "default": 0
+            "maximum": 9999,
+            "default": 0,
+            "description": "Pagination offset, capped at 9999 — the last item of the 10,000-result window. A larger `offset` is refused here as `invalid_arguments` rather than reaching the upstream. A page that runs past the window from inside it is not refused: it comes back short (`offset: 9999, limit: 2` returns one result), so the ceiling shows up as a short page and never as an error."
           },
           "limit": {
             "type": "integer",
             "minimum": 1,
+            "maximum": 50,
             "default": 10,
-            "description": "Page size (default 10)."
-          },
-          "condition": {
-            "type": "string",
-            "enum": [
-              "and",
-              "or"
-            ],
-            "default": "and",
-            "description": "How multiple filters combine."
+            "description": "Page size (default 10, max 50). A result is roughly 2KB, so a large page can exhaust the client's context in a single call."
           },
           "order_by": {
             "type": "object",
@@ -53,7 +47,7 @@
               "name": {
                 "type": "string",
                 "default": "created_at",
-                "description": "Field to sort by, e.g. created_at."
+                "description": "Field to sort by. Sortable: created_at, product_details.min_price, product_details.min_shipping_time, spv_param (relevance), view_count. A text field is not sortable — `title` is refused as an `upstream_client_error`."
               },
               "direction": {
                 "type": "string",
@@ -67,20 +61,21 @@
           },
           "filters": {
             "type": "array",
-            "description": "Filter conditions combined per `condition`. Omit for an unfiltered listing.",
+            "description": "Filter conditions, every one of them combined with AND. Required, and an empty list is how an unfiltered listing is requested: send `filters: []`, never a body without the key.",
             "items": {
               "type": "object",
               "properties": {
                 "name": {
                   "type": "string",
-                  "description": "Filterable field name, e.g. search_query, rating, variations.variation_details.price."
+                  "description": "Field to filter on. Each entry below names the `value_type` and `op` it takes.\n- `search_query` (string, `search`) — free text, matched against title, description and supplier name. This is also how to reach a supplier whose exact name you do not have.\n- `site_name` (list, `in`; or string with `=` for a single channel, `ne` to exclude one) — the sales channel a product was sourced from. `private_suppliers` is the AutoDS Marketplace / private-supplier channel, and is NOT the same as `shopify`, which is independently scraped Shopify storefronts.\n- `supplier_name` (string, `=`) — exact, case-sensitive, full-string match. There is no partial match and nothing lists the suppliers, so the name has to come from an earlier result; for anything less than exact use `search_query`.\n- `private_supplier.product_condition` (string, `=`) — `new` or `used`.\n- `private_supplier.is_logo_invoice_allowed` (bool, `=`) — `true`/`false`; white-label invoicing.\n- `private_supplier.store_type` (string, `=`) — `shopify`.\n- `private_supplier.map_percent` (integer, `=`/`<`/`>`) — minimum-advertised-price percentage.\n  Every `private_supplier.*` filter implicitly restricts the search to Marketplace products, whether or not `site_name` is also filtered.\n- `variations.variation_details.price` (float, `between`/`<`/`>`) — item price.\n- `variations.variation_details.min_shipping_time` (integer, `<`) — shipping time in days.\n- `variations.variation_details.warehouse` (list, `in`) — ships-from: the country the item ships out of, not the destination. Values: ALL, US, CN, AU, CA, DE, ES, FR, IT, UK, PL, RU, BE, NL, CZ, TH, BR.\n- `categories.autods_category_id.$id` (objectId, `=`) — a category id from `get_categories`. A parent id matches every product anywhere in its subtree, so filter by the broadest category that fits the intent instead of collecting leaf ids.\n- `_id` (objectId, `=`) — one product by id.\n- `rating` (float, `>`) and `rating_count` (integer, `>`) — set only on products sourced outside the Marketplace, so combining either with `site_name` = `private_suppliers` matches nothing at all rather than filtering."
                 },
                 "value": {
                   "type": "string",
-                  "description": "Operand value (always a string; numeric/bool values are cast per value_type)."
+                  "description": "Operand, always sent as a string and cast per `value_type`. `between` takes exactly two comma-separated bounds (`\"20,25\"`) — the `min-max` dash form documented on `get_winning_products` is not accepted here. `in` takes a comma-separated list (`\"US,CN\"`). The values a particular field accepts are listed with that field under `name`."
                 },
                 "value_type": {
                   "type": "string",
+                  "description": "How to read `value`: use the type of the field being filtered — `float` for prices, `integer` for counts and day windows, `objectId` for a 24-character hex id, `list` for a comma-separated `in` operand, `bool` for `true`/`false`, `string` otherwise.",
                   "enum": [
                     "string",
                     "integer",
@@ -92,6 +87,7 @@
                 },
                 "op": {
                   "type": "string",
+                  "description": "Comparison. `search` is only for `search_query`; `between` needs two comma-separated bounds; `in` takes a comma-separated list.",
                   "enum": [
                     "=",
                     "ne",
@@ -115,7 +111,8 @@
           }
         },
         "required": [
-          "order_by"
+          "order_by",
+          "filters"
         ]
       }
     },

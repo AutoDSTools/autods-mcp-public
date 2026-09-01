@@ -144,6 +144,23 @@ parameter just removes the alternative. `get_categories` (RD-108) is the same sh
 tree's contract (ids are the unique key, labels are not, a parent covers its subtree) is
 all about reading the response and feeding it to *another* tool's filter.
 
+The mirror image is `search_products` (RD-107). Its filter `name` forwards straight
+upstream as a field name, so the set of usable filters is unguessable and *nothing but*
+tier 1 will do: the whole vocabulary — the field list, the `value_type`/`op` each field
+takes, the ships-from country codes, the comma separator for `between`/`in` — lives in
+the `filters[]` item schema of its `body_schema`, which `tools.py` emits into
+`inputSchema` verbatim. It is deliberately **not** an "Agent Reference" block in
+`instructions`, and not a playbook either: a filter vocabulary is what an agent needs to
+form *this* call, which is the definition of tier 1. Only the response-side contract
+(card-shaped results, no total count, the paging ceiling) is tier 2.
+
+Two conventions that section is written against, both load-bearing. **An enum goes in
+the `description` unless the wire contract is genuinely closed** — `value_type` and `op`
+carry a JSON `enum` because the upstream accepts exactly those tokens, while sortable
+fields and filterable field names are listed in prose, because an `enum` narrower than
+the API silently rejects valid calls. And **a filter field is only documentable once it
+is confirmed against the upstream mapping**, per the phantom-filter gotcha below.
+
 The server-wide index lives in `manifests/_server.json` — a manifest with no operations,
 carrying only the tier-4 block. Everything else is per-domain, and an **empty**
 `instructions` is the normal case for a domain whose whole contract is tier 1/2
@@ -782,6 +799,50 @@ production incident; don't undo the guard without understanding why it's there.
   `product_id`/`internal_id` stay distinct params. Verify enum value sets and example
   ranges against *live* upstream data — an enum narrower than the API silently rejects
   valid calls (e.g. a percentage field mistakenly documented as a 0–1 fraction).
+- **`search_products` answers four different malformed calls badly, each in its own way —
+  two 500s, a 400 and an empty 200 — and one of them is the call our own text used to ask
+  for** (RD-107). Omitting `filters` entirely **500s** (`filters: []` is fine) — and the
+  manifest said "Omit for an unfiltered listing", so the first call an exploring agent
+  makes was the one that failed. `between` with the `min-max` dash form that
+  `get_winning_products` documents **500s** too (the range operand is unpacked from a bare
+  comma split upstream), so the two tools' range syntaxes are *not* interchangeable.
+  `order_by.name` accepts any string and then rejects a text field with a **400** — which
+  reaches the client as `upstream_client_error`, not `upstream_error`, so the two shapes
+  are diagnosed differently; sortable is `created_at`, `product_details.min_price`,
+  `product_details.min_shipping_time`, `spv_param`, `view_count`. And `condition` was
+  advertised for years while the search path never read it: every filter is ANDed, so
+  `"or"` came back **200 with zero results** for two mutually exclusive terms — no error at
+  all, which is why it is gone from the `body_schema` rather than documented.
+- **A 500 the upstream owns is still ours to keep an agent away from, and the schema is
+  the lever** (RD-107). The upstream status codes belong to another repository and another
+  team's release, so waiting for them leaves the bad shape reachable in the meantime.
+  Where a malformed body is *statically* recognisable, make the `body_schema` refuse it:
+  `filters` is `required` on `search_products`, so the omitted form is a typed
+  `invalid_arguments` naming the field, from the boot-compiled validator, before anything
+  is sent — which is strictly better for the agent than an opaque `upstream_error` it
+  cannot act on. The `maximum` on `offset` (9999) is the same lever on a 400 rather than a
+  500, and it changes what the tool can answer: an `offset` past the 10,000-result window
+  is now `invalid_arguments`, so the only ceiling behaviour still reachable through this
+  tool is the *silent short page* below. Say that in one place — a description that
+  promises an upstream refusal the schema now intercepts is worse than no description.
+  Two boundaries on this. It only works for what a schema can express: a
+  wrong-shaped *value* like the dash-form `between` operand is documented on the
+  parameter, not linted. And the guard must not be widened past the failure — a
+  `minItems: 1` on `filters` would also refuse `filters: []`, which is the documented
+  unfiltered listing and works perfectly well; `test_search_products_without_filters_is_refused_locally`
+  pins both halves for that reason.
+- **Filtering and reading are different field sets on `search_products`** (RD-107). The
+  response is card-shaped — 12 fields — while the filterable surface is the whole indexed
+  document, so `rating`, `description`, `brand`, `url` and the per-variation details can
+  be filtered on and are never returned; `get_product_by_id` is the follow-up. Two
+  consequences that look like bugs and aren't: `rating`/`rating_count` are unset on every
+  Marketplace product, so the UI's "best sellers" combination plus `site_name =
+  private_suppliers` matches nothing at all; and paging ends at 10,000 results, where the
+  boundary page comes back **silently short** rather than empty — a short page is exactly
+  how an agent infers "end of results", so it concludes the catalog is exhausted instead
+  of reporting the ceiling. `projection` is not a way out: the frontend sends it, no
+  request schema accepts it, and it is dropped at parse time — don't add it to the
+  manifest.
 - **The category tree hides two traps, and neither produces an error** (RD-108). (1) Its
   **labels repeat** — `Clothing`, `Pants`, `Shorts`, `Shoes` and `Accessories` each exist
   under `Women`, `Men`, `Girls` *and* `Boys`, and `Mirrors` under two unrelated parents —

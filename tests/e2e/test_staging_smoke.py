@@ -162,9 +162,13 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         # --- ProductsResearch reads (also discover a product id to reuse) ---
         product_id: str | None = None
 
+        # RD-107: `filters` is a required property, and the unfiltered listing is
+        # the empty *list* — a body with no `filters` key is refused by the schema
+        # gate as `invalid_arguments` (which this suite classifies as a failure,
+        # correctly: it would mean the inputSchema and the call disagree).
         search = await call(
             "search_products",
-            {"body": {"order_by": {"name": "created_at", "direction": "desc"}, "limit": 5}},
+            {"body": {"order_by": {"name": "created_at", "direction": "desc"}, "limit": 5, "filters": []}},
         )
         _record("search_products", search, failures, frozenset())
         if not search.is_error:

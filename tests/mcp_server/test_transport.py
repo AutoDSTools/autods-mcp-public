@@ -105,6 +105,85 @@ async def test_get_categories_notes_reach_the_client(
     assert "get_categories" in by_description["search_products"]
 
 
+async def test_search_products_filter_vocabulary_reaches_the_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-107: the filter vocabulary arrives in the advertised ``inputSchema``.
+
+    This is tier-1 text: it is what an agent needs to form *this* call, so it
+    lives in the ``filters[]`` item schema and nowhere else. A manifest field
+    nothing reads is invisible rather than harmless (RD-90), so this asserts
+    against the ``inputSchema`` a real session receives — ``body_schema`` is
+    emitted into it verbatim, and a change to that plumbing would strand the
+    whole vocabulary with the manifest still parsing fine.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    body = by_name["search_products"].input_schema["properties"]["body"]
+    filters = body["properties"]["filters"]
+    item = filters["items"]["properties"]
+
+    # Every filter the Marketplace UI itself ships is named, or an agent cannot
+    # reproduce even the basic Marketplace experience.
+    for field in (
+        "site_name",
+        "supplier_name",
+        "private_supplier.product_condition",
+        "private_supplier.is_logo_invoice_allowed",
+        "private_supplier.store_type",
+        "private_supplier.map_percent",
+        "search_query",
+        "variations.variation_details.price",
+        "variations.variation_details.min_shipping_time",
+        "variations.variation_details.warehouse",
+        "categories.autods_category_id.$id",
+        "_id",
+    ):
+        assert field in item["name"]["description"], field
+
+    # `private_suppliers` vs `shopify` is the silent mistake, so the distinction
+    # is stated rather than left to the field name.
+    assert "private_suppliers" in item["name"]["description"]
+    assert "NOT the same as `shopify`" in item["name"]["description"]
+    # Ships-from is a fixed enum with no lookup endpoint: the values ship here.
+    assert "ALL, US, CN, AU, CA, DE, ES, FR, IT, UK, PL, RU, BE, NL, CZ, TH, BR" in item["name"]["description"]
+    # A parent category id covers its subtree, so an agent can start broad.
+    assert "subtree" in item["name"]["description"]
+    # The range separator is a comma; the dash form documented elsewhere 500s.
+    assert '"20,25"' in item["value"]["description"]
+
+    # An unfiltered listing sends an empty list — telling a caller to omit the
+    # key documents precisely the call that fails, so the key is required and
+    # the empty list is the documented form.
+    assert "Omit" not in filters["description"]
+    assert "`filters: []`" in filters["description"]
+    assert body["required"] == ["order_by", "filters"]
+
+    # `condition` advertised an OR that the search path never applies.
+    assert "condition" not in body["properties"]
+
+    # A page bounded on both ends: ~2KB per result, and a hard 10,000 ceiling.
+    assert body["properties"]["limit"]["maximum"] == 50
+    assert body["properties"]["offset"]["maximum"] == 9999
+
+    # A text field must not look like a valid sort.
+    sort_field = body["properties"]["order_by"]["properties"]["name"]["description"]
+    assert "created_at" in sort_field
+    assert "spv_param" in sort_field
+    assert "`title`" in sort_field
+
+    # Tier 2 carries what is needed to *read* the response, not to form the call.
+    description = by_name["search_products"].description
+    assert "get_product_by_id" in description
+    assert "No total count" in description
+    assert "10,000 results" in description
+
+
 async def test_tool_call_forwards_bearer_to_upstream(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

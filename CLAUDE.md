@@ -392,6 +392,7 @@ this checklist and update whatever it touches **in the same commit**:
 | adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
 | adds a tool that has to be polled, or changes the cadence / a completion state machine | `docs/polling-conventions.md` (the numbers live there **once**), plus the `notes` and playbook `body` that state them, plus the delivery test |
 | adds a fixture the checklist needs (a store, an entitlement, a supplier id) or a step that makes an agent stop and ask mid-run | a check in section `P` of `docs/release-checks.md`, or a rule that lets the run continue with a `skipped` |
+| adds an upstream, a stateful dependency, a deployed process or an exposed API surface — or changes deployment / ownership metadata | `catalog-info.yaml`, per the trigger list in **Service Descriptor** below (most changes are *not* triggers — read the list, don't guess) |
 
 Rule of thumb: if you added an invariant a reviewer would flag if broken (a
 secret that must not leak, a fail-open path, a stateless-transport assumption),
@@ -409,6 +410,126 @@ states the rule to follow; a Gotcha explains the *failure mode* and why the guar
 exists, so the two complement each other — a load-bearing guard often deserves
 both. Write the bullet so it names the symptom, the root cause, and the
 consequence of undoing the guard.
+
+## Service Descriptor (`catalog-info.yaml`)
+
+Backstage is the org's software catalog and developer portal, at
+[backstage.autods.com](https://backstage.autods.com). It builds this service's entity —
+[`component:autods-mcp-public`](https://backstage.autods.com/catalog/default/component/autods-mcp-public):
+its owner, its links, its Kubernetes tab, and every edge to the services and
+infrastructure it reaches — from `catalog-info.yaml` at this repo root, and from nothing
+else. That file is the whole of the descriptor; discovery addresses only that path.
+Nothing breaks at runtime when it drifts. The graph just quietly starts lying.
+
+- The conventions it follows are org-wide and live in
+  [`AutoDSTools/backstage` → `CONVENTIONS.md`](https://github.com/AutoDSTools/backstage/blob/main/CONVENTIONS.md);
+  the `§` numbers in the descriptor's comments point there. Read the rule at the source
+  rather than paraphrasing it into this repo — a local copy drifts from the original and
+  doubles the work of changing it.
+- The file's header comments carry the current model and the reasoning behind each
+  boundary, **including what is deliberately absent** — no System, no API entity for the
+  MCP surface, no `kind: Resource` of our own. Read them before editing: they say *what*
+  to edit, the triggers below say *when*.
+- Update the descriptor as part of the same change that invalidates it, never left to a
+  follow-up.
+- Declare only what this repository owns. Other AutoDS services and shared infrastructure
+  — Cognito, the Redis cluster, every upstream this server forwards to — are declared
+  once, centrally, in
+  [`catalog/shared-infrastructure.yaml`](https://github.com/AutoDSTools/backstage/blob/main/catalog/shared-infrastructure.yaml)
+  and
+  [`catalog/pending-services.yaml`](https://github.com/AutoDSTools/backstage/blob/main/catalog/pending-services.yaml),
+  or in the owning repository's own descriptor. Entity names are globally unique, so a
+  second declaration produces a `conflicting entityRef` and one copy is silently ignored.
+  Third-party APIs are the one exception, namespaced per caller (§ 2).
+- The descriptor describes the service, not its deployment (§ 5). Hostnames and ports,
+  env-var and helm-values names, URL paths, replica counts, cron schedules, logical
+  database numbers, and anything that differs between staging and prod stay out of it —
+  out of the descriptions *and* out of the comments. Each of those is owned by a file that
+  changes on its own schedule, so a copy in the descriptor rots and nothing reports it.
+  That detail belongs here, in `README.md`, or in the values files that own it.
+- **Two branch facts, both counter-intuitive here.** Backstage reads `main` or `master`
+  and never a development trunk (§ 10), while this repository's default branch is
+  `develop`. So (a) `backstage.io/source-location` names `master` — do not "correct" it to
+  the default branch; and (b) a descriptor edit reaches the catalog only once a release
+  carries it to `master`, so the entity page keeps showing the old model until then. That
+  lag is not a broken descriptor.
+
+### When an update is required
+
+- **A new upstream service.** A new `base_url_key` in `settings.py`, with the manifests
+  that forward to it — a second AutoDS service this server calls. It gets a `consumesApis`
+  entry for that service's API entity and a `dependsOn` entry for its Component. A new
+  *operation* against an upstream already declared is **not** a trigger, however many you
+  add and however new the manifest file holding them is: the edge already exists, and the
+  graph models services, not tools. The boundary both ways — the upstream is the trigger,
+  the operation on it is not.
+- **A new stateful dependency.** A store, cache, broker or identity provider this server
+  opens a connection to. Resolve which kind it is before declaring anything: *shared* goes
+  in the central file under devops and is referenced from `dependsOn`; *owned outright by
+  this service* is a `kind: Resource` here. A hostname in the deploy repo's values proves
+  nothing until you resolve it and grep the other repos' `values-prod.yaml` for the same
+  address — every store this server reaches turned out to be shared, and descriptors
+  across the org got this wrong in the same direction. The boundary both ways: the Redis
+  *cluster* is a dependency; the logical database, key prefix or bucket path this server
+  holds on it is not, and never appears in the file at all (§ 3, § 5). A `pyproject.toml`
+  package is not a dependency either.
+- **A new deployed process.** A second entrypoint with its own Deployment, CronJob or helm
+  release in `AutoDSTools/autods-mcp-deploy`. The test is failure isolation: can it fail,
+  scale or roll back on its own? Then it earns a Component of its own — and a second
+  Component means the descriptor also needs the System that § 4 has so far said no to. The
+  nginx sidecar does not qualify: it is a second container in the same pod. Neither does
+  new code inside the process that already runs — a route, a middleware, a background task.
+- **A new API surface exposed.** A second protocol or server process that others call.
+  That gets a `kind: API` in `providesApis`, and it reopens the "no API entity" decision
+  recorded in the descriptor's header. Adding a tool, a playbook, a resource URI or an
+  OAuth discovery route does not: all of them are the same surface the header already
+  reasons about.
+- **A direct call to a third-party vendor** — code here that calls a vendor's own HTTP API,
+  as distinct from forwarding a caller's token to an AutoDS upstream. That gets its own
+  `kind: API` entity named `autods-mcp-public-<vendor>-api` plus a `consumesApis` entry
+  (§ 2: the prefix is per calling repository, and another repo's unprefixed vendor entity
+  is theirs, never something to reference). `autods-mcp-public-mixpanel-api` is the worked
+  example in the descriptor — copy its shape, including the stub `spec.definition`.
+  Self-hosted Sentry does *not* qualify: it is our own infrastructure, not a vendor API,
+  and the descriptor says why.
+- **Deployment or ownership metadata changes.** A changed namespace, a chart renamed in
+  `autods-mcp-deploy`, a different Sentry project, a change of owning squad → the
+  `backstage.io/*` and `sentry.io/*` annotations and `spec.owner`. Note
+  `backstage.io/kubernetes-id` is the *chart* name (`autods-mcp`), not the entity name.
+- **Not triggers, and churn is as harmful as drift** — editing the descriptor for a change
+  that does not alter the graph teaches reviewers to skim it: a new manifest operation,
+  manifest file or playbook against an upstream already declared; tool `description` /
+  `notes` / `instructions` text; a new env var or setting; a `pyproject.toml` / `uv.lock`
+  bump; replica counts, HPA bounds or resource limits; a Redis key prefix or logical
+  database change; a new test; the version bump every commit carries. The descriptor models
+  none of them.
+
+### Easy to get wrong
+
+- **Nothing in this repository validates the descriptor — not even its syntax.** ruff is
+  Python-only, pytest never opens the file, and the manifest boot lints do not know it
+  exists. So resolve every entity name in it against its source, as a step rather than a
+  caution: the catalog files in `AutoDSTools/backstage`, or the live instance through the
+  Backstage MCP server — never from memory. Report the result on the pull request (§ 9).
+  That same lookup answers § 3's owned-vs-shared question before a Resource is declared
+  twice under two names.
+- **Dangling references never fail.** Ingestion succeeds, the entity materialises, and the
+  edge draws to nothing behind a soft warning, so a typo or a name nobody declares survives
+  indefinitely. This is exactly how the descriptor went the whole life of the entity with
+  the ProductsResearch edge missing and a comment promising to add it, with nothing
+  anywhere reporting either (RD-111).
+- **A kind outside the allow-list is discarded in silence** (§ 10) — no error in the pull
+  request, in the file or on the entity page. Check the instance's `catalog.rules` before
+  introducing a kind this catalog does not already use.
+- **The entity name is not the chart name and must not be "fixed" to match.** The entity is
+  `autods-mcp-public`; the chart, the image and every workload it renders are `autods-mcp`.
+  Renaming the entity breaks every consumer's edge silently.
+- **The org code-review checklist reads `AGENTS.md` § "Service Descriptor".** This
+  repository has no `AGENTS.md` and carries that section here instead — point a reviewer at
+  this section when the checklist comes up empty, rather than concluding no rule applies.
+- A broken descriptor surfaces on Backstage's next refresh, under **Settings → Locations**.
+  Discovery runs roughly every half hour, so it is neither immediate nor precisely
+  predictable — and for this repository it only runs against `master` at all.
 
 ## Commit message format
 

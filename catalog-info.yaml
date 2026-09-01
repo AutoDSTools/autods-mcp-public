@@ -1,14 +1,78 @@
 ---
+# =============================================================================
+# autods-mcp-public — one Component, plus the one third-party API it calls.
+#
+# Conventions: AutoDSTools/backstage → CONVENTIONS.md; every `§` below points
+# there.
+#
+#     https://github.com/AutoDSTools/backstage/blob/main/CONVENTIONS.md
+#
+# NAME MAPPING (§ 2) — four names for one service, none of them typos:
+#
+#     entity           autods-mcp-public
+#     repository       AutoDSTools/autods-mcp-public
+#     helm chart       autods-mcp — lives in AutoDSTools/autods-mcp-deploy, and
+#                      is the value that chart stamps as `kubernetes-id` below
+#     Sentry project   autods-mcp-public
+#
+# THE DEPLOYMENT IS IN A SECOND REPOSITORY, AND THIS FILE STAYS HERE. § 1: an
+# entity lives with the code it describes, and the code this entity describes is
+# the server. AutoDSTools/autods-mcp-deploy holds the chart, the pipeline and the
+# nginx image — a deployment mechanism, not a second code generation, so § 6's
+# "One Component, two repositories" is the wrong shape for it. What does carry
+# over from § 6 is the consequence: the `backstage.io/kubernetes-*` values below
+# are resolved against a chart that nobody editing this repository sees, so a
+# rename or a relabel there empties the Kubernetes tab with nothing here
+# changing and nothing reporting it. That repository is in `metadata.links`.
+#
+# NO SYSTEM (§ 4). One deployable process, and no store this service owns — both
+# Resources under `dependsOn` are platform infrastructure owned by devops. A
+# System wrapping exactly one Component is less clear than the Component.
+#
+# NO API ENTITY FOR THE MCP SURFACE — decided against § 11 rather than inherited
+# from the descriptor's first draft. § 11's first question, do I own the entry
+# point, is yes: the MCP transport is the only way in and this repository defines
+# it. It still earns no `kind: API`, because the edge such an entity exists to
+# draw cannot be drawn — the callers are MCP client applications running on end
+# users' own machines, so `consumesApis` pointing back here would stay empty for
+# the life of the node, and a surface with no reachable consumer is exactly what
+# § 11 says to declare nothing for. (MCP not being one of Backstage's usual API
+# types is the weaker half of the argument and is not what decides it.) Revisit
+# the day a catalogued consumer appears — an AutoDS service or frontend calling
+# this server — and declare the API entity then. The protocol surface itself is
+# documented in this repository's README.
+# =============================================================================
 apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: autods-mcp-public
-  description: Public MCP server exposing curated AutoDSApi / ProductsResearch operations to MCP clients (Claude, Cursor) over Streamable HTTP, acting as an OAuth resource server in front of Cognito
+  description: >-
+    Public MCP server. Exposes a curated, hand-maintained set of AutoDS platform
+    and product-research operations to MCP client applications (Claude, Cursor)
+    over a Streamable HTTP transport, as an OAuth resource server in front of the
+    platform identity provider. It holds no credentials of its own: every
+    upstream call carries the caller's own token, so a caller reaches exactly
+    what they could reach directly.
   annotations:
     github.com/project-slug: AutoDSTools/autods-mcp-public
-    backstage.io/kubernetes-id: autods-mcp
+    # `master`, not the default branch: this repository's trunk is `develop`,
+    # which discovery never reads (§ 10). Do not "correct" it to the default
+    # branch — and note the lag it implies, that an edit here reaches the catalog
+    # only once a release carries it over.
+    backstage.io/source-location: url:https://github.com/AutoDSTools/autods-mcp-public/tree/master/
+    sentry.io/project-slug: autods-mcp-public
     backstage.io/kubernetes-namespace: prod
-    backstage.io/source-location: url:https://github.com/AutoDSTools/autods-mcp-public/tree/main/
+    backstage.io/kubernetes-id: autods-mcp
+  links:
+    - url: https://github.com/AutoDSTools/autods-mcp-public
+      title: Source (GitHub)
+      icon: github
+    - url: https://github.com/AutoDSTools/autods-mcp-deploy
+      title: Helm chart, pipeline and nginx image (GitHub)
+      icon: github
+    - url: https://sentry.autods.com/organizations/autods/projects/autods-mcp-public/
+      title: Sentry (autods-mcp-public)
+      icon: dashboard
   tags:
     - python
     - mcp
@@ -19,26 +83,71 @@ spec:
   lifecycle: production
   owner: squad-cto-office
 
-  # Components/resources this service depends on at runtime.
-  #   - autods-api — the upstream REST service this server proxies (declared by
-  #     AutoDSTools/AutoDSApi's catalog-info.yaml).
-  # Not yet declared in the catalog, add when their entities exist:
-  #   - the ProductsResearch service (second upstream),
-  #   - the Cognito user pool and Redis (resource: entities) — both hard runtime
-  #     dependencies (auth + rate limiter; the server refuses to boot without them
-  #     in staging/prod).
-  dependsOn:
-    - component:autods-api
-
-  # APIs that this service EXPOSES to others.
-  # The MCP transport at /mcp is not a standard Backstage API type
-  # (openapi/asyncapi/graphql/grpc), so it is documented in the README rather
-  # than declared as an API entity here.
-
-  # APIs that this service CONSUMES from other components.
-  # The server forwards each caller's bearer token upstream to:
-  #   - autods-platform-rest — declared by AutoDSTools/AutoDSApi's catalog-info.yaml
-  #   - the ProductsResearch read API — not yet in the catalog; add it here once
-  #     ProductsResearch is onboarded with its own catalog-info.yaml.
+  # APIs this service CONSUMES. The internal ones are declared by the
+  # repositories that own them; the vendor entity is declared at the bottom of
+  # THIS file, prefixed with the calling component (§ 2) — autods-api and
+  # products-research-api each declare their own Mixpanel entity, describing
+  # their integrations rather than serving as a registry to point at.
   consumesApis:
+    # --- internal AutoDS services, reached with the caller's own token ---
     - autods-platform-rest
+    - products-research-rest
+    # --- external ---
+    - autods-mcp-public-mixpanel-api
+
+  dependsOn:
+    # The two upstreams every forwarded tool call reaches.
+    - component:default/autods-api
+    - component:default/products-research-api
+    # Shared platform infrastructure, declared once in AutoDSTools/backstage
+    # (catalog/shared-infrastructure.yaml) and owned by devops. No Resource of
+    # this service's own was declared for either, and the absence is the
+    # judgement: it validates tokens against the same identity provider the rest
+    # of the platform does, and it holds a logical database on a Redis cluster
+    # several other services are also on — a keyspace inside someone else's
+    # Resource, not a Resource of ours (§ 3).
+    - resource:default/aws-cognito
+    - resource:default/redis-platform
+
+# =============================================================================
+# THIRD-PARTY APIs CONSUMED BY THIS SERVICE
+#
+# One entity per vendor per caller, named `autods-mcp-public-<vendor>-api` (§ 2),
+# declared here rather than centrally because the entity belongs beside the
+# integration code (§ 1).
+#
+# Self-hosted Sentry is deliberately NOT one of these: it is our own
+# infrastructure rather than a vendor product we integrate with, and the
+# annotation and link on the Component above are the whole of what the catalog
+# says about it.
+#
+# `spec.definition` is a stub on purpose — Backstage needs no real spec for a
+# third-party API, and a vendor spec fetched on every refresh would go stale or
+# break silently. The vendor's documentation is in `metadata.links`. Owner is the
+# squad that maintains the integration, never the vendor (§ 8).
+# =============================================================================
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: autods-mcp-public-mixpanel-api
+  description: >-
+    Mixpanel ingestion, through the vendor's Python SDK. Product analytics for
+    this server's own usage: one event per tool call, attributed to the calling
+    AutoDS user. Fire-and-forget — an event is dropped rather than allowed to
+    delay or fail a call, and nothing here reads back from Mixpanel.
+  links:
+    - title: HTTP API reference
+      url: https://developer.mixpanel.com/reference/ingestion-api
+  tags: [external, analytics, mixpanel]
+spec:
+  type: openapi
+  lifecycle: production
+  owner: squad-cto-office
+  definition: |
+    openapi: 3.0.0
+    info:
+      title: Mixpanel Ingestion API
+      version: external
+      description: External API by Mixpanel. See metadata.links for the real spec.
+    paths: {}

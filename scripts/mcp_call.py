@@ -8,6 +8,7 @@ cached locally so you only authorize in the browser once.
 
 Usage:
     uv run python scripts/mcp_call.py list                  # list tool names
+    uv run python scripts/mcp_call.py descriptors           # dump the FULL handshake payload as JSON (C3/C4/C5)
     uv run python scripts/mcp_call.py instructions          # print the server instructions from the handshake
     uv run python scripts/mcp_call.py resources             # list the resource URIs the server advertises
     uv run python scripts/mcp_call.py token                 # print an access token (for reuse: export T=$(...))
@@ -160,6 +161,25 @@ async def run_call(url: str, token: str, operation: str, arguments: dict) -> int
                 tools = await client.list_tools()
                 for tool in tools.tools:
                     print(tool.name)
+                return 0
+            if operation in ("descriptors", "tools/list-full"):
+                # ``list`` prints names only, which is not enough to grade
+                # release-check C3/C4/C5 (descriptions, inputSchema, annotation
+                # hints) or to diff the payload against what this checkout
+                # builds — so this dumps the whole thing, including the
+                # ``serverInfo`` version stamp that pins the deployed build.
+                # ``by_alias``: 2.x model fields are snake_case with camelCase
+                # aliases, so a bare model_dump would print ``input_schema``
+                # rather than the wire shape a client actually received.
+                listed = await client.list_tools()
+                payload = {
+                    "server_info": (
+                        client.server_info.model_dump(by_alias=True, mode="json") if client.server_info else None
+                    ),
+                    "instructions": client.instructions,
+                    "tools": [tool.model_dump(by_alias=True, mode="json") for tool in listed.tools],
+                }
+                print(json.dumps(payload, indent=2, default=str))
                 return 0
             if operation == "instructions":
                 # The server ``instructions`` as they arrived in this client's

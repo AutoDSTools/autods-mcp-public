@@ -16,12 +16,18 @@ Python **3.12 only** (`>=3.12,<3.13`). Dependencies are managed with **`uv`** �
 bare `pip`/`venv`/`python` — and not `uvx` either (see the mcp gotcha).
 
 ```bash
-make install   # uv sync (installs dev + test groups)
-make run       # uv run uvicorn --factory autods_mcp_server.app:create_app --reload
-make test      # uv run pytest
-make lint      # ruff check . && ruff format --check .
-make fmt       # ruff format . && ruff check --fix .
+make install           # uv sync (installs dev + test groups)
+make run               # uv run uvicorn --factory autods_mcp_server.app:create_app --reload
+make test              # uv run pytest
+make lint              # ruff check . && ruff format --check .
+make fmt               # ruff format . && ruff check --fix .
+make release-checks    # docs/release-checks.md section S against a deployed host (no credentials)
+make release-checks-c  # section C: the handshake payload, diffed against this checkout's manifests
 ```
+
+`release-checks-c` needs a token (`MCP_TOKEN`, or the `E2E_COGNITO_*` password
+grant) and must be run **from the released commit** — the diff has two sides, so
+from any other commit it reports the checkout's own manifests as drift.
 
 Run a single test:
 
@@ -403,7 +409,7 @@ this checklist and update whatever it touches **in the same commit**:
 | adds a new env var (new `validation_alias` in `settings.py`) | the **Configuration** table *and* narrative in `README.md`, and `.env.example` |
 | adds or changes a user-facing feature (analytics, Sentry, a new transport behavior, …) | the relevant `README.md` section (narrative) *and* a **Conventions** bullet here if it carries an invariant a future editor must not break |
 | adds/changes a manifest tool, `base_url_key`, or a boot-time lint (D5) | the **Tools are data** section here *and* the **Manifests** section in `README.md` |
-| adds or removes a manifest **operation** | all four hand-maintained tool inventories — `tests/mcp_server/test_loader.py`, `tests/mcp_server/test_transport.py`, `tests/e2e/test_staging_smoke.py` (opt-in, so nothing fails if you skip it), and the tool count + list in **C3** of `docs/release-checks.md` (which nothing executes at all) — see the `operations_count` gotcha |
+| adds or removes a manifest **operation** | all three hand-maintained tool inventories — `tests/mcp_server/test_loader.py`, `tests/mcp_server/test_transport.py`, and `tests/e2e/test_staging_smoke.py` (opt-in, so nothing fails if you skip it) — see the `operations_count` gotcha. **C3** of `docs/release-checks.md` needs no edit: `tests/e2e/test_release_checks_c.py` derives that set from the manifests |
 | changes a command, workflow, or convention (lint/test/run, commit format, Python rules) | the corresponding section here |
 | fixes a bug or incident whose root cause was non-obvious, or adds a guard/workaround that looks removable but isn't | a **Gotchas & hard-won lessons** bullet here (and a **Troubleshooting** entry in `README.md` if an operator/client would hit the symptom) |
 | adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
@@ -777,22 +783,25 @@ production incident; don't undo the guard without understanding why it's there.
   guard in `loader.py` is what keeps that lint meaningful — it looks removable and isn't.
 - **`operations_count` in a manifest is cosmetic** — the model uses `extra="ignore"` and
   drops it; it's never validated and silently drifts. The real count guarantee is the
-  hand-maintained tool inventories, and there are **four** of them —
-  adding or removing an operation means editing all four in the same commit:
+  hand-maintained tool inventories, and there are **three** of them —
+  adding or removing an operation means editing all three in the same commit:
   `tests/mcp_server/test_loader.py` (operation count), `tests/mcp_server/test_transport.py`
-  (advertised-tool count), `tests/e2e/test_staging_smoke.py` (`AUTODS_OPS` /
+  (advertised-tool count), and `tests/e2e/test_staging_smoke.py` (`AUTODS_OPS` /
   `PRODUCTS_RESEARCH_OPS` / `LOCAL_OPS`, which `test_tools_list_exposes_all_registered_ops`
-  asserts `tools/list` equals **exactly**), and the tool count + list in **C3** of
-  `docs/release-checks.md`. Only the first two run in CI. The e2e file is
+  asserts `tools/list` equals **exactly**). Only the first two run in CI. The e2e file is
   opt-in (`RUN_STAGING_E2E=1`), so forgetting it fails nothing locally and the staleness
   only surfaces the next time someone runs the staging smoke — which is how it silently
   missed both `get_current_user` (RD-68) and `get_playbook` (RD-100) and sat broken until
-  RD-89. C3 is the worst of the four, because **nothing executes it** — a stale count
-  surfaces only when a human or an agent runs the checklist and then has to work out
-  which side is wrong. RD-89 updated all three test inventories and still left C3 reading
-  "exactly the **12** tools" against a 13-tool handshake, which is exactly how a run gets
-  told the release is broken when it isn't. Grep for the previous tool count before
-  assuming you've found every site.
+  RD-89. Grep for the previous tool count before assuming you've found every site.
+  There used to be a **fourth**, and it was the worst: the tool count + list written out
+  in **C3** of `docs/release-checks.md`, which nothing executed at all, so a stale count
+  surfaced only when a human or an agent ran the checklist and then had to work out which
+  side was wrong. RD-89 updated all three test inventories and still left C3 reading
+  "exactly the **12** tools" against a 13-tool handshake — which is how a run gets told a
+  healthy release is broken. `tests/e2e/test_release_checks_c.py` now *derives* that set
+  from the manifests and diffs it against the live handshake, so C3 has no list to keep in
+  step and this class of staleness cannot come back. Don't reintroduce a literal count
+  there.
 - **New read tools must mirror `products_research.json` conventions**, which are
   load-bearing, not stylistic: enum-valued query params list allowed values in the
   `description` (not a JSON `enum`), `"min-max"` range filters are typed `str`, and

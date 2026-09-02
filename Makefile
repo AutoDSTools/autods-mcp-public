@@ -1,4 +1,4 @@
-.PHONY: install run test release-checks lint fmt
+.PHONY: install run test release-checks release-checks-c lint fmt
 
 install:
 	uv sync
@@ -14,6 +14,14 @@ test:
 # no credentials needed — section S is the unauthenticated surface.
 release-checks:
 	RUN_RELEASE_CHECKS=1 uv run pytest tests/e2e/test_release_checks_s.py -v -rs
+
+# docs/release-checks.md section C — the authenticated handshake payload, diffed
+# against what this checkout's manifests build. Needs a token (MCP_TOKEN, or the
+# E2E_COGNITO_* password grant) but no fixtures. Read-only and safe anywhere.
+# Run it from the *released* commit: from a different one the diff reports the
+# checkout's own manifests as drift.
+release-checks-c:
+	RUN_RELEASE_CHECKS=1 uv run pytest tests/e2e/test_release_checks_c.py -v -rs
 
 lint:
 	uv run ruff check .

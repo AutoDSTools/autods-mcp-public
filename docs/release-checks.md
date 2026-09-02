@@ -31,7 +31,7 @@ Claude drives everything else to a report without asking again.
 |---|---|---|
 | **C1** — fresh browser authorization | ✅ only they can | ❌ never |
 | **W** — go-ahead + *which* store | ✅ describes it | ❌ never chooses one |
-| Everything else — S, P, C2–C5, R, W execution, O, the report | | ✅ |
+| Everything else — S, P, C2–C9, R, W execution, O, the report | | ✅ |
 
 Only those two need a person. Observability (O) is automatable given the
 connectors and AWS credentials listed in that section — check they're present,
@@ -104,7 +104,7 @@ environment a call lands in. Before the first tool call:
 | 1 | **S** — unauthenticated surface | `make release-checks` (shell) | nothing; S needs no connection |
 | 2 | **C1** — authorization | human, at a browser | everything below |
 | 3 | **P** — account readiness | Claude, MCP | which of R/W can run at all |
-| 4 | **C2–C5** — handshake payload | Claude, MCP | nothing |
+| 4 | **C3–C9** — handshake payload | `make release-checks-c` (shell) | nothing |
 | 5 | **R** — reads | Claude, MCP | W |
 | 6 | **W** — writes | Claude, MCP, gated | nothing |
 | 7 | **O** — observability | mixed | nothing |
@@ -200,6 +200,31 @@ can drive it.
 
 ## C — Client connection and authorization
 
+> **C3–C9 are automated.** `tests/e2e/test_release_checks_c.py` opens a real
+> authenticated handshake against the deployed host and **diffs the whole payload**
+> — tool set, descriptions, `inputSchema`, annotations, instructions, resources —
+> against what the checkout's manifests build:
+>
+> ```bash
+> MCP_TOKEN=$(uv run python scripts/mcp_call.py token) make release-checks-c
+> ```
+>
+> `MCP_TOKEN` needs no new secrets; without it the suite falls back to the
+> `E2E_COGNITO_*` password grant. Read-only and safe against production
+> (`MCP_RELEASE_BASE_URL=https://mcp.autods.com`).
+>
+> **Run it from the released commit.** The diff has two sides, so from any other
+> commit it reports the checkout's own unreleased manifests as drift — which is
+> why the `serverInfo` version check runs first and says so.
+>
+> Nothing in that suite is a hand-maintained expectation: the tool set, every
+> description and every annotation hint are *derived* from the manifests, so a new
+> tool needs no edit here. The prose below stays as the definition of what each
+> check means, and as the manual fallback when no token is available.
+>
+> **C1 and C2 are not automated and cannot be** — a browser sign-in needs a human,
+> and no test can hold one.
+
 **C1 — Fresh authorization (human, at a browser). The hand-off point.** This is the
 one step Claude must never execute: the recipe below removes and re-adds the very
 server Claude is calling through, which would sever its own tools mid-run. It is
@@ -240,7 +265,11 @@ exceed the client's ~10s connect timeout. Note it as upstream latency, not an au
 failure — but if it reproduces on **every** connect, it is a regression.
 
 **C3 — Handshake payload.** In the connected session, list the tools.
-Expected: exactly the **14** tools below, and the server instructions arrive with them.
+Expected: exactly the tools the manifests register — `make release-checks-c` derives
+that set and asserts it, so there is deliberately **no count written down here**; a
+literal one is the staleness that had C3 reading "12" against a 13-tool handshake
+after RD-89. The list below is orientation, not the assertion. The server
+instructions must arrive with them.
 
 Verify the instructions with the script, not with the client's UI:
 
@@ -293,11 +322,25 @@ Check the instructions text starts with `## AutoDS MCP — start here` and match
 never reaches a client is the exact failure RD-90 was about — verify it *arrived*,
 don't assume.
 
-**C4 — Descriptions match the released manifests.** Spot-check two or three tool
-descriptions in the client against `manifests/*.json` at the released commit. They
-are baked into the image, so a drift here means the pod is running an older build
-than the release claims (e.g. a cached image tag) — this and C3 are what actually
-pin the build under test.
+**C4 — Descriptions match the released manifests.** `make release-checks-c` compares
+**every** tool's `description`, `inputSchema` and `annotations` against what the
+manifests build, so this is no longer a spot-check; by hand, compare two or three in
+the client against `manifests/*.json` at the released commit. They are baked into the
+image, so a drift here means the pod is running an older build than the release claims
+(e.g. a cached image tag).
+
+The cheapest build pin, though, is neither this nor a Sentry event: mcp 2.x stamps
+**`serverInfo`** on every result's `_meta`, and it rides the same single-sourced
+`__version__` as the Sentry release tag. So one call answers "which build am I
+testing":
+
+```bash
+MCP_URL=https://mcp-staging.autods.com/mcp uv run python scripts/mcp_call.py descriptors \
+  | head -8      # {"server_info": {"name": "autods-mcp-server", "version": "…"}}
+```
+
+Any tool error envelope carries it too. Read it *before* grading anything else — a
+version behind the release explains every other difference at once.
 
 **C5 — Annotations.** Every read tool advertises `readOnlyHint: true`;
 `publish_drafts_to_marketplace` advertises `destructiveHint: true`. Clients gate
@@ -813,9 +856,23 @@ uv run python scripts/fetch_logs.py --env staging --since 30m --request-id <id>,
 
 Assert three things: **one** `tool_call` line per call the run made (join on the
 `x-request-id` values collected during the run), each carrying the documented
-fields, and **no request or response bodies anywhere** in the output. The footer
-prints a per-event tally (`scanned events: request=9, tool_call=7`), so the
-one-line-per-call count is read off it rather than counted by hand. The header and
+fields, and **no request or response bodies anywhere** in the output.
+
+`--assert-audit-shape` grades all three and exits **3** on a violation, so none of
+it is read off the table by eye — which is how a false pass happens, since "no
+bodies" is not something anyone verifies by scanning 90 lines:
+
+```bash
+uv run python scripts/fetch_logs.py --env staging \
+  --since 2026-09-02T06:08 --until 2026-09-02T06:40 \
+  --assert-audit-shape --expect-tool-calls 29    # the call count the run made
+```
+
+It reports a duplicated audit line separately from a missing one (they are
+different bugs, and a bare count hides both). A shortfall is usually the archive
+lag, not a lost line — retry before treating it as a finding. The footer still
+prints a per-event tally (`scanned events: request=9, tool_call=7`) for reading by
+hand when you have no expected count. The header and
 footer go to **stderr** and the entries to stdout, so redirect them apart
 (`>out.txt 2>meta.txt`) — merging with `2>&1` splices the footer onto the middle of
 a data line, where `tail` will not find it and it looks like no footer printed.
@@ -902,7 +959,9 @@ O went unchecked — analytics dying silently is precisely the failure O2 exists
 This file is meant to grow. Extend it in the **same commit** as the change:
 
 - **New tool** → a numbered check in `R` (or `W` if it writes) with concrete arguments
-  and the expected response shape, and bump the tool count and list in C3.
+  and the expected response shape. **Not** a C3 edit: that set is derived from the
+  manifests by `tests/e2e/test_release_checks_c.py`. Do add it to the three
+  hand-maintained test inventories (see the `operations_count` gotcha in `CLAUDE.md`).
 - **New behaviour a user can see** (a new envelope field, a new error type, a new
   client recipe) → the section it belongs to.
 - **Bug fixed in a released build** → a check that would have caught it, written as
@@ -938,9 +997,12 @@ If not, it does not belong here:
   id. If a run needs one, add a *resolution rule* to `P` — that is what P5 and P6
   are — so the checklist stays runnable by anyone.
 - **Anything a test already proves.** Provable in-process with mocks → `tests/`.
-  Provable against a deployed host with no credentials or fixtures → extend
-  `tests/e2e/test_release_checks_s.py`, which is why section S is automated. Prose
-  here is the last resort, not the first.
+  Provable against a deployed host with no credentials → extend
+  `tests/e2e/test_release_checks_s.py` (section S). Provable with a token but **no
+  fixtures** — no store, product or entitlement — → extend
+  `tests/e2e/test_release_checks_c.py` (section C). Prose here is the last resort,
+  not the first, and the fixture requirement is the line between the two: a check
+  that needs a seeded store cannot be a test, which is why R and W are still prose.
 - **A check that just failed.** See *Rules for the run*: the arguments in this file
   **are** the contract under test. Relaxing them after a failure destroys the thing
   being measured.

@@ -11,6 +11,14 @@ point at:
   (``https://mcp-staging.autods.com`` by default) and asserts nothing about
   the local code except its version. It is section *S* of
   ``docs/release-checks.md``, automated.
+* ``test_release_checks_c.py`` is section *C* of the same checklist: it opens a
+  real authenticated handshake against that deployed server and diffs the
+  payload — tool set, descriptions, ``inputSchema``, annotations, instructions,
+  resources — against what this checkout's manifests build. It needs a token
+  but **no fixtures** (no store, no product, no entitlement), which is what
+  keeps it a test rather than prose. Unlike section S it *is* coupled to the
+  local code: run it from the released commit, or the diff reports the
+  checkout's own unreleased changes as drift.
 
 The first group requires live staging credentials, the second only network
 access. Both are **opt-in**: the in-process suite is skipped unless
@@ -56,23 +64,51 @@ credentials among them; section S is the *unauthenticated* surface:
 * ``E2E_EXPECTED_COGNITO_DOMAIN`` / ``E2E_REGISTERED_REDIRECT_URI`` — override
   the per-environment expectations in ``KNOWN_ENVIRONMENTS`` below (needed
   only when probing a host that table doesn't know).
+
+Section C additionally needs a bearer token for that deployed host, and takes
+whichever is available:
+
+* ``MCP_TOKEN`` — preferred, and what ``scripts/mcp_call.py token`` prints. No
+  new secrets, so a section-C run works wherever a ``.env`` already does.
+* otherwise the ``E2E_COGNITO_*`` password grant above, so CI can run it
+  non-interactively.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import os
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
+from autods_mcp_server import __version__
 from autods_mcp_server import settings as settings_module
-from autods_mcp_server.mcp_transport import McpRuntime, build_runtime, mount_mcp
+from autods_mcp_server.manifests.instructions import assert_instructions_within_limit, build_instructions
+from autods_mcp_server.manifests.loader import ManifestRegistry, load_manifests
+from autods_mcp_server.manifests.playbooks import (
+    assert_playbooks_valid,
+    build_playbook_index,
+    build_playbook_registry,
+)
+from autods_mcp_server.mcp_transport import (
+    _PLAYBOOK_MIME_TYPE,
+    _PLAYBOOK_RESOURCE_SCHEME,
+    McpRuntime,
+    build_runtime,
+    mount_mcp,
+)
 from autods_mcp_server.settings import Settings
+from autods_mcp_server.tools import build_tools
 
 # Env vars that must all be present (in addition to RUN_STAGING_E2E=1) for the
 # suite to run; any missing one skips the whole module.
@@ -341,3 +377,122 @@ def probe(release_target: ReleaseTarget) -> Iterator[httpx.Client]:
         headers={"user-agent": "autods-mcp-release-checks"},
     ) as client:
         yield client
+
+
+# --------------------------------------------------------------------------
+# Deployed handshake vs this checkout (docs/release-checks.md section C)
+# --------------------------------------------------------------------------
+
+# ``tests/e2e/conftest.py`` -> ``tests/e2e`` -> ``tests`` -> repo root.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANIFEST_DIR = REPO_ROOT / "manifests"
+
+
+@dataclass(frozen=True)
+class Handshake:
+    """What a real client actually received from the deployed server.
+
+    ``resources`` is ``None`` when ``resources/list`` failed, with the reason in
+    ``resources_error`` — the server dropping the ``resources`` capability is a
+    C8 finding, and capturing it here keeps that failure from taking C3/C4 down
+    with it.
+    """
+
+    server_version: str
+    instructions: str
+    tools: dict[str, dict]
+    resources: list[dict] | None
+    resources_error: str | None
+
+
+@dataclass(frozen=True)
+class LocalBuild:
+    """What this checkout's manifests say a client *should* receive.
+
+    Built the same way ``build_runtime`` builds it (same loaders, same lints,
+    same ``build_tools`` call), so a difference against :class:`Handshake` is
+    a difference in the deployed build — not in how the two were assembled.
+    """
+
+    server_version: str
+    instructions: str
+    tools: dict[str, dict]
+    resources: list[dict]
+
+
+@pytest.fixture(scope="module")
+def release_access_token(request: pytest.FixtureRequest) -> str:
+    """A bearer token for the deployed server, from whichever source exists.
+
+    ``MCP_TOKEN`` first — that is what ``scripts/mcp_call.py token`` prints, so
+    an operator already holding a cached OAuth token needs no new secrets. Only
+    when it is unset does this fall back to the ``access_token`` password grant,
+    which skips the module if the ``E2E_COGNITO_*`` vars are absent.
+
+    A 401 out of the handshake almost always means a **stale** ``MCP_TOKEN``,
+    not a broken release — refresh it before reading anything into the failure.
+    """
+    token = os.environ.get("MCP_TOKEN")
+    if token:
+        return token
+    return request.getfixturevalue("access_token")
+
+
+@pytest.fixture(scope="module")
+def deployed_handshake(release_target: ReleaseTarget, release_access_token: str) -> Handshake:
+    """Connect to the deployed server once and capture the whole handshake.
+
+    Synchronous on purpose: it drives its own loop with ``asyncio.run`` so the
+    fixture can be module-scoped without pinning an event-loop scope for the
+    package (``asyncio_default_fixture_loop_scope`` is unset by design).
+    """
+
+    async def _fetch() -> Handshake:
+        headers = {"Authorization": f"Bearer {release_access_token}"}
+        async with httpx2.AsyncClient(headers=headers, timeout=60) as http_client:
+            async with Client(streamable_http_client(release_target.mcp_url, http_client=http_client)) as client:
+                listed = await client.list_tools()
+                resources: list[dict] | None = None
+                resources_error: str | None = None
+                try:
+                    listed_resources = await client.list_resources()
+                    resources = [r.model_dump(by_alias=True, mode="json") for r in listed_resources.resources]
+                except Exception as exc:  # noqa: BLE001 - the reason is the finding
+                    resources_error = f"{type(exc).__name__}: {exc}"
+                return Handshake(
+                    server_version=(client.server_info.version if client.server_info else ""),
+                    instructions=client.instructions or "",
+                    tools={t.name: t.model_dump(by_alias=True, mode="json") for t in listed.tools},
+                    resources=resources,
+                    resources_error=resources_error,
+                )
+
+    return asyncio.run(_fetch())
+
+
+@pytest.fixture(scope="module")
+def local_build() -> LocalBuild:
+    """Rebuild the handshake payload from ``manifests/`` at the current checkout."""
+    manifests = load_manifests(MANIFEST_DIR)
+    registry = ManifestRegistry(manifests)
+    playbooks = build_playbook_registry(MANIFEST_DIR)
+    assert_playbooks_valid(playbooks, registry)
+    instructions = build_instructions(manifests, playbook_index=build_playbook_index(playbooks))
+    assert_instructions_within_limit(instructions)
+    tools = build_tools(registry.list_operations(), playbooks)
+    resources = [
+        {
+            "uri": f"{_PLAYBOOK_RESOURCE_SCHEME}{playbook.name}",
+            "name": playbook.name,
+            "title": playbook.title,
+            "description": playbook.when_to_use,
+            "mimeType": _PLAYBOOK_MIME_TYPE,
+        }
+        for playbook in playbooks.list_playbooks()
+    ]
+    return LocalBuild(
+        server_version=__version__,
+        instructions=instructions,
+        tools={t.name: t.model_dump(by_alias=True, mode="json") for t in tools},
+        resources=resources,
+    )

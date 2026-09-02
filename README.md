@@ -332,8 +332,16 @@ system prompt (Claude Code shows it under an "MCP Server Instructions"
 heading). To see exactly what a live server advertises:
 
 ```bash
-uv run python scripts/mcp_call.py instructions
+uv run python scripts/mcp_call.py instructions   # just the tier-4 block
+uv run python scripts/mcp_call.py descriptors    # the whole handshake, as JSON
 ```
+
+`descriptors` dumps what `list` omits — every tool's `description`,
+`inputSchema` and annotation hints, plus the `serverInfo` version stamp that
+pins which build answered. That is the payload release-check section C grades,
+and the reason to read it from the wire rather than from the client's own UI: a
+client that loads tools lazily can render nothing for a server whose handshake
+carried the text perfectly.
 
 Because that text rides in the system prompt on every model turn and sits in
 the client's cached prefix, it is kept to an **index**: where to start, and the
@@ -736,9 +744,7 @@ been shipping for months.
 automated suites can't see: the OAuth sign-in a real client drives, the manifest
 text reaching a client, analytics still firing. Run it against staging (and the
 read-only sections against production) after every release, and extend it in the
-same commit as any new tool, user-visible behaviour, or shipped bug fix. A new
-tool means one more edit that is easy to miss: the tool count and list in its
-**C3** check, which nothing lints and nothing executes.
+same commit as any new tool, user-visible behaviour, or shipped bug fix.
 
 It is written to be **driven by an agent**: ask Claude to run the release checks
 and it asks one round of questions, hands you the browser sign-in (the only step
@@ -785,4 +791,33 @@ RUN_RELEASE_CHECKS=1 MCP_RELEASE_BASE_URL=https://mcp.autods.com \
 Every check is read-only and safe anywhere, and none needs credentials — section
 S is the unauthenticated surface. Per-environment expectations (Cognito Hosted UI
 domain, a registered redirect URI) live in `KNOWN_ENVIRONMENTS` in
-`tests/e2e/conftest.py`. Sections C, R, W and O remain manual/agent-driven.
+`tests/e2e/conftest.py`.
+
+Its section **C** (the handshake payload) is automated as
+`tests/e2e/test_release_checks_c.py`. It opens a real authenticated handshake
+against the deployed host and diffs the whole payload — tool set, descriptions,
+`inputSchema`, annotations, instructions, resources — against what the checkout's
+manifests build, so nothing in it is a hand-maintained expectation:
+
+```bash
+MCP_TOKEN=$(uv run python scripts/mcp_call.py token) make release-checks-c
+```
+
+It needs a token but no *fixtures* (no store, product or entitlement), which is
+what keeps it a test. `MCP_TOKEN` is preferred and needs no new secrets; without
+it the suite falls back to the `E2E_COGNITO_*` password grant so CI can run it.
+Because the diff has two sides, **run it from the released commit** — from
+another one it reports your own unreleased manifests as drift, which is why the
+`serverInfo` version check runs first and says exactly that. Sections P, R, W and
+O remain agent-driven.
+
+For the audit trail, `fetch_logs.py --assert-audit-shape` grades O3's contract
+instead of leaving it to be read off the table — one `tool_call` line per
+`request_id`, every documented field present, and no bodies or bearer tokens
+anywhere — and exits 3 on a violation:
+
+```bash
+uv run python scripts/fetch_logs.py --env staging \
+  --since 2026-09-02T06:08 --until 2026-09-02T06:40 \
+  --assert-audit-shape --expect-tool-calls 29
+```

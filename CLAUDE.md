@@ -29,6 +29,16 @@ make release-checks-c  # section C: the handshake payload, diffed against this c
 grant) and must be run **from the released commit** — the diff has two sides, so
 from any other commit it reports the checkout's own manifests as drift.
 
+Getting that token, per environment — `scripts/mcp_token.py` reads the one the
+Claude client already cached, which is the **only** way to get a production
+token (see the sign-in-target gotcha below):
+
+```bash
+MCP_TOKEN=$(uv run python scripts/mcp_token.py autods-public-prod) \
+  MCP_RELEASE_BASE_URL=https://mcp.autods.com make release-checks-c
+uv run python scripts/mcp_token.py autods-public-prod --info   # target + expiry, no token printed
+```
+
 Run a single test:
 
 ```bash
@@ -899,6 +909,28 @@ production incident; don't undo the guard without understanding why it's there.
   `request`/`tool_call` logs**, so `configure_logging` raises them to WARNING — guarded so
   `LOG_LEVEL=debug` still gets the firehose. Don't undo it; emit the audit line, not the
   library's.
+- **`scripts/mcp_call.py` signs in against `.env`, not against `MCP_URL` — and the
+  silent version of that mistake reached production more than once.** The endpoint
+  is on the command line; the credential is not. `MCP_URL` picks the server, while
+  the OAuth flow is built from `Settings`, so a sign-in from this checkout always
+  authorizes against whatever `COGNITO_DOMAIN` names (staging, normally) whatever
+  the target is. Three things made it bite rather than merely confuse, all now
+  fixed and all worth not undoing: (a) `main()` acquired the token *before* looking
+  at argv, so `--help` or any typo opened a browser sign-in — and, with a token to
+  hand, sent the typo upstream as an `operation_id`, which is what filled Sentry
+  with `UnknownOperationError` (`AUTODS-MCP-PUBLIC-M`); (b) the token cache was a
+  single unkeyed file, so a cached *staging* token was served for a production
+  `MCP_URL` with no browser and no warning, and the resulting 401 reads exactly
+  like a broken release — it is now keyed on the authorization endpoint + client
+  id; (c) the docstring called the coupling "so this matches what the app client
+  accepts", i.e. stated a hazard as a guarantee. `_refuse_on_environment_mismatch`
+  now asks the target for its RFC 8414 metadata and refuses to sign in when the
+  advertised authorization server is not the one `.env` names — it runs *before*
+  the cache read, which is the whole point, since the expensive case never opens a
+  browser at all. It warns rather than blocks when discovery cannot answer, and
+  skips `localhost` entirely. `tests/test_mcp_call_script.py` pins all of it.
+  The way to reach another environment is `MCP_TOKEN=$(uv run python
+  scripts/mcp_token.py <alias>)`, never overriding the Cognito settings.
 - **The server runs on mcp 2.x, and `uvx` ignores the pin entirely.** `uvx --with mcp
   python …` resolves whatever is newest regardless of `uv.lock` (and picks Python 3.13
   for a 3.12-only project) — always `uv run`. The 1.x → 2.x port landed in RD-99; the

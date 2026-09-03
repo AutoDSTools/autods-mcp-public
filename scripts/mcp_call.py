@@ -7,6 +7,7 @@ Claude client uses (Authorization Code + PKCE against Cognito), with the token
 cached locally so you only authorize in the browser once.
 
 Usage:
+    uv run python scripts/mcp_call.py --help                # this text, without signing in
     uv run python scripts/mcp_call.py list                  # list tool names
     uv run python scripts/mcp_call.py descriptors           # dump the FULL handshake payload as JSON (C3/C4/C5)
     uv run python scripts/mcp_call.py instructions          # print the server instructions from the handshake
@@ -17,12 +18,27 @@ Usage:
     uv run python scripts/mcp_call.py get_bulk_action_items '{"store_ids":"1","bulk_action_id":123}'
 
 Env:
-    MCP_TOKEN     use this bearer token instead of running the OAuth flow
+    MCP_TOKEN     use this bearer token instead of signing in (see below)
     MCP_URL       server endpoint (default: http://localhost:2049/mcp)
     MCP_NO_CACHE  set to ignore (and overwrite) the cached token
 
-Endpoints, client_id, scopes, and the loopback redirect URI are read from the
-repo ``Settings`` (i.e. from ``.env``), so this matches what the app client accepts.
+**The endpoint and the credential come from different places, and only the
+endpoint is on the command line.** ``MCP_URL`` says which server to call, while
+the sign-in — endpoints, client_id, scopes, loopback redirect URI — is built
+from the repo ``Settings``, i.e. from ``.env``. So a sign-in run from this
+checkout always authorizes against whichever Cognito ``.env`` names (staging,
+normally), *whatever* ``MCP_URL`` points at. That is a coupling, not a
+guarantee of a match.
+
+Any target other than ``.env``'s own environment therefore needs ``MCP_TOKEN``,
+and the token has to come from a client already authorized there:
+
+    MCP_TOKEN=$(uv run python scripts/mcp_token.py autods-public-prod) \\
+      MCP_URL=https://mcp.autods.com/mcp uv run python scripts/mcp_call.py instructions
+
+Without ``MCP_TOKEN`` this refuses to sign in when the target host advertises a
+different authorization server than ``.env`` names, rather than minting a token
+the target will only 401 — see ``_refuse_on_environment_mismatch``.
 """
 
 import asyncio
@@ -46,7 +62,79 @@ from mcp.client.streamable_http import streamable_http_client
 
 from autods_mcp_server.settings import Settings
 
-_CACHE = Path(tempfile.gettempdir()) / "autods_mcp_token.json"
+_DEFAULT_URL = "http://localhost:2049/mcp"
+
+# Hosts for which ``.env`` is the right Cognito config by construction, so the
+# discovery cross-check below is skipped rather than failed.
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _cache_path(settings: Settings) -> Path:
+    """Cache file for *this* Cognito environment.
+
+    Keyed on the authorization endpoint and client id, because a single shared
+    cache file is how a **staging** token silently ends up being sent to
+    production: the token is served from cache, no browser opens, nothing warns,
+    and the 401 that follows reads exactly like a broken release. Keying it means
+    switching targets can only ever miss the cache, never hit the wrong entry.
+    """
+    fingerprint = f"{settings.cognito_authorization_endpoint}|{settings.cognito_public_client_id}"
+    digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:12]
+    return Path(tempfile.gettempdir()) / f"autods_mcp_token_{digest}.json"
+
+
+def _advertised_authorization_endpoint(mcp_url: str) -> str | None:
+    """The authorization server the *target* advertises, or ``None`` if unknown.
+
+    Asks the target for its RFC 8414 metadata — the same document section S3
+    grades and the same one a real MCP client bootstraps from. Unauthenticated
+    and cheap. ``None`` means the question could not be answered (unreachable,
+    non-2xx, malformed), which is deliberately not treated as a mismatch.
+    """
+    origin = urllib.parse.urlunsplit(urllib.parse.urlsplit(mcp_url)[:2] + ("", "", ""))
+    try:
+        response = httpx.get(f"{origin}/.well-known/oauth-authorization-server", timeout=10)
+        if response.status_code != 200:
+            return None
+        return response.json().get("authorization_endpoint")
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _refuse_on_environment_mismatch(mcp_url: str, settings: Settings) -> None:
+    """Exit when signing in against ``.env`` cannot produce a token for the target.
+
+    This is the guard for the trap the module docstring describes, and it has to
+    run *before* the token cache is consulted, not just before the browser opens:
+    the expensive version of this mistake is the silent one, where a cached
+    staging token is handed to production without any sign-in happening at all.
+    """
+    host = urllib.parse.urlsplit(mcp_url).hostname or ""
+    if host in _LOCAL_HOSTS:
+        return
+
+    advertised = _advertised_authorization_endpoint(mcp_url)
+    if advertised is None:
+        print(
+            f"warning: {host} did not answer AS-metadata discovery, so the sign-in target could not be "
+            f"confirmed. Signing in against {settings.cognito_domain} (from .env).",
+            file=sys.stderr,
+        )
+        return
+
+    def _origin(url: str) -> str:
+        return urllib.parse.urlunsplit(urllib.parse.urlsplit(url)[:2] + ("", "", ""))
+
+    if _origin(advertised) == _origin(settings.cognito_authorization_endpoint):
+        return
+
+    raise SystemExit(
+        f"Refusing to sign in: {host} authorizes against {_origin(advertised)}, but this checkout's .env "
+        f"names {_origin(settings.cognito_authorization_endpoint)}. A token minted here would only 401 there.\n"
+        f"Pass a token from a client already authorized for that host instead:\n"
+        f"  MCP_TOKEN=$(uv run python scripts/mcp_token.py <alias>) MCP_URL={mcp_url} "
+        f"uv run python scripts/mcp_call.py <operation>"
+    )
 
 
 def _loopback_redirect(settings: Settings) -> str:
@@ -131,21 +219,28 @@ def _oauth_token(settings: Settings) -> dict:
     return resp.json()
 
 
-def get_token() -> str:
-    """Return a (cached, unexpired) access token, running the OAuth flow if needed."""
-    if not os.environ.get("MCP_NO_CACHE") and _CACHE.exists():
-        cached = json.loads(_CACHE.read_text())
+def get_token(mcp_url: str) -> str:
+    """Return a (cached, unexpired) access token, running the OAuth flow if needed.
+
+    Takes the target URL because the environment cross-check has to happen here,
+    ahead of the cache read — see ``_refuse_on_environment_mismatch``.
+    """
+    settings = Settings()  # type: ignore[call-arg]
+    _refuse_on_environment_mismatch(mcp_url, settings)
+
+    cache = _cache_path(settings)
+    if not os.environ.get("MCP_NO_CACHE") and cache.exists():
+        cached = json.loads(cache.read_text())
         if cached.get("expires_at", 0) - 60 > time.time():
             return cached["access_token"]
 
-    settings = Settings()  # type: ignore[call-arg]
     token = _oauth_token(settings)
     data = {
         "access_token": token["access_token"],
         "id_token": token["id_token"],
         "expires_at": time.time() + token.get("expires_in", 3600),
     }
-    _CACHE.write_text(json.dumps(data))
+    cache.write_text(json.dumps(data))
     return token["access_token"]
 
 
@@ -203,19 +298,38 @@ async def run_call(url: str, token: str, operation: str, arguments: dict) -> int
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    # Everything that can be decided from argv is decided before a token is
+    # acquired. Authenticating first meant `--help`, or any typo, opened a
+    # browser sign-in (and, with a token to hand, sent the typo upstream as an
+    # operation_id — which is what filled Sentry with UnknownOperationError).
+    argv = sys.argv[1:]
+    if not argv:
         print(__doc__)
         return 2
+    if argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
 
-    operation = sys.argv[1]
-    arguments = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
-    token = os.environ.get("MCP_TOKEN") or get_token()
+    operation = argv[0]
+    if operation.startswith("-"):
+        print(f"Unknown option {operation!r}; pass an operation id, or --help.", file=sys.stderr)
+        return 2
+    try:
+        arguments = json.loads(argv[1]) if len(argv) > 1 else {}
+    except json.JSONDecodeError as exc:
+        print(f"Arguments must be a JSON object: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(arguments, dict):
+        print(f"Arguments must be a JSON object, got {type(arguments).__name__}.", file=sys.stderr)
+        return 2
+
+    url = os.environ.get("MCP_URL", _DEFAULT_URL)
+    token = os.environ.get("MCP_TOKEN") or get_token(url)
 
     if operation == "token":
         print(token)
         return 0
 
-    url = os.environ.get("MCP_URL", "http://localhost:2049/mcp")
     return asyncio.run(run_call(url, token, operation, arguments))
 
 

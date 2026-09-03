@@ -48,9 +48,16 @@ the run:
    it however they like ("the Shopify store", a store name, a URL). They do *not*
    need to know the id — P5 resolves the description against their store list.
    Staging only.
-3. **Is the connection already authorized?** If not, hand them C1 and wait.
 
-If the user already answered any of these in their request, don't re-ask it.
+If the user already answered either of these in their request, don't re-ask it.
+
+Then hand over **C1 — unconditionally, and for both environments.** It is not a
+question, so it is not part of the round: the run is supervised on a developer
+machine and cannot go fully autonomous anyway, so a sign-in always happens
+somewhere in it. Making it the first step rather than an optional one buys two
+things — the fresh-authorization path is actually tested instead of being a
+permanent `skipped` in every report, and the token it mints is what section C
+then runs on (see **The token section C runs on**).
 
 After this round: no more questions. A missing fixture is a `skipped` line in the
 report, not a prompt. If something genuinely cannot proceed, finish every other
@@ -102,15 +109,68 @@ environment a call lands in. Before the first tool call:
 | Phase | Section | Driver | Blocks |
 |---|---|---|---|
 | 1 | **S** — unauthenticated surface | `make release-checks` (shell) | nothing; S needs no connection |
-| 2 | **C1** — authorization | human, at a browser | everything below |
-| 3 | **P** — account readiness | Claude, MCP | which of R/W can run at all |
-| 4 | **C3–C9** — handshake payload | `make release-checks-c` (shell) | nothing |
+| 2 | **C1–C2** — authorization | human, at a browser | everything below |
+| 3 | **C3–C9** — handshake payload | `make release-checks-c` (shell) | nothing |
+| 4 | **P** — account readiness | Claude, MCP | which of R/W can run at all |
 | 5 | **R** — reads | Claude, MCP | W |
 | 6 | **W** — writes | Claude, MCP, gated | nothing |
 | 7 | **O** — observability | mixed | nothing |
 
 S is independent of the rest — run it first (it is fast and needs nothing), but a
 failure there does not stop the connected sections.
+
+**C3–C9 sits immediately after the authorization on purpose.** It is the only
+section that needs a token of its own, and a Cognito access token lives about an
+hour — so running it while the token is freshest keeps a long run (W polling, O's
+slow log scans) from reaching it after expiry. A 401 there is almost always a
+stale token rather than a broken release, which is exactly the misreading this
+ordering avoids. P, R and W ride the client's own connection, which refreshes
+itself; O talks to Sentry, Mixpanel and S3, not to this server.
+
+### The token section C runs on
+
+Two credentials are in play and they are **not** interchangeable. The MCP tools
+Claude calls ride the client's own connection, which refreshes itself and needs
+no handling. Everything driven from the shell — `make release-checks-c` and every
+`scripts/mcp_call.py` invocation — needs a bearer token passed in explicitly.
+
+**Take it from the client that just authorized in C1:**
+
+```bash
+MCP_TOKEN=$(uv run python scripts/mcp_token.py autods-public-prod) make release-checks-c
+uv run python scripts/mcp_token.py autods-public-prod --info   # target + expiry, without printing it
+```
+
+Capture it with `$(...)` so it never lands in scrollback or a report, and use
+`--info` whenever you only need to know whether a usable token exists. Never
+print the raw MCP server config to read a URL or a token out of it: those
+entries carry live access *and* refresh tokens.
+
+**Why not let the script sign in?** Because the endpoint and the credential come
+from different places, and only the endpoint is on the command line. `MCP_URL`
+says which server to call; the sign-in is built from this checkout's `.env`,
+whose `COGNITO_DOMAIN` is `auth-staging.autods.com`. So a sign-in from this
+checkout authorizes against **staging** whatever `MCP_URL` points at — and in the
+silent case, serves a *cached* staging token to production, which 401s and reads
+exactly like a broken release. That is a coupling, not a guarantee of a match,
+and it has cost more than one run.
+
+Two guards now make the trap unreachable rather than merely documented
+(`scripts/mcp_call.py`): the token cache is keyed per Cognito environment, so a
+staging token can never be served for a production target; and without
+`MCP_TOKEN` the script asks the target for its RFC 8414 metadata and **refuses**
+to sign in when the advertised authorization server is not the one `.env` names,
+naming both and pointing at `mcp_token.py`. A target that cannot answer
+discovery warns rather than blocks, and a `localhost` target skips the check —
+`.env` is the right config there by construction.
+
+The `E2E_COGNITO_*` password grant that `release-checks-c` falls back to when
+`MCP_TOKEN` is unset is **staging-scoped** for the same reason: `conftest.py`
+documents it as the staging test user, and its pool, client and domain name one
+environment. It is what lets CI run section C non-interactively against staging;
+against production it mints a token that 401s. Pointing it at production would
+need a prod app client with `USER_PASSWORD_AUTH` enabled, which is a security
+decision nobody should assume has been taken.
 
 ### Rules for the run
 
@@ -206,12 +266,18 @@ can drive it.
 > against what the checkout's manifests build:
 >
 > ```bash
-> MCP_TOKEN=$(uv run python scripts/mcp_call.py token) make release-checks-c
+> # staging
+> MCP_TOKEN=$(uv run python scripts/mcp_token.py autods-public-staging) make release-checks-c
+> # production
+> MCP_TOKEN=$(uv run python scripts/mcp_token.py autods-public-prod) \
+>   MCP_RELEASE_BASE_URL=https://mcp.autods.com make release-checks-c
 > ```
 >
-> `MCP_TOKEN` needs no new secrets; without it the suite falls back to the
-> `E2E_COGNITO_*` password grant. Read-only and safe against production
-> (`MCP_RELEASE_BASE_URL=https://mcp.autods.com`).
+> The token comes from the client that authorized in C1 and needs no new
+> secrets. Without `MCP_TOKEN` the suite falls back to the `E2E_COGNITO_*`
+> password grant, which is **staging-scoped** — fine for CI against staging,
+> useless against production. See **The token section C runs on**. Read-only and
+> safe against production.
 >
 > **Run it from the released commit.** The diff has two sides, so from any other
 > commit it reports the checkout's own unreleased manifests as drift — which is
@@ -225,28 +291,53 @@ can drive it.
 > **C1 and C2 are not automated and cannot be** — a browser sign-in needs a human,
 > and no test can hold one.
 
-**C1 — Fresh authorization (human, at a browser). The hand-off point.** This is the
-one step Claude must never execute: the recipe below removes and re-adds the very
-server Claude is calling through, which would sever its own tools mid-run. It is
-also the single most release-sensitive path, and nothing else on this list
-exercises it.
+**C1 — Fresh authorization (human, at a browser). Mandatory, both environments.
+The hand-off point.** This is the one step Claude must never execute: the recipe
+below removes and re-adds the very server Claude is calling through, which would
+sever its own tools mid-run. It is also the single most release-sensitive path,
+and nothing else on this list exercises it.
 
 Claude's job here is to *hand the user this block, verbatim, and wait* — then
-resume at **P** once they confirm. If the connection is already authorized and the
-user does not want to re-authorize, record C1 as `skipped (connection already
-authorized; fresh sign-in not re-tested)` and carry on. That is a real gap in the
-run, not a pass.
+resume at **C3** once they confirm.
 
-> Remove the server from your client, re-add it, and authorize from scratch:
+It is **not** optional and there is no "already authorized, skip it" branch. The
+run is supervised on a developer machine and cannot be fully autonomous anyway,
+so a sign-in happens somewhere in it regardless; making it mandatory and first
+costs one browser round-trip and buys two things:
+
+- the fresh-authorization path is genuinely tested, instead of every report
+  carrying `skipped (connection already authorized; fresh sign-in not re-tested)`
+  as a permanent gap;
+- it mints the token section C runs on, which is the only way to get a
+  **production** token — see **The token section C runs on**.
+
+Those are two distinct purposes, and the second is why a future editor must not
+quietly make this optional again: doing so leaves section C with no token source
+on production, where neither `mcp_call.py`'s own sign-in nor the `E2E_COGNITO_*`
+password grant can produce a valid one.
+
+The sign-in may be done in a **separate** session, or before this one starts —
+`~/.claude/.credentials.json` is machine-level and keyed by server name, not
+per-session, so the token is visible to the driving session either way.
+
+> Remove the server from your client, re-add it, and authorize from scratch —
+> **staging:**
 > ```
 > claude mcp remove autods-public-staging
 > claude mcp add --transport http --callback-port 2048 autods-public-staging https://mcp-staging.autods.com/mcp
 > /mcp        # then complete the browser sign-in
 > ```
+> **production:**
+> ```
+> claude mcp remove autods-public-prod
+> claude mcp add --transport http --callback-port 2048 autods-public-prod https://mcp.autods.com/mcp
+> /mcp        # then complete the browser sign-in
+> ```
 > Expected: the browser opens Cognito Hosted UI, sign-in succeeds, the client reports
 > connected, and `/mcp` lists the tools. Try it once with a **federated (Google)**
 > account and once with a **native** account — identity-linking collisions only show
-> up on one of them.
+> up on one of them. Record which you used: one account type alone leaves the other
+> path untested, and that belongs in the report rather than passing silently.
 >
 > Best run in a **separate** Claude session (or before starting one), so the agent
 > driving the checklist never loses its connection.
@@ -280,26 +371,21 @@ MCP_URL=https://mcp-staging.autods.com/mcp uv run python scripts/mcp_call.py lis
 
 `mcp_call.py` defaults to `http://localhost:2049/mcp`, so **without `MCP_URL` it
 probes localhost** and fails with a connection traceback that looks like a server
-outage. It reuses a cached token and only opens a browser once that token expires.
+outage.
 
-> **`MCP_URL` repoints the call, not the sign-in — so the two lines above are
-> staging-only.** The endpoint comes from `MCP_URL`; the token comes from
-> `Settings`, i.e. from the repo's `.env`, whose `COGNITO_DOMAIN` is
-> `auth-staging.autods.com`. Pointing `MCP_URL` at production therefore opens a
-> **staging** Cognito authorization link — and, in the silent case that actually
-> costs you the run, reuses a cached *staging* token and sends it to production,
-> which 401s and reads exactly like a broken release. For production, hand the
-> script a token and skip the OAuth flow entirely:
->
-> ```bash
-> MCP_TOKEN=<a production access token> MCP_URL=https://mcp.autods.com/mcp \
->   uv run python scripts/mcp_call.py instructions
-> ```
->
-> `MCP_TOKEN` short-circuits `get_token()`, so nothing reads `.env`. Overriding
-> the Cognito settings for the run instead (`COGNITO_DOMAIN`,
-> `COGNITO_PUBLIC_CLIENT_ID`, `MCP_REGISTRATION_REDIRECT_URIS`) works too, but it
-> costs a second browser sign-in mid-run, which the opening-round rule forbids.
+**Pass `MCP_TOKEN` on every invocation, whichever environment you are on** — the
+two lines above are staging-only as written, and the reasoning is in **The token
+section C runs on**. For production:
+
+```bash
+MCP_TOKEN=$(uv run python scripts/mcp_token.py autods-public-prod) \
+  MCP_URL=https://mcp.autods.com/mcp uv run python scripts/mcp_call.py instructions
+```
+
+`MCP_TOKEN` short-circuits `get_token()`, so nothing reads `.env` and no browser
+opens. Without it the script now refuses to sign in against a host that
+advertises a different authorization server, so the old silent failure is a
+readable error — but the refusal is a guard, not a workflow: hand it a token.
 
 The client's own UI is evidence in **one direction only**, and that direction is
 usable. If the client *renders* the instructions and the tool descriptors (Claude

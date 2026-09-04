@@ -38,6 +38,7 @@ that measurement, host family by host family.
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -227,10 +228,21 @@ def family_of(url: str) -> HostFamily | None:
 
 
 def _with_query(url: str, params: tuple[tuple[str, str], ...]) -> str:
+    """``url`` with ``params`` set, and everything else about the query kept.
+
+    A rewrite only ever asks for a smaller variant, so it must not disturb the
+    rest of the query — some of which authorises the object rather than sizing
+    it. That rules out the obvious ``dict(parse_qsl(...))``: it drops
+    blank-valued keys (``?ref=&id=7`` loses ``ref``) and collapses repeated ones
+    to the last, either of which can invalidate a signed URL and turn a working
+    picture into a broken one. Pairs in, pairs out, with only the named keys
+    replaced.
+    """
     parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query))
-    query.update(params)
-    return urlunparse(parsed._replace(query=urlencode(query)))
+    replaced = {name for name, _ in params}
+    pairs = [(name, value) for name, value in parse_qsl(parsed.query, keep_blank_values=True) if name not in replaced]
+    pairs.extend(params)
+    return urlunparse(parsed._replace(query=urlencode(pairs)))
 
 
 def rewrite_thumbnail(url: str) -> str | None:
@@ -251,6 +263,61 @@ def rewrite_thumbnail(url: str) -> str | None:
     if matched.query:
         return _with_query(url, matched.query)
     return None
+
+
+@lru_cache(maxsize=1)
+def _allowed_origins() -> tuple[tuple[str, str, bool], ...]:
+    """:func:`resource_domains` parsed into ``(scheme, host, is_wildcard)``."""
+    parsed: list[tuple[str, str, bool]] = []
+    for domain in resource_domains():
+        scheme, _, host = domain.partition("://")
+        wildcard = host.startswith("*.")
+        parsed.append((scheme.lower(), (host[2:] if wildcard else host).lower(), wildcard))
+    return tuple(parsed)
+
+
+def is_allowed_origin(url: str) -> bool:
+    """Whether the server may fetch ``url`` itself, on the base64 path (RD-92).
+
+    **The allowlist is the CSP origin list, deliberately.** The widget path
+    fetches in the viewer's browser under ``_meta.ui.csp.resourceDomains``, so
+    reusing that list here makes the two paths reach exactly the same set of
+    hosts — the server-side fetch is never looser than the sandboxed one, and
+    there is one list to maintain rather than two that drift.
+
+    It is **not** :func:`family_of`, which looks like the obvious reuse and is
+    unsafe for this: its host tests are substring matches (``"alicdn" in host``),
+    so ``alicdn.attacker.example`` matches. That is fine for picking a rewrite
+    rule — a wrong guess yields a URL that simply does not resolve to an image —
+    and completely wrong for deciding what an in-cluster process may open a
+    connection to. Matching here follows CSP semantics instead: exact host, or a
+    ``*.`` wildcard against subdomains only (never the apex), with the scheme
+    compared too, so an ``http://`` copy of an allowlisted host is refused
+    exactly as the browser would refuse it.
+
+    A miss is the long tail — merchant self-hosts, ~59 host families in RD-82's
+    store-quote sample — and it is the normal case, not an error: the image is
+    dropped like any other failure, its URL still reaches the client, and the
+    widget renders it if the viewer's browser can. This is the same degradation
+    the CSP already produces, now applied on both sides.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not host:
+        return False
+    return any(
+        scheme == allowed_scheme
+        # A wildcard covers subdomains and *not* the apex, which is what CSP
+        # itself does — `*.ttcdn-us.com` permits `p16-oec.ttcdn-us.com` and
+        # refuses `ttcdn-us.com`. Letting the apex through the wildcard branch
+        # would make this gate quietly wider than the policy it is mirroring.
+        and (host.endswith(f".{allowed_host}") if wildcard else host == allowed_host)
+        for allowed_scheme, allowed_host, wildcard in _allowed_origins()
+    )
 
 
 def resource_domains() -> list[str]:

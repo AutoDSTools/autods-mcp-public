@@ -92,10 +92,11 @@ _PLAYBOOK_NAME_PARAM = "name"
 _INCLUDE_IMAGES_DESCRIPTION = (
     "Attach base64 thumbnails of the results so the model can see the pictures. Costs vision tokens: each "
     f"image is capped server-side at {BASE64_EDGE_PX}px (81 tokens) and at most {MAX_IMAGES} are attached "
-    "(~1,620 tokens), and a result over that cap is truncated with a note saying so. Set it only when the "
-    "image itself has to be judged — a hero shot that is really a size chart, a watermark, a collage of "
-    "unrelated items. Do NOT set it to show products to the user: clients that render the result do that "
-    "from the URLs at no token cost, and the URLs are in the response either way."
+    "(~1,620 tokens), and a result over that cap is truncated with a note saying so. That price is paid "
+    "again on every later turn, because the images stay in the conversation once attached. Set it only "
+    "when the image itself has to be judged — a hero shot that is really a size chart, a watermark, a "
+    "collage of unrelated items. Do NOT set it to show products to the user: clients that render the "
+    "result do that from the URLs at no token cost, and the URLs are in the response either way."
 )
 
 

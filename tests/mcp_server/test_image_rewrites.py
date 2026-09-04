@@ -21,6 +21,7 @@ probe run is how a deliberate change to a rung gets recorded.
 
 import csv
 from pathlib import Path
+from urllib.parse import parse_qsl, urlparse
 
 import pytest
 
@@ -28,6 +29,7 @@ from autods_mcp_server.image_rewrites import (
     HOST_FAMILIES,
     TARGET_PX,
     family_of,
+    is_allowed_origin,
     resource_domains,
     rewrite_thumbnail,
 )
@@ -106,6 +108,32 @@ def test_an_already_sized_alicdn_url_is_not_sized_twice() -> None:
     assert rewrite_thumbnail(sized) == sized
 
 
+def test_a_query_rewrite_keeps_every_other_parameter_exactly_as_it_was() -> None:
+    """A rewrite asks for a smaller variant and must change nothing else.
+
+    Some of the rest of the query authorises the object rather than sizing it,
+    so losing a parameter turns a working picture into a broken one — and the
+    obvious ``dict(parse_qsl(...))`` loses two kinds: a blank-valued key, and
+    every repeat of a key but the last.
+    """
+    rewritten = rewrite_thumbnail("https://cdn.shopify.com/s/files/1/a.jpg?v=1699&ref=&tag=x&tag=y")
+    query = parse_qsl(urlparse(rewritten).query, keep_blank_values=True)
+
+    assert ("width", "256") in query  # the rewrite itself
+    assert ("v", "1699") in query  # a signing/versioning parameter survives
+    assert ("ref", "") in query  # blank value survives
+    assert [value for name, value in query if name == "tag"] == ["x", "y"]  # repeats survive
+
+
+def test_a_query_rewrite_replaces_its_own_parameter_rather_than_repeating_it() -> None:
+    """An image that already carries the sizing parameter must come back with
+    one copy of it, not two — a CDN handed ``width=1500&width=256`` is entitled
+    to honour either."""
+    rewritten = rewrite_thumbnail("https://cdn.shopify.com/s/files/1/a.jpg?width=1500")
+    query = parse_qsl(urlparse(rewritten).query, keep_blank_values=True)
+    assert [value for name, value in query if name == "width"] == ["256"]
+
+
 def test_a_url_that_is_not_http_gets_no_rewrite() -> None:
     """Upstream payloads carry the odd empty string, relative path or ``data:``
     URI. None of them is rewritable and none of them may raise."""
@@ -139,3 +167,60 @@ def test_the_target_size_is_the_one_the_table_was_measured_at() -> None:
     """RD-82 verified 256px against real bytes per host. Changing this constant
     silently invalidates every fixture row and every measured rung."""
     assert TARGET_PX == 256
+
+
+# --------------------------------------------------------------------------
+# is_allowed_origin: the same list, used as a gate rather than as a hint
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://images.autods.com/hero.png",  # exact host
+        "https://cdn.shopify.com/s/files/1/x.jpg",  # exact host
+        "https://p16-oec.ttcdn-us.com/tos/x.webp",  # subdomain under a wildcard
+        "https://i.ebayimg.com/images/g/x/s-l1600.jpg",
+        "https://autods-scraper-images.s3-us-west-2.amazonaws.com/x.png",
+    ],
+)
+def test_a_declared_origin_may_be_fetched(url: str) -> None:
+    assert is_allowed_origin(url)
+
+
+@pytest.mark.parametrize(
+    ("url", "why"),
+    [
+        ("https://merchant-self-host.example/hero.jpg", "the long tail, blocked by the CSP too"),
+        ("http://169.254.169.254/latest/meta-data/", "link-local, and no scheme/host match"),
+        ("https://alicdn.attacker.example/x.jpg", "family_of matches this by substring; the gate must not"),
+        ("https://cdn.shopify.com.attacker.example/x.jpg", "suffix-looking, different host"),
+        ("https://notcdn.shopify.com/x.jpg", "not a subdomain of a declared exact host"),
+        ("http://images.autods.com/hero.png", "declared for https only, as CSP would have it"),
+        ("https://ttcdn-us.com/x.webp", "the apex is not covered by *.ttcdn-us.com"),
+        ("file:///etc/passwd", "not http(s) at all"),
+        ("", "empty"),
+        ("not a url", "unparseable"),
+    ],
+)
+def test_an_undeclared_origin_may_not_be_fetched(url: str, why: str) -> None:
+    """The substring cases are the point of this test.
+
+    ``family_of`` recognises a host with ``"alicdn" in host``, which is fine for
+    picking a rewrite rule — guessing wrong yields a URL that simply is not an
+    image — and unsafe for deciding what an in-cluster process may connect to.
+    Reusing it as the gate was the obvious shortcut and would have accepted
+    ``alicdn.attacker.example``.
+    """
+    assert not is_allowed_origin(url), why
+
+
+def test_every_declared_origin_passes_its_own_gate() -> None:
+    """The gate and the CSP declaration cannot drift apart: whatever the widget
+    is allowed to load, the server is allowed to fetch, and nothing else."""
+    for domain in resource_domains():
+        scheme, _, host = domain.partition("://")
+        sample = f"{scheme}://{host[2:] if host.startswith('*.') else host}"
+        if host.startswith("*."):
+            sample = f"{scheme}://sub.{host[2:]}"
+        assert is_allowed_origin(f"{sample}/some/image.jpg"), domain

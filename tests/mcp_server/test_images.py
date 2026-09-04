@@ -100,6 +100,20 @@ def test_an_omitted_item_path_treats_the_root_object_as_the_single_item() -> Non
     assert len(block["items"][0]["images"]) == 2
 
 
+def test_an_omitted_item_path_also_accepts_a_root_that_arrives_as_a_list() -> None:
+    """Several AutoDS reads answer the same request with either a bare object or
+    a one-element list (``/users/list/`` is the documented case), so a root list
+    is the items themselves. Reading it as "no items" would drop every picture
+    from a payload that plainly has them, silently and with a 200."""
+    operation = _operation(image_paths=["images.*"], label_path="title", id_path="id", per_item=2, max=1)
+    data = [{"id": "x9", "title": "One product", "images": ["https://a.test/1.jpg"]}]
+    block = extract_images(operation, data)
+    assert block is not None
+    assert block["total"] == 1
+    assert block["items"][0]["id"] == "x9"
+    assert block["items"][0]["images"] == [{"url": "https://a.test/1.jpg"}]
+
+
 def test_a_later_path_is_used_when_the_earlier_ones_are_missing_or_null() -> None:
     """An upstream that drops an optional field must fall through, not fail."""
     operation = _operation(

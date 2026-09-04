@@ -76,8 +76,14 @@ from autods_mcp_server.identity import (
     SelfIdentityResolver,
     build_identity_resolver,
 )
-from autods_mcp_server.image_fetch import Thumbnail, fetch_thumbnails
-from autods_mcp_server.images import IMAGES_KEY, INCLUDE_IMAGES_ARG, extract_images
+from autods_mcp_server.image_fetch import (
+    Thumbnail,
+    ThumbnailBatch,
+    create_image_client,
+    fetch_thumbnails,
+    shutdown_encoders,
+)
+from autods_mcp_server.images import IMAGES_KEY, INCLUDE_IMAGES_ARG, MAX_IMAGES, extract_images
 from autods_mcp_server.logging import get_logger
 from autods_mcp_server.manifests import (
     ManifestRegistry,
@@ -130,6 +136,11 @@ class McpRuntime:
     session_manager: StreamableHTTPSessionManager
     dispatcher: OperationDispatcher
     http_client: httpx.AsyncClient
+    # RD-92: a second client, for the base64 thumbnail path only. Separate from
+    # the dispatcher's because httpx files every response's cookies into the
+    # client's jar, and supplier CDNs are not somewhere to accumulate state that
+    # the AutoDS upstreams then share a client with.
+    image_client: httpx.AsyncClient
     rate_limiter: RateLimiter
     redis: Redis | None
     mixpanel: MixpanelClient
@@ -150,6 +161,7 @@ def _emit_audit(
     upstream_status: int | None,
     latency_ms: float,
     error_type: str | None = None,
+    include_images: bool | None = None,
 ) -> None:
     """F2: one structured audit line per tool call.
 
@@ -157,6 +169,13 @@ def _emit_audit(
     added by the structlog processor chain, and ``request_id`` rides the
     contextvars bound by ``RequestContextMiddleware``. Payload bodies are never
     logged (PII risk).
+
+    ``include_images`` (RD-92) is present only on calls to a tool that actually
+    offers the base64 opt-in, so it stays absent from the other ~95% of lines.
+    It is here because the feature's whole justification is "only for the case
+    where the model must judge the picture", and without this field there is no
+    way to find out whether models set it for that or out of habit — neither the
+    Mixpanel event (endpoint only) nor anything else records an argument.
     """
     fields: dict[str, Any] = {
         "cognito_username": cognito_username,
@@ -170,6 +189,8 @@ def _emit_audit(
     }
     if error_type is not None:
         fields["error_type"] = error_type
+    if include_images is not None:
+        fields["include_images"] = include_images
     _audit_logger.info("tool_call", **fields)
 
 
@@ -275,6 +296,18 @@ def _with_failure_hint(result: types.CallToolResult, hint: str | None) -> types.
     )
 
 
+def _offers_base64(operation: ManifestOperation | None) -> bool:
+    """Whether this operation advertises ``include_images`` at all (RD-92).
+
+    The audit field is logged only for these, so the flag's absence on a
+    ``list_products`` or ``upload_products`` line means "not offered" rather than
+    "offered and declined" — two things worth being able to tell apart when the
+    question is whether models reach for it.
+    """
+    block = operation.images if operation is not None else None
+    return block is not None and block.base64 != "off"
+
+
 def _include_images(operation: ManifestOperation | None, arguments: dict[str, Any]) -> bool:
     """Whether this call opted into base64 thumbnails (RD-92).
 
@@ -299,6 +332,7 @@ async def _attach_thumbnails(
     http_client: httpx.AsyncClient,
     timeout_seconds: float,
     max_bytes: int,
+    deadline_seconds: float,
     tool_name: str,
 ) -> list[Thumbnail]:
     """Fetch base64 thumbnails for an ``images`` block and record what happened.
@@ -313,19 +347,51 @@ async def _attach_thumbnails(
     blocks are an enhancement. Letting a slow CDN turn a good answer into
     ``internal_error`` would be a strictly worse trade, and the catch-all in
     ``on_call_tool`` would do exactly that.
+
+    **Swallowed, but never silent.** An empty batch from the bulk handler takes
+    the same path as a short one from a per-image failure: ``attached`` is set
+    and the note explains the shortfall. Returning early instead would leave a
+    caller that asked for pictures holding none, with nothing in the payload
+    saying why — the silent-short-set failure this whole path exists to avoid,
+    reproduced in the one branch still able to reach it.
     """
-    urls = [image["url"] for item in images.get("items", []) for image in item.get("images", [])]
+    urls = [image["url"] for item in images.get("items", []) for image in item.get("images", []) if image.get("url")][
+        :MAX_IMAGES
+    ]
+    started = time.perf_counter()
     try:
         batch = await fetch_thumbnails(
             http_client,
             urls,
             timeout_seconds=timeout_seconds,
             max_bytes=max_bytes,
+            deadline_seconds=deadline_seconds,
         )
     except Exception:  # noqa: BLE001 - see the docstring: never fail the call for a picture
         _audit_logger.warning("thumbnail_attach_failed", tool_name=tool_name, requested=len(urls), exc_info=True)
-        return []
+        # The same shape a total per-image failure would have produced, so the
+        # note and the count below describe this case too.
+        batch = ThumbnailBatch(thumbnails=[], requested=len(urls))
     images["attached"] = len(batch.thumbnails)
+    # A second, differently-named line rather than more fields on ``tool_call``:
+    # the audit line is emitted before this work starts, and "exactly one
+    # tool_call line per call" is a convention worth more than co-locating these
+    # counts. Without it a systematically short set — a blocked origin, a CDN
+    # that has started 403ing — is only visible at debug level, one image at a
+    # time.
+    #
+    # ``elapsed_ms`` is here for the same reason and is the *only* place it
+    # appears: ``tool_call`` is emitted before this runs, so its ``latency_ms``
+    # stops at the upstream response and does not count a second of it. This is
+    # the one path on this server that does third-party network work, so it is
+    # the one whose duration nothing else would record.
+    _audit_logger.info(
+        "thumbnails_attached",
+        tool_name=tool_name,
+        requested=batch.requested,
+        attached=len(batch.thumbnails),
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
     notes = [note for note in (images.get("note"), batch.note) if note]
     if notes:
         images["note"] = " ".join(notes)
@@ -365,7 +431,7 @@ def _build_server(
     mixpanel: MixpanelClient,
     instructions: str,
     settings: Settings,
-    dispatcher_http_client: httpx.AsyncClient,
+    image_client: httpx.AsyncClient,
 ) -> Server:
     """Create the low-level MCP server with tool list/call handlers.
 
@@ -379,12 +445,15 @@ def _build_server(
     system prompt — so passing it here is the whole delivery mechanism for that
     channel.
 
-    ``dispatcher_http_client`` is the *same* client the dispatcher forwards on,
-    reused by the RD-92 base64 path so there is one client to own and close.
-    Safe because the image request is built from scratch — no ``Authorization``
-    header, ever — and because ``follow_redirects`` is a per-request override
-    there: the client-level ``False`` that stops a forwarded bearer token
-    leaking on a 3xx still applies to every upstream call.
+    ``image_client`` is the RD-92 base64 path's own client, deliberately **not**
+    the dispatcher's. Sharing one looked free — the image request is built from
+    scratch and carries no ``Authorization`` header — but httpx keeps a cookie
+    jar on the client and files every response's ``Set-Cookie`` into it, so a
+    shared client would collect cookies from every supplier CDN the server ever
+    fetched from and hold them for the life of the process. The jar is
+    domain-scoped, so nothing would have been *sent* to an AutoDS upstream; the
+    cost is state that grows without bound and a posture claim that was only
+    true in one direction. Two clients, each with one job.
     """
     tools = build_tools(registry.list_operations(), playbooks)  # D5 + RD-100 lints run here.
     validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
@@ -484,6 +553,14 @@ def _build_server(
         name = params.name
         arguments = params.arguments or {}
         user_context: UserContext | None = None
+        # Resolved up front rather than beside the dispatch below, because
+        # ``emit`` reads it: the rate-limit and invalid-argument lines are
+        # emitted before any dispatch would have run, and they have to carry the
+        # same ``include_images`` field as the success line or the documented
+        # reading of that field ("absent means the tool does not offer it")
+        # stops being true on every failed call. A registry lookup by name, with
+        # no side effects.
+        operation = registry.get(name)
         # Whether the F2 audit line for this call has already been emitted, so
         # the catch-all below doesn't emit a second one for the same call.
         audited = False
@@ -510,6 +587,12 @@ def _build_server(
                 upstream_status=upstream_status,
                 latency_ms=latency_ms,
                 error_type=error_type,
+                # Computed here rather than passed in, so that every exit from
+                # this handler carries it without each call site remembering to.
+                # ``None`` — the field omitted — means this tool does not offer
+                # the flag at all, which is what makes a logged ``false`` mean
+                # "offered and declined".
+                include_images=_include_images(operation, arguments) if _offers_base64(operation) else None,
             )
 
         # mcp 1.x's ``call_tool`` decorator caught every handler exception and
@@ -592,8 +675,8 @@ def _build_server(
                 # forwarded one, and the envelope it returns is
                 # indistinguishable. The handler registry is closed (the boot
                 # lint rejects any other value), so this can't become an
-                # arbitrary dispatch table.
-                operation = registry.get(name)
+                # arbitrary dispatch table. (``operation`` itself is resolved at
+                # the top of the handler — the audit line needs it earlier.)
                 if operation is not None and operation.handler == HANDLER_PLAYBOOK:
                     result = _playbook_result(playbooks, name, arguments)
                 else:
@@ -648,6 +731,7 @@ def _build_server(
             latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
             if result.ok:
+                wants_images = _include_images(operation, arguments)
                 emit(
                     upstream_url=result.upstream_url or None,
                     upstream_status=result.status,
@@ -679,12 +763,13 @@ def _build_server(
                 if hint is not None:
                     payload[PLAYBOOK_KEY] = hint
                 thumbnails = None
-                if images is not None and _include_images(operation, arguments):
+                if images is not None and wants_images:
                     thumbnails = await _attach_thumbnails(
                         images,
-                        http_client=dispatcher_http_client,
+                        http_client=image_client,
                         timeout_seconds=settings.image_fetch_timeout_seconds,
                         max_bytes=settings.image_fetch_max_bytes,
+                        deadline_seconds=settings.image_fetch_deadline_seconds,
                         tool_name=name,
                     )
                 return _success_result(payload, thumbnails)
@@ -754,6 +839,7 @@ def build_runtime(
     settings: Settings,
     *,
     http_client: httpx.AsyncClient | None = None,
+    image_client: httpx.AsyncClient | None = None,
     redis: Redis | None = None,
     rate_limiter: RateLimiter | None = None,
     mixpanel: MixpanelClient | None = None,
@@ -763,6 +849,9 @@ def build_runtime(
 
     ``http_client`` lets callers (tests) inject an upstream client backed by a
     mock transport; production passes ``None`` and gets the default client.
+    ``image_client`` is the same seam for the RD-92 thumbnail path, which has
+    its own client (see ``create_image_client``) rather than sharing the
+    dispatcher's.
     ``redis`` / ``rate_limiter`` are likewise injectable for tests — production
     passes ``None`` and the limiter is built from ``settings`` (Redis-backed
     when ``REDIS_URL`` is set, in-process otherwise). ``mixpanel`` /
@@ -806,6 +895,7 @@ def build_runtime(
     instructions = build_instructions(manifests, playbook_index=build_playbook_index(playbooks))
     assert_instructions_within_limit(instructions)
     http_client = http_client or create_http_client()
+    image_client = image_client or create_image_client()
     redis = redis if redis is not None else create_redis(settings)
     rate_limiter = rate_limiter or build_rate_limiter(settings, redis)
     dispatcher = OperationDispatcher(registry, settings, http_client)
@@ -830,7 +920,7 @@ def build_runtime(
         mixpanel,
         instructions,
         settings,
-        http_client,
+        image_client,
     )
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
@@ -844,6 +934,7 @@ def build_runtime(
         session_manager=session_manager,
         dispatcher=dispatcher,
         http_client=http_client,
+        image_client=image_client,
         rate_limiter=rate_limiter,
         redis=redis,
         mixpanel=mixpanel,
@@ -879,8 +970,14 @@ async def mcp_lifespan(runtime: McpRuntime) -> AsyncIterator[None]:
         finally:
             await runtime.mixpanel.drain()  # flush in-flight tracking (best effort)
             await runtime.http_client.aclose()
+            await runtime.image_client.aclose()
             if runtime.redis is not None:
                 await runtime.redis.aclose()
+            # RD-92's decode pool is process-wide rather than per-runtime, so it
+            # is dropped here rather than owned by McpRuntime. Non-blocking: a
+            # thumbnail is never worth delaying shutdown, and the graceful
+            # window belongs to in-flight tool calls.
+            shutdown_encoders()
 
 
 def mount_mcp(app: FastAPI, runtime: McpRuntime) -> None:

@@ -148,12 +148,20 @@ def assert_images_usable(operation: ManifestOperation) -> None:
 def _items(data: Any, block: ImagesBlock) -> list[Any]:
     """The items an ``images`` block addresses, in payload order.
 
-    An omitted ``item_path`` means the root payload *is* the single item, which
-    is the shape a by-id read returns. Otherwise the path is resolved and each
-    match that is itself a list is flattened one level — ``"results"`` resolves
-    to the results list, not to its elements.
+    An omitted ``item_path`` means the root payload *is* the item, which is the
+    shape a by-id read returns. A root that arrives as a **list** is taken as
+    the items themselves rather than as nothing: several AutoDS reads answer
+    with either a bare object or a one-element list for the same request (see
+    the ``/users/list/`` gotcha), and returning ``[]`` for the list form would
+    mean no pictures at all, silently, for a payload that plainly has them.
+
+    Otherwise the path is resolved and each match that is itself a list is
+    flattened one level — ``"results"`` resolves to the results list, not to its
+    elements.
     """
     if not block.item_path:
+        if isinstance(data, list):
+            return [item for item in data if item is not None]
         return [data] if isinstance(data, dict) else []
     found: list[Any] = []
     for match in resolve_path(data, block.item_path):

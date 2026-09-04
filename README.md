@@ -183,8 +183,9 @@ All settings come from environment variables. See
 | `REDIS_URL` | yes in non-local | Shared Redis backing the per-user rate limiter (`redis://` / `rediss://`). Unset in local falls back to an in-process limiter |
 | `RATE_LIMIT_PER_MINUTE` | no (default `60`) | Per-user token-bucket ceiling; `0` disables this bucket |
 | `RATE_LIMIT_PER_HOUR` | no (default `1000`) | Per-user token-bucket ceiling; `0` disables this bucket |
-| `IMAGE_FETCH_TIMEOUT_SECONDS` | no (default `5`) | Per-image timeout on the opt-in base64 thumbnail path (`include_images: true`). Bounds work done against supplier CDNs on the tool-call path |
+| `IMAGE_FETCH_TIMEOUT_SECONDS` | no (default `5`) | Per-**operation** timeout on the opt-in base64 thumbnail path (`include_images: true`), passed to httpx. On a streamed body its read timeout restarts on every chunk, so this does **not** bound how long a download lasts — that is the deadline below |
 | `IMAGE_FETCH_MAX_BYTES` | no (default `8000000`) | Per-image byte ceiling before decoding — refuses an absurd original rather than second-guessing a legitimate 900 KB PNG. The image cap itself (20 × 252 px) is **not** configurable |
+| `IMAGE_FETCH_DEADLINE_SECONDS` | no (default `15`) | Wall-clock bound on the whole thumbnail pass, across every image in one call. The only limit on how long a caller waits; images still in flight when it passes are dropped, and the short-set note says so |
 | `MIXPANEL_TOKEN` | no | Mixpanel project token for the tool-call event. Unset → analytics disabled (the local default) |
 | `SENTRY_URL` | no | Self-hosted Sentry DSN (`https://<key>@sentry.autods.com/<id>`). Unset (or `MCP_ENV=local`) makes Sentry init a no-op. Delivered via External Secrets in staging/prod |
 | `SENTRY_ENVIRONMENT` | no (default `MCP_ENV`) | Sentry environment tag. The release is derived from `__version__` in code, not an env var |
@@ -534,9 +535,46 @@ Opt-in base64 is the fourth piece and exists for a different reader. When the
 chart, a watermark, a collage of unrelated items), `include_images: true`
 attaches `ImageContent` blocks — fetched, downscaled to 252 px by resampling and
 re-encoded server-side, capped at 20, with a note whenever the set came back
-short. It is off by default everywhere, absent entirely on `list_products`
-(half those images have no small variant to fetch), and priced in its own
-parameter description: 81 vision tokens per image, ~1,620 for a full set.
+short. It is priced in its own parameter description: 81 vision tokens per
+image, ~1,620 for a full set, and again on every later turn, because the blocks
+stay in the conversation once attached.
+
+One tool offers it — `get_product_by_id` — and it defaults to off there. The
+discovery grids withhold it: a result set is something the *user* picks from,
+which the widget does at no token cost, so the flag would mostly buy a model
+that sets it out of habit. `list_products` withholds it for its own reason (half
+those images have no small variant to fetch).
+
+This is the one path that does real work in the request process, so it is
+bounded for the pod's sake rather than the picture's. Decoding drafts before it
+loads (libjpeg decodes straight to a reduced size, so the full-resolution buffer
+is never allocated), refuses a frame that would still decode to more than 25M
+pixels before any buffer exists, aborts a download the moment it passes
+`IMAGE_FETCH_MAX_BYTES` instead of measuring one that already finished, and runs
+in a private four-thread pool so concurrent calls cannot multiply into the
+container's memory limit. Downloads pass through a second, process-wide gate for
+the same reason the decode pool is process-wide: a per-call limit is multiplied
+by however many callers opt in at once, and each download in flight is holding
+its bytes in memory while it waits for a decode slot.
+
+The pass is also bounded on the clock, by `IMAGE_FETCH_DEADLINE_SECONDS`. That
+is a separate knob from the per-image timeout and not a redundant one:
+`IMAGE_FETCH_TIMEOUT_SECONDS` is httpx's per-operation bound, and because the
+body is streamed its read timeout restarts on every chunk — a host sending a
+little data at a time never trips it. The deadline is shared by every image in
+the call and is absolute, so a slow host costs its own picture rather than the
+answer.
+
+It is also bounded in *where* it will connect. The server fetches only from the
+origins the widget's CSP already declares, re-checked on every redirect hop, so
+an in-cluster fetch driven by scraped supplier data can never be pointed
+somewhere the sandboxed browser fetch could not go. Those fetches use their own
+HTTP client, not the one the dispatcher forwards on — httpx keeps a cookie jar
+per client and files every response's cookies into it, and supplier CDNs are not
+somewhere to accumulate state on the client the AutoDS upstreams share.
+
+A frame that trips any of these is dropped like any other failure, with its URL
+still in the response and the short-set note saying so.
 
 The text and `structuredContent` path stays correct on its own. Claude Code,
 Cursor and MCP Inspector render no widget, and Claude Desktop over a *remote*

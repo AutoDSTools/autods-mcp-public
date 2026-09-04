@@ -167,9 +167,15 @@ def make_mcp_app(jwks_client: JWKSClient) -> Callable[..., tuple[FastAPI, McpRun
         rate_limiter: RateLimiter | None = None,
         identity_resolver: object | None = None,
     ) -> tuple[FastAPI, McpRuntime]:
-        client = (
-            httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler)) if upstream_handler is not None else None
-        )
+        # One mock transport behind two clients, mirroring production: the
+        # dispatcher forwards on one and the RD-92 thumbnail path fetches
+        # supplier CDNs on the other. Sharing the transport is what lets a
+        # single handler answer both an upstream call and the image URLs that
+        # call returned; sharing the *client* is what production deliberately
+        # does not do, so the fixture does not either.
+        transport = httpx.MockTransport(upstream_handler) if upstream_handler is not None else None
+        client = httpx.AsyncClient(transport=transport) if transport is not None else None
+        images = httpx.AsyncClient(transport=transport, follow_redirects=False) if transport is not None else None
         # Identity resolution (RD-63) is orthogonal to the transport tests, so it
         # defaults to a no-op resolver here — it must not issue its own upstream
         # ``get_current_user`` call and skew per-test upstream-call assertions.
@@ -177,6 +183,7 @@ def make_mcp_app(jwks_client: JWKSClient) -> Callable[..., tuple[FastAPI, McpRun
         runtime = build_runtime(
             settings,
             http_client=client,
+            image_client=images,
             rate_limiter=rate_limiter,
             identity_resolver=identity_resolver or _NoopIdentityResolver(),  # type: ignore[arg-type]
         )

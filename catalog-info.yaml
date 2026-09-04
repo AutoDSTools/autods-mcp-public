@@ -41,6 +41,23 @@
 # the day a catalogued consumer appears — an AutoDS service or frontend calling
 # this server — and declare the API entity then. The protocol surface itself is
 # documented in this repository's README.
+#
+# NO VENDOR API ENTITY FOR THE SUPPLIER IMAGE FETCH (RD-92) — a judgement, not
+# an omission, and worth recording because the shape changed. This server now
+# makes outbound requests of its own, to the product-image hosts the widget
+# sandbox already allows: the first calls it issues that are neither a caller's
+# forwarded token to an AutoDS upstream nor the analytics ingestion below. They
+# still carry no credential of any kind, so the description's claim above holds
+# unchanged. They earn no `kind: API` because there is nothing for one to
+# describe: an image object fetched over a plain GET, from an allowlist of host
+# families that lives in the server's own code and follows whichever CDNs the
+# suppliers happen to use. One stub entity per host family would describe "an
+# image, by URL" repeatedly and go stale the first time a supplier moves. The
+# Mixpanel entity below is the contrast, and is why the rule reads as it does:
+# one vendor, one product we integrate with, an account and an SDK — an edge
+# worth drawing. Revisit if this server ever calls a vendor's real API (an
+# image-resizing or image-analysis product, say): that is the § 2 shape,
+# prefixed per caller, and it gets an entity.
 # =============================================================================
 apiVersion: backstage.io/v1alpha1
 kind: Component

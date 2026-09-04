@@ -102,7 +102,8 @@ Module map (`src/autods_mcp_server/`):
   row per host family (rewrite rules + the CSP origins the widget sandbox
   needs). Measured in RD-82; pinned by `tests/mcp_server/test_image_rewrites.py`.
 - `image_fetch.py` — the opt-in base64 path: fetch, downscale to 252 px with
-  Pillow, re-encode. Best-effort per image, and never fails the tool call.
+  Pillow, re-encode. Best-effort per image, and never fails the tool call. Owns
+  its own HTTP client (`create_image_client`), separate from the dispatcher's.
 - `widgets/` — RD-92's MCP Apps. `__init__.py` is the registry (`ui://autods/…`
   URIs, the `text/html;profile=mcp-app` mime type, the `_meta.ui` blocks);
   `product_grid.html` / `product_card.html` are hand-written, self-contained
@@ -258,11 +259,28 @@ same rule and same reason as `business_error` and `playbook`:
    `original_image_url` is deliberately never listed: it is the un-edited
    original and would misrepresent what is actually listed.
 3. **`base64` is three-valued, because the surfaces need three.** `"opt_in"`
-   offers `include_images` defaulting off (every research surface); `"off"`
-   withholds the parameter entirely (`list_products`, where ~51% of images sit in
-   the scraper bucket with no small variant, so the model would be handed
-   full-size originals); `"default_on"` is reserved for the one shape where the
-   *model* must judge the picture rather than the user choosing from a set.
+   offers `include_images` defaulting off; `"off"` withholds the parameter
+   entirely; `"default_on"` is reserved for the one shape where the *model* must
+   judge the picture rather than the user choosing from a set.
+
+**Exactly one tool offers the base64 opt-in: `get_product_by_id`.** The four
+discovery grids shipped with `"opt_in"` and were changed to `"off"`, which is a
+decision worth not quietly reverting. Every one of them returns a *set the user
+picks from* — the case the widget serves at zero vision tokens — so the flag
+there mostly buys a model that sets it out of habit and pays ~1,620 vision
+tokens, on that turn and on every turn after it, since the blocks stay in the
+conversation. Judging a picture is a per-product act, so it lives on the
+per-product read. `list_products` is `"off"` for a different reason (~51% of its
+images are scraper-bucket originals with no small variant). Turn a grid back on
+when there is a surface whose whole job is comparing images — RD-95's
+`search_1688_offers_by_image` is that surface, and it is the one place
+`"default_on"` may be right. `test_include_images_is_advertised_only_where_there_is_an_image_surface`
+asserts the set, so a change here fails loudly rather than drifting.
+
+Whenever a tool's `base64` changes, its `notes` change with it: the sentence
+telling the model to set `include_images` is a *phantom parameter* the moment
+the schema stops offering it, which is the same class of bug as the phantom
+filter fields above.
 
 **`include_images` is synthetic and has to be in exactly two places.** It is
 ours, not the upstream's. It is injected into the tool `inputSchema` — which is
@@ -272,6 +290,56 @@ descriptor alone would get the call rejected before the dispatcher ran. And it
 must never reach upstream, which `dispatch._build_request` already guarantees by
 reading only declared parameters and `body`; that guarantee is passive, so
 `test_image_base64.py` pins both halves.
+
+**Decoding is bounded for the pod's sake, not the picture's.** The base64 path
+is the only place this server does real CPU and memory work in the request
+process — one uvicorn worker (no `--workers`), 1300m CPU, 3150Mi memory — so the
+guards are about not evicting the process that serves everyone else. Six of
+them, all load-bearing, all invisible when removed:
+
+- **`draft()` before `load()`.** libjpeg decodes straight to a reduced size in
+  the DCT domain, so the full-resolution buffer never exists. Measured, batch of
+  20 6000×6000 JPEGs: 1452 ms / +1497 MB RSS before, 303 ms / no measurable
+  growth after, byte-identical output. The ordering is the whole trick — convert
+  or `load()` first and `thumbnail()`'s own internal draft has nothing left to
+  save. Pinned by `test_a_batch_of_large_jpegs_never_materialises_a_full_size_buffer`,
+  which runs a batch in a subprocess and reads its peak RSS, because nothing else
+  can see the difference.
+- **`MAX_DECODE_PIXELS` (25M), read *after* the draft.** `max_bytes` bounds the
+  wire and RSS scales with *pixels*: a measured 6.17 MB JPEG was 10000×10000 and
+  cost 383 MB to decode alone. Reading it after the draft is what keeps the cheap
+  case cheap — a 6000×6000 JPEG reports the ~750 px frame it will decode to and
+  passes, while a PNG of the same dimensions is refused, because that one really
+  does allocate. Checking the published dimensions rejects both. A constant
+  rather than a setting, same reasoning as the 20 × 252 cap — raising it by
+  config is a way to OOM the pod, not to tune it.
+- **A private `_DECODE_WORKERS` pool.** `_CONCURRENCY` bounds one *call*; nothing
+  bounds how many calls opt in at once, so a per-call limit multiplies. It also
+  keeps image work out of `asyncio.to_thread`'s default executor, which sizes
+  itself from `os.cpu_count()` (the *node's* CPUs inside a container — measured
+  32 against a 1300m quota) and is shared with the Mixpanel sends.
+- **Streamed download.** Reading `.content` and then checking its length is a
+  report, not a limit: the body is already resident. `max_bytes` now stops the
+  transfer.
+- **`_MAX_CONCURRENT_FETCHES`, a process-wide gate in front of the per-call
+  `_CONCURRENCY`.** The decode pool's argument, applied to the bytes a download
+  holds rather than the pixels a decode allocates: `_CONCURRENCY` bounds one
+  call, and calls are what multiply. The decode pool makes it *worse* rather
+  than better — with four decodes running, a finished download waits for a slot
+  with its whole body resident, so buffers accumulate instead of turning over.
+  Twelve × the 8 MB default is ~96 MB, sitting beside the decode footprint.
+- **`deadline_seconds` (`IMAGE_FETCH_DEADLINE_SECONDS`), the only bound on
+  elapsed time.** `image_fetch_timeout_seconds` is httpx's *per-operation*
+  timeout and on a streamed body its read timeout restarts on every chunk, so a
+  host trickling bytes never trips it and holds the tool call open until
+  `max_bytes` — see the gotcha. The deadline is one *absolute* moment shared by
+  every image in the call, not a per-image bound (twenty images each finishing
+  just inside their own timeout is still twenty timeouts long), and it is
+  applied per task so the images that did land are kept.
+
+Pillow releases the GIL, so none of this blocks the event loop (measured p50
+0.1 ms scheduling lag on one core) — the risk was always CPU quota and RSS, not
+the loop.
 
 **The 20 × 252 px cap is a correctness bound, not a tuning knob**, which is why
 it is a constant and not a setting. RD-82 watched Claude Desktop keep 16 of 20
@@ -767,13 +835,58 @@ RD-50 :: Logging cleanup ::
   succeeded; the URLs, the text envelope and the widget are the contract and the base64
   blocks are an enhancement, so letting a slow CDN turn a good answer into
   `internal_error` (which the catch-all in `on_call_tool` would happily do) is strictly
-  worse. A short set always carries the note saying how many of how many landed.
-- **The image fetch reuses the dispatcher's HTTP client but never its posture** (RD-92).
-  One client to own and close, and the image request is built from scratch — no
-  `Authorization` header, ever, since these are public CDN objects. `follow_redirects`
-  is a *per-request* override there (CDNs use redirects for their size ladders), so the
-  client-level `False` that stops a forwarded bearer token leaking on a 3xx still
-  governs every upstream call. Don't promote that override to the client.
+  worse. A short set always carries the note saying how many of how many landed —
+  **including the bulk `except`**, which builds an empty `ThumbnailBatch` and falls
+  through to the same `attached` count and note rather than returning early. Returning
+  early is the tempting shape and it reintroduces the silent short set in the one branch
+  still able to reach it: a caller that asked for pictures, holding none, with nothing in
+  the payload saying why.
+- **The base64 path's decode guards protect the pod, not the image** (RD-92). `draft()`
+  before `load()`, the 25M-pixel header ceiling, the private decode pool and the streamed
+  download each look like an optimisation and each is a memory bound — see **Product
+  images** above for the measurements. The one that will get "cleaned up" is the draft
+  ordering, because reordering `_encode` leaves the output byte-identical; that is what
+  the subprocess peak-RSS test exists to catch.
+- **The base64 fetch is allowed exactly what the widget's CSP is allowed, and the check
+  runs per redirect hop** (RD-92). `is_allowed_origin` is built from
+  `resource_domains()` — the same list `_meta.ui.csp.resourceDomains` declares — so the
+  in-cluster fetch is never looser than the sandboxed browser one, and there is one list
+  rather than two that drift. It is deliberately **not** `family_of`, which is the
+  obvious reuse and is unsafe here: its host tests are substring matches (`"alicdn" in
+  host`), so `alicdn.attacker.example` matches. That is fine for picking a rewrite rule
+  and wrong for deciding what a pod may open a connection to. Matching follows CSP
+  semantics — exact host, or `*.` against subdomains **only, never the apex** — with the
+  scheme compared too. And `follow_redirects` is `False` on this path with the hops
+  walked by hand, because an allowlist applied once to the URL we were handed is undone
+  by the first `Location:` header; a supplier CDN is entitled to redirect, not to choose
+  what this process connects to. A miss is the long tail (~59 host families in RD-82's
+  store-quote sample) and degrades to no thumbnail, exactly as the CSP already does.
+- **`include_images` is on the audit line, and that is the only way to see it** (RD-92).
+  The Mixpanel event carries the endpoint and nothing else, so without the `tool_call`
+  field there is no way to answer "do models set this because they must judge a picture,
+  or out of habit?" — which is the question the whole opt-in rests on. It is logged only
+  for tools that offer the flag, so **absent ≠ declined** — and that reading only holds
+  if the field appears on *every* exit from the handler, not just the successful one:
+  a failed call on a tool that does offer it would otherwise read exactly like a tool
+  that does not. So `emit` computes it from `operation` + `arguments` itself rather than
+  taking it as an argument, which is also why `operation` is resolved at the top of
+  `on_call_tool` instead of beside the dispatch. `thumbnails_attached` is a separate
+  line rather than more fields on `tool_call`, because the audit line is emitted before
+  the fetch happens and "exactly one `tool_call` line per call" is worth keeping — and
+  it carries `elapsed_ms`, which is the *only* record of how long the thumbnail pass
+  took, since `tool_call`'s `latency_ms` stops at the upstream response.
+- **The image fetch has its own HTTP client, and that is not tidiness** (RD-92). It
+  started as the dispatcher's — the image request is built from scratch with no
+  `Authorization` header, so sharing looked free. It is not: httpx keeps a cookie jar
+  **on the client** and files every response's `Set-Cookie` into it whatever the request
+  asked for, so one shared client collects a cookie from every supplier CDN the server
+  ever fetches and holds it for the life of the process. The jar is domain-scoped, so
+  nothing would ever have been *sent* to an AutoDS upstream — the cost is unbounded
+  state on the client the upstreams use, and a "no credentials of any kind" claim that
+  only held on the way out. `create_image_client` sets `follow_redirects=False` at the
+  client level too, because this path walks hops by hand to re-check each origin and a
+  client-level `True` would make forgetting the per-request override silently unsafe.
+  Both clients are closed by `mcp_lifespan`; don't merge them back.
 - **OpenTelemetry stays inert** (RD-99): mcp 2.x hard-depends on `opentelemetry-api`
   and instruments its request path, but with no `opentelemetry-sdk` installed the API
   hands back non-recording spans — nothing is collected or exported, and Sentry remains
@@ -1169,6 +1282,41 @@ production incident; don't undo the guard without understanding why it's there.
   HTML files. And if a host uses a channel the search does not reach, the widget prints
   which methods it *did* see instead of rendering an empty box — which turns the silent
   blank this whole ticket is about into a one-line bug report.
+- **`PIL.Image.DecompressionBombError` subclasses `Exception` directly, so the obvious
+  except tuple misses it — and one 68-byte response then wipes out a whole batch**
+  (RD-92). Not `OSError`, not `ValueError`. `_encode`'s handler originally listed
+  `(UnidentifiedImageError, OSError, ValueError)` with a comment claiming it covered the
+  bomb guard; it did not. Uncaught, it escaped `_encode`, propagated through the
+  `asyncio.gather` in `fetch_thumbnails` (which had no `return_exceptions`) and was
+  swallowed by the bulk `except Exception` in `_attach_thumbnails` — so a single hostile
+  image dropped **every** thumbnail in the call, left `images["attached"]` unset, and
+  emitted no note, which is precisely the silent-short-set failure RD-82 caught the
+  *client* committing. Pillow decides how much to allocate from the image header, so the
+  attacker's payload is 68 bytes of PNG with big numbers in the IHDR. Both halves of the
+  fix are load-bearing: name the exception, and keep `return_exceptions=True` so one bad
+  frame costs one thumbnail.
+- **An httpx timeout does not bound a streamed download, and on this path nothing else
+  did either** (RD-92). `timeout=5` looks like "five seconds for this request" and is
+  actually "five seconds for the next I/O operation": with `aiter_bytes()` the read
+  timeout restarts on *every chunk*, so a host that sends a little data every few
+  seconds never trips it and keeps the tool call open until `max_bytes` — which at that
+  rate is effectively never. Everything else on this path bounds a *quantity* (bytes,
+  pixels, decode workers, redirect hops) and none of them bounds elapsed time, so a
+  single slow supplier could hold up the answer indefinitely with no error anywhere.
+  `IMAGE_FETCH_DEADLINE_SECONDS` is the bound; it is one absolute moment shared by the
+  whole batch and applied per task, so a slow image costs its own picture and the ones
+  that landed are kept. Don't "simplify" it into a per-image timeout — that is what
+  `IMAGE_FETCH_TIMEOUT_SECONDS` already is, and per-image bounds do not add up to a
+  batch bound.
+- **httpx files response cookies into the *client's* jar, so a shared client accumulates
+  state from everywhere it has ever been** (RD-92). `Client.send` calls
+  `self.cookies.extract_cookies(response)` unconditionally — there is no per-request way
+  off it. The base64 path originally reused the dispatcher's client on the reasoning that
+  it never *sends* anything sensitive to a CDN, which was true and was only half the
+  question: every supplier CDN's `Set-Cookie` was landing in the jar of the client the
+  AutoDS upstreams forward on, growing for the life of the process. The jar is
+  domain-scoped so nothing crossed over, which is exactly why nothing would ever have
+  reported it. Two clients now, `create_image_client` for images; don't merge them.
 - **`resourceDomains` is an allowlist and the long tail is irreducible** (RD-92). RD-82's
   store-quote sample had 59 host families across 70 images, most of them merchant
   self-hosts; `list_products` is ~97% covered by the declared origins and marketplace

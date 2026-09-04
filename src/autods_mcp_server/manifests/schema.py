@@ -85,8 +85,9 @@ class ImagesBlock(BaseModel):
     the decision cannot quietly rot.
 
     * ``item_path`` addresses the list of items (``"results"``). Omitted ⇒ the
-      root payload object is the single item, which is what a by-id read
-      returns.
+      root payload is the item, which is what a by-id read returns — as a bare
+      object, or as a list, since several AutoDS reads answer the same request
+      either way.
     * ``image_paths`` are tried **in order per item, first match wins**: a
       product carries several plausible image fields and they are not equally
       good. ``original_image_url`` is deliberately never listed — it is the

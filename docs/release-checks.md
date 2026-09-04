@@ -794,8 +794,19 @@ result in the same order. Grade three things:
 
 Then `get_product_by_id` on one of those `_id`s → `widget: "product-card"` and up
 to 8 images on the single item. And `list_products` on P2's store →
-`widget: "product-grid"`, with `include_images` **absent** from that tool's
-schema (it is withheld there on purpose).
+`widget: "product-grid"`.
+
+Also check **where the base64 opt-in is offered**, which is one tool and no
+others: `include_images` is in `get_product_by_id`'s schema and **absent** from
+every grid — `search_products`, `get_winning_products`, `get_similar_products`,
+`get_recommended_products` and `list_products`. Finding it on a grid means the
+withdrawal was reverted; a grid is something the user picks from, and the widget
+already does that at no token cost. Then call `get_product_by_id` again with
+`include_images: true` and confirm image blocks come back with an `attached`
+count in the envelope — if `attached` is 0 or well short of the gallery, say so
+and quote the note: on a live host that most likely means the product's images
+sit on an origin outside the CSP allowlist, which the server now declines to
+fetch as well.
 
 *R15.2 — the rendering (human, claude.ai web only).* Hand this over; it cannot be
 automated and it is the only check that sees what a user sees. In **claude.ai

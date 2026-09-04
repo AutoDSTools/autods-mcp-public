@@ -172,6 +172,14 @@ class Settings(BaseSettings):
     # legitimate 900 KB PNG — RD-82 measured plenty of those in the scraper
     # bucket, and they downscale to a few KB.
     image_fetch_max_bytes: int = Field(default=8_000_000, validation_alias="IMAGE_FETCH_MAX_BYTES")
+    # How long the whole thumbnail pass may take, across every image in one
+    # call. NOT derivable from the per-image timeout above: that one is httpx's
+    # per-operation bound, and on a streamed body its read timeout restarts on
+    # every chunk, so a host trickling bytes never trips it. This is the only
+    # bound on how long a caller waits. The default is deliberately well under
+    # an MCP client's own patience — a late picture is worth nothing, and the
+    # answer itself is already built by the time this runs.
+    image_fetch_deadline_seconds: float = Field(default=15.0, validation_alias="IMAGE_FETCH_DEADLINE_SECONDS")
 
     # Self-hosted Sentry DSN (``https://<key>@sentry.autods.com/<id>``),
     # delivered via External Secrets in staging/prod and unset locally. Kept

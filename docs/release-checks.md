@@ -31,11 +31,19 @@ Claude drives everything else to a report without asking again.
 |---|---|---|
 | **C1** — fresh browser authorization | ✅ only they can | ❌ never |
 | **W** — go-ahead + *which* store | ✅ describes it | ❌ never chooses one |
+| **R15** — does the product grid actually render | ✅ only they can see it | ❌ reads nothing |
 | Everything else — S, P, C2–C9, R, W execution, O, the report | | ✅ |
 
-Only those two need a person. Observability (O) is automatable given the
+Only those three need a person. Observability (O) is automatable given the
 connectors and AWS credentials listed in that section — check they're present,
 don't assume.
+
+R15 is the odd one out and worth understanding rather than skipping. A widget is
+HTML rendered in *the host's* sandbox under *the host's* policy; nothing in this
+repository, and no MCP client Claude can drive, ever executes it. Every failure
+mode it has is silent — a blank strip, cells that never load, a policy that came
+back empty — so a person looking at a claude.ai web conversation is the only
+instrument there is.
 
 ### The opening round (ask once, then stop asking)
 
@@ -113,6 +121,7 @@ environment a call lands in. Before the first tool call:
 | 3 | **C3–C9** — handshake payload | `make release-checks-c` (shell) | nothing |
 | 4 | **P** — account readiness | Claude, MCP | which of R/W can run at all |
 | 5 | **R** — reads | Claude, MCP | W |
+| 5b | **R15.2 / R16** — widget rendering | human, at claude.ai web | nothing |
 | 6 | **W** — writes | Claude, MCP, gated | nothing |
 | 7 | **O** — observability | mixed | nothing |
 
@@ -573,6 +582,20 @@ genuinely zero and when the balance source didn't answer inside the timeout, and
 response cannot tell the two apart. Either way, treat a later insufficient-credits
 refusal as an account gap, not a release regression.
 
+**P9 — A client that renders widgets.** The only fixture in P that is not an
+account property: R15.2 needs a **claude.ai web** session with this environment's
+connector added, and nothing Claude can drive substitutes for it. Establish it
+here rather than discovering it at R15 — ask once, alongside C1, whether the human
+has that session open (C1 normally leaves them signed in on web anyway, which is
+why this costs nothing).
+*Fixture:* whether R15.2 and R16 can run at all.
+*If not available:* R15.2 and R16 are `skipped (no widget-rendering client)`, and
+the report says the rendering path is unverified for this release. R15.1 still
+runs and still grades the data.
+*Note it if* the only client to hand is Claude Desktop over a remote connector or
+Claude Code — neither renders a widget, so "no grid appeared" there is the
+documented behaviour and not a finding.
+
 ---
 
 ## R — Read paths (the operations users actually run)
@@ -749,6 +772,73 @@ somewhere in R12's tree. If it does not, the ids a product reports and the ids
 `get_categories` hands out have diverged, and an agent following the documented route —
 tree first, then filter — is quietly working from a vocabulary the catalog no longer
 uses, even while R12 and R13 both pass on their own.
+
+**R15 — Product images: the block, and then the picture.** Two halves, and only
+the first is Claude's.
+
+*R15.1 — the envelope (Claude).* Re-use R13.2's Marketplace search result. Beside
+`data` there must be an `images` block with `kind: "autods.images/1"`,
+`widget: "product-grid"`, a `shown`/`total` pair, and one `items` entry per
+result in the same order. Grade three things:
+
+- **the URLs are rewritten where they can be.** A `cdn.shopify.com` URL ends
+  `width=256`, an `ae01.alicdn.com` one ends `_220x220.jpg`, an
+  `m.media-amazon.com` one carries `._SS256_.`. A URL from
+  `autods-scraper-images…amazonaws.com` or a merchant self-host is expected
+  **unchanged** — that is not a fault, it is a host with no small variant.
+- **`shown` ≤ 20 and a truncated set says so.** If `total` > `shown` there must be
+  a `note` naming both numbers. A short set with no note is the exact bug this
+  ticket exists to prevent.
+- **`data` is untouched.** The full-size URLs are still where the upstream put
+  them; the block is a sibling, never a rewrite of the payload.
+
+Then `get_product_by_id` on one of those `_id`s → `widget: "product-card"` and up
+to 8 images on the single item. And `list_products` on P2's store →
+`widget: "product-grid"`, with `include_images` **absent** from that tool's
+schema (it is withheld there on purpose).
+
+*R15.2 — the rendering (human, claude.ai web only).* Hand this over; it cannot be
+automated and it is the only check that sees what a user sees. In **claude.ai
+web** with the connector added, ask *"search the AutoDS Marketplace for phone
+holders"* and look at the answer.
+
+- A **thumbnail grid** with pictures in it → pass. Say roughly how many cells
+  loaded; a few placeholders in the long tail are expected.
+- A **thin blank strip** → the host left the frame at its ~150 px default. The
+  widget's size notification is not arriving (or `initialized` was announced
+  before the `ui/initialize` response, which has the same symptom).
+- A box reading **"No product payload reached this widget"** → the document
+  rendered and ran, but nothing tagged `autods.images/1` arrived. It prints the
+  host methods it *did* see: quote that line, it names the channel.
+- **Every cell "image unavailable"** → the sandbox is blocking the loads; the CSP
+  is not reaching the host from the `resources/read` response.
+- **No widget at all, raw JSON instead** → expected in Claude Code, Cursor and
+  MCP Inspector, and expected in Claude **Desktop over a remote connector**.
+  Only claude.ai web is a pass/fail here. Note which client was used.
+
+*If R15.2 cannot be run* (no browser, no web session): `skipped`, and say plainly
+that the rendering path is unverified for this release — R15.1 passing proves the
+data is right and proves nothing about the picture.
+
+*Three things declared but never verified against a live host, worth a line in the
+report either way:* the scraper bucket
+`autods-scraper-images.s3-us-west-2.amazonaws.com` (51% of `list_products` images
+and not among the five hosts RD-82 tested); the wildcard origin forms
+(`https://*.ttcdn-us.com` and friends); and whether that bucket's `Content-Type:
+image/jpeg` on genuine **PNG** bytes breaks an `<img>` (it should not — browsers
+sniff images, and `nosniff` only requires `image/*` — but it has never been
+confirmed in a host's sandbox). One `list_products` grid answers all three at
+once: if its scraper-bucket cells load, record it. That is what keeps the
+Content-Type mismatch a cosmetic ticket in another repository rather than a
+blocker here.
+
+**R16 — The per-client widget matrix, on mcp 2.x.** The matrix in `CLAUDE.md` was
+measured on mcp 1.x and the 2.x handshake changed enough that carrying it forward
+is an assumption. On the first release that ships a widget, run R15.2's prompt in
+each client available and record the row with the client version and the date:
+claude.ai web (remote connector), Claude Desktop (remote connector), Claude
+Desktop (local stdio), Claude Code. Then update the matrix. This is a one-off, not
+a per-release check — once recorded, drop R16 from the run.
 
 ---
 
@@ -1036,6 +1126,11 @@ An unattended run ends with four things, in this order:
 
 When W ran, state the store it wrote to (id, name, site) and what it created. A
 write section that reports only `pass` leaves nobody able to clean up.
+
+**R15.2 is never "implied" by R15.1.** If the rendering half was not run by a
+person in claude.ai web, the report says so in item 4 — "the product grid was not
+seen rendering" — however green R15.1 is. The data being right is not evidence
+that the picture appears, and every way it fails to appear is silent.
 
 Never report a `skipped` as a `pass`, and never describe a run as clean when section
 O went unchecked — analytics dying silently is precisely the failure O2 exists for.

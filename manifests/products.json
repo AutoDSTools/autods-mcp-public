@@ -320,12 +320,26 @@
       "has_json_body": true,
       "request_body_required": true,
       "is_top_typed_tool": false,
-      "notes": "Read-only POST. Queries products by filter and returns {results: [...]}. Filterable fields include title, tags, note, status, site_id, variations.price, variations.quantity, variations.inventory_status, variations.active_buy_item.price/site_id/region, error_list.error_type, created_date, upload_date, total_sold_count, views, watchers, etc. There is no top-level `region` field — the item's region is `variations.active_buy_item.region`. Enum-valued filter values take their INTEGER value, never the name — every allowed value is listed on the `filters[].value` schema of this tool. Filter by `id` with value_type `object_id` (each id is a 24-character hex string); multi-value ops (in/not_in) and value_type list/list_int put their values in `value_list`. Product objects are LARGE (variations, images, description, item_specifics): for listing/summary use cases ALWAYS pass `projection` (e.g. [\"title\",\"variations.price\",\"amount_of_variations\",\"total_sold_count\",\"item_id_on_site\",\"upload_date\"]) and/or a small `limit` — a full-object page of 100 can exceed ~80 KB and overflow response token limits.",
+      "notes": "Read-only POST. Queries products by filter and returns {results: [...]}. Filterable fields include title, tags, note, status, site_id, variations.price, variations.quantity, variations.inventory_status, variations.active_buy_item.price/site_id/region, error_list.error_type, created_date, upload_date, total_sold_count, views, watchers, etc. There is no top-level `region` field — the item's region is `variations.active_buy_item.region`. Enum-valued filter values take their INTEGER value, never the name — every allowed value is listed on the `filters[].value` schema of this tool. Filter by `id` with value_type `object_id` (each id is a 24-character hex string); multi-value ops (in/not_in) and value_type list/list_int put their values in `value_list`. Product objects are LARGE (variations, images, description, item_specifics): for listing/summary use cases ALWAYS pass `projection` (e.g. [\"title\",\"variations.price\",\"amount_of_variations\",\"total_sold_count\",\"item_id_on_site\",\"upload_date\"]) and/or a small `limit` — a full-object page of 100 can exceed ~80 KB and overflow response token limits.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the sell channel's CDN offers one — about half of them do, and the rest render at full size in a small cell, which costs bandwidth rather than tokens. A client that renders MCP Apps shows them as a thumbnail grid; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The block needs `main_picture_url` / `images` in the response, so a narrow `projection` that omits both leaves it empty; add `main_picture_url` to the projection when the pictures matter. There is deliberately no `include_images` base64 option on this tool: roughly half of these images have no small variant to fetch, so the model would be sent full-size originals to downscale.",
       "safe": true,
       "annotations": {
         "title": "List Products",
         "readOnlyHint": true,
         "destructiveHint": false
+      },
+      "images": {
+        "item_path": "results",
+        "image_paths": [
+          "main_picture_url.url",
+          "images.*.url",
+          "variations.*.main_picture_url.url"
+        ],
+        "per_item": 1,
+        "max": 20,
+        "label_path": "title",
+        "id_path": "id",
+        "widget": "product-grid",
+        "base64": "off"
       },
       "body_schema": {
         "type": "object",

@@ -76,6 +76,8 @@ from autods_mcp_server.identity import (
     SelfIdentityResolver,
     build_identity_resolver,
 )
+from autods_mcp_server.image_fetch import Thumbnail, fetch_thumbnails
+from autods_mcp_server.images import IMAGES_KEY, INCLUDE_IMAGES_ARG, extract_images
 from autods_mcp_server.logging import get_logger
 from autods_mcp_server.manifests import (
     ManifestRegistry,
@@ -94,6 +96,7 @@ from autods_mcp_server.manifests.playbooks import (
     render_playbook_payload,
     render_success_hint,
 )
+from autods_mcp_server.manifests.schema import ManifestOperation
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
 from autods_mcp_server.redis_client import create_redis
 from autods_mcp_server.sentry import (
@@ -104,6 +107,7 @@ from autods_mcp_server.sentry import (
 from autods_mcp_server.settings import Settings
 from autods_mcp_server.tools import build_tools
 from autods_mcp_server.urls import MCP_PATH
+from autods_mcp_server.widgets import WIDGET_MIME_TYPE, WIDGETS, csp_meta, widget_for_uri
 
 # Key under which the verified UserContext is stashed on the request scope's
 # state, to be read back inside the on_call_tool handler.
@@ -271,7 +275,64 @@ def _with_failure_hint(result: types.CallToolResult, hint: str | None) -> types.
     )
 
 
-def _success_result(payload: dict[str, Any]) -> types.CallToolResult:
+def _include_images(operation: ManifestOperation | None, arguments: dict[str, Any]) -> bool:
+    """Whether this call opted into base64 thumbnails (RD-92).
+
+    ``jsonschema`` validates against a ``default`` but never *applies* one, so
+    an omitted argument arrives as absent and the manifest's declared default is
+    resolved here. An operation with no ``images`` block, or one whose base64
+    path is withheld (``"off"``), can never opt in however the argument was
+    spelled — the parameter isn't in its schema in the first place.
+    """
+    block = operation.images if operation is not None else None
+    if block is None or block.base64 == "off":
+        return False
+    requested = arguments.get(INCLUDE_IMAGES_ARG)
+    if requested is None:
+        return block.base64 == "default_on"
+    return bool(requested)
+
+
+async def _attach_thumbnails(
+    images: dict[str, Any],
+    *,
+    http_client: httpx.AsyncClient,
+    timeout_seconds: float,
+    max_bytes: int,
+    tool_name: str,
+) -> list[Thumbnail]:
+    """Fetch base64 thumbnails for an ``images`` block and record what happened.
+
+    Mutates the block in place to add the count actually attached and, when the
+    set came back short, the sentence saying so — merged into the block's own
+    ``note`` so there is one place to read rather than two fields whose
+    relationship the caller has to work out.
+
+    Failures are swallowed on purpose. The tool call already succeeded; the
+    URLs, the text envelope and the widget path are the contract, and the base64
+    blocks are an enhancement. Letting a slow CDN turn a good answer into
+    ``internal_error`` would be a strictly worse trade, and the catch-all in
+    ``on_call_tool`` would do exactly that.
+    """
+    urls = [image["url"] for item in images.get("items", []) for image in item.get("images", [])]
+    try:
+        batch = await fetch_thumbnails(
+            http_client,
+            urls,
+            timeout_seconds=timeout_seconds,
+            max_bytes=max_bytes,
+        )
+    except Exception:  # noqa: BLE001 - see the docstring: never fail the call for a picture
+        _audit_logger.warning("thumbnail_attach_failed", tool_name=tool_name, requested=len(urls), exc_info=True)
+        return []
+    images["attached"] = len(batch.thumbnails)
+    notes = [note for note in (images.get("note"), batch.note) if note]
+    if notes:
+        images["note"] = " ".join(notes)
+    return batch.thumbnails
+
+
+def _success_result(payload: dict[str, Any], thumbnails: list[Thumbnail] | None = None) -> types.CallToolResult:
     """Wrap a dispatcher payload in the result shape clients have always seen.
 
     Through mcp 1.x the low-level ``call_tool`` decorator did this wrapping for
@@ -282,11 +343,18 @@ def _success_result(payload: dict[str, Any]) -> types.CallToolResult:
     It is the one place in the port where a change would be invisible — a
     reformat here (dropping ``indent=2``, say) alters every successful response
     with nothing raising anywhere — so ``test_transport`` pins it byte for byte.
+
+    ``thumbnails`` (RD-92) appends one ``ImageContent`` block per base64
+    thumbnail, after the text block. Empty or absent — which is every call that
+    did not opt in, i.e. effectively all of them — leaves the result byte-
+    identical to the pinned shape.
     """
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=json.dumps(payload, indent=2))],
-        structured_content=payload,
+    content: list[types.ContentBlock] = [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
+    content.extend(
+        types.ImageContent(type="image", data=thumbnail.data, mime_type=thumbnail.mime_type)
+        for thumbnail in thumbnails or []
     )
+    return types.CallToolResult(content=content, structured_content=payload)
 
 
 def _build_server(
@@ -296,6 +364,8 @@ def _build_server(
     rate_limiter: RateLimiter,
     mixpanel: MixpanelClient,
     instructions: str,
+    settings: Settings,
+    dispatcher_http_client: httpx.AsyncClient,
 ) -> Server:
     """Create the low-level MCP server with tool list/call handlers.
 
@@ -308,6 +378,13 @@ def _build_server(
     ``InitializeResult.instructions``, which clients surface in the model's
     system prompt — so passing it here is the whole delivery mechanism for that
     channel.
+
+    ``dispatcher_http_client`` is the *same* client the dispatcher forwards on,
+    reused by the RD-92 base64 path so there is one client to own and close.
+    Safe because the image request is built from scratch — no ``Authorization``
+    header, ever — and because ``follow_redirects`` is a per-request override
+    there: the client-level ``False`` that stops a forwarded bearer token
+    leaking on a 3xx still applies to every upstream call.
     """
     tools = build_tools(registry.list_operations(), playbooks)  # D5 + RD-100 lints run here.
     validator_by_name = _build_validators(tools)  # Compiles + boot-checks each inputSchema.
@@ -318,13 +395,27 @@ def _build_server(
     ) -> types.ListToolsResult:
         return types.ListToolsResult(tools=tools)
 
-    # RD-100 resource mirror. Every playbook is also readable as
+    # One resource list, two unrelated kinds of resource on it.
+    #
+    # RD-100's playbook mirror: every playbook is readable as
     # ``autods://playbook/<name>`` with ``mimeType: text/markdown``, for hosts
     # that let a *user* attach a resource. It is a mirror, not the delivery
     # mechanism: ``resources/`` is host-mediated and behaves unevenly across
-    # clients, which is why the runbook ships as a tool. Registering
-    # ``on_list_resources`` is what declares the ``resources`` capability in the
-    # handshake — RD-92 adds URIs to this list rather than declaring it again.
+    # clients, which is why the runbook ships as a tool.
+    #
+    # RD-92's widgets: ``ui://autods/<name>`` MCP Apps with
+    # ``mimeType: text/html;profile=mcp-app``, which a host renders in a
+    # sandboxed iframe when a tool carrying ``_meta.ui.resourceUri`` returns.
+    # Registering ``on_list_resources`` is what declares the ``resources``
+    # capability, and RD-100 already did that — so this adds URIs to a shared
+    # handler rather than declaring the capability again.
+    #
+    # Sharing the handler is the hazard worth naming: the two kinds have
+    # nothing in common but this code path, each needs its **own explicit**
+    # ``mime_type`` (a bare string advertises ``text/plain``, which loses the
+    # markdown for one and stops the host treating the other as an MCP App at
+    # all), and a change made for one can break the other — hence the playbook
+    # regression test that outlived the reason it was written.
     resources = [
         types.Resource(
             uri=f"{_PLAYBOOK_RESOURCE_SCHEME}{playbook.name}",
@@ -334,6 +425,23 @@ def _build_server(
             mime_type=_PLAYBOOK_MIME_TYPE,
         )
         for playbook in playbooks.list_playbooks()
+    ] + [
+        types.Resource(
+            uri=widget.uri,
+            name=widget.name,
+            title=widget.title,
+            description=widget.description,
+            mime_type=WIDGET_MIME_TYPE,
+            # The CSP goes on the list entry *and* on the read response below.
+            # That is not belt and braces: declared only on the list, the host
+            # renders from a read that carries no policy,
+            # ``hostCapabilities.sandbox`` comes back ``{}``, and the default
+            # ``img-src 'self' data: blob: assets.claude.ai`` blocks every
+            # supplier image — with no error in the widget, in the host, or in
+            # our logs.
+            meta=csp_meta(),
+        )
+        for widget in WIDGETS
     ]
 
     async def on_list_resources(
@@ -347,6 +455,18 @@ def _build_server(
         params: types.ReadResourceRequestParams,
     ) -> types.ReadResourceResult:
         uri = str(params.uri)
+        widget = widget_for_uri(uri)
+        if widget is not None:
+            return types.ReadResourceResult(
+                contents=[
+                    types.TextResourceContents(
+                        uri=params.uri,
+                        mime_type=WIDGET_MIME_TYPE,
+                        text=widget.html,
+                        meta=csp_meta(),
+                    )
+                ]
+            )
         name = uri.removeprefix(_PLAYBOOK_RESOURCE_SCHEME) if uri.startswith(_PLAYBOOK_RESOURCE_SCHEME) else ""
         playbook = playbooks.get(name) if name else None
         if playbook is None:
@@ -538,10 +658,18 @@ def _build_server(
                 # hint lands *beside* ``data``, so ``data`` remains the upstream
                 # payload verbatim; an operation without a ``business_errors``
                 # block gets an untouched envelope.
+                images: dict[str, Any] | None = None
                 if operation is not None:
                     business_error = detect_business_errors(operation, payload.get("data"))
                     if business_error is not None:
                         payload[BUSINESS_ERROR_KEY] = business_error
+                    # RD-92: the product images this response carries, addressed
+                    # by manifest data. Same placement rule again — beside
+                    # ``data``, never inside it — so an operation with no
+                    # ``images`` block keeps a byte-identical envelope.
+                    images = extract_images(operation, payload.get("data"))
+                    if images is not None:
+                        payload[IMAGES_KEY] = images
                 # RD-100: the per-step nudge, on the one channel that puts it in
                 # front of the model at the moment it has just finished step N.
                 # Same placement rule as ``business_error`` — beside ``data``,
@@ -550,7 +678,16 @@ def _build_server(
                 hint = render_success_hint(step_refs)
                 if hint is not None:
                     payload[PLAYBOOK_KEY] = hint
-                return _success_result(payload)
+                thumbnails = None
+                if images is not None and _include_images(operation, arguments):
+                    thumbnails = await _attach_thumbnails(
+                        images,
+                        http_client=dispatcher_http_client,
+                        timeout_seconds=settings.image_fetch_timeout_seconds,
+                        max_bytes=settings.image_fetch_max_bytes,
+                        tool_name=name,
+                    )
+                return _success_result(payload, thumbnails)
 
             # F3 — map an upstream non-2xx to a safe, typed MCP error.
             mapped = map_upstream_error(result.status, result.data)
@@ -641,6 +778,10 @@ def build_runtime(
         BusinessErrorsError: if a ``business_errors`` block declares no paths, or
             its operation's ``notes`` never warn that ``ok`` is transport-level
             only (RD-90) — likewise fatal at boot.
+        ImagesError: if an ``images`` block declares no paths, uses bracket
+            instead of ``*`` wildcard notation, exceeds the 20-image ceiling,
+            names a widget nothing serves, or leaves its operation's ``notes``
+            silent about thumbnails (RD-92) — likewise fatal at boot.
         InstructionsTooLargeError: if the concatenated manifest ``instructions``
             exceed the size budget (RD-90) — likewise fatal at boot.
         OperationHandlerError: if an operation names both a local handler and an
@@ -681,7 +822,16 @@ def build_runtime(
         if identity_resolver is not None
         else build_identity_resolver(settings, redis, self_identity_resolver)
     )
-    server = _build_server(registry, playbooks, dispatcher, rate_limiter, mixpanel, instructions)
+    server = _build_server(
+        registry,
+        playbooks,
+        dispatcher,
+        rate_limiter,
+        mixpanel,
+        instructions,
+        settings,
+        http_client,
+    )
     # Stateless mode (F0): no per-session transport is retained between
     # requests, so any replica/worker can serve any request. json_response
     # stays off so the spec's SSE framing is still used for the single

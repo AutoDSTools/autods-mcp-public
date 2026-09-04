@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<!--
+AutoDS product grid — MCP App served as ui://autods/product-grid with
+mimeType "text/html;profile=mcp-app" (RD-92).
+
+Renders the thumbnails of a result set the user is choosing from. Images are
+fetched by the browser from the URLs the server put in structuredContent, so
+this costs zero vision tokens however many products come back.
+
+Read-only by construction: no tools/call, no ui/message, no state change of any
+kind. RD-97 measured the direct tools/call path as invisible to the model — six
+calls executed and the model afterwards insisted none had, and
+ui/update-model-context returns an empty success while doing nothing — so a
+widget that mutated anything from here would produce duplicate writes the
+moment the user retried. If an action is ever added to this file it goes
+through ui/message, never through tools/call.
+
+Four protocol rules are load-bearing here, each of which failed silently in
+RD-82 with no error and no log line:
+
+  * ui/initialize first, and ui/notifications/initialized only AFTER its
+    RESPONSE arrives. Sent early, claude.ai ignores every later notification,
+    sizing included.
+  * ui/notifications/size-changed, repeatedly, or the host leaves the frame at
+    its 150px default and the grid reads as a blank region.
+  * the approved CSP is at result.hostCapabilities.sandbox, not result.sandbox.
+  * ui/message params.content must be an ARRAY (not used here; recorded so the
+    next editor does not rediscover it).
+
+How the payload reaches this document is the one link RD-82 and RD-97 never
+measured — both probes rendered hard-coded URLs. So rather than guess a channel
+name, findPayload() walks EVERY inbound message for an object tagged
+kind: "autods.images/1", which the server mints. If the host uses a channel we
+did not anticipate, the diagnostic below says so in words instead of rendering
+an empty box, and the transcript names the method that carried the data.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AutoDS product grid</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #16181d; --muted: #6b7280;
+    --line: #e5e7eb; --cell: #f6f7f9; --accent: #0f62fe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e8eaed; --muted: #9aa2ad;
+      --line: #2a2e35; --cell: #1c1f25; --accent: #6ea8ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; background: var(--bg); color: var(--fg);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  #head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  #head h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  #count { color: var(--muted); font-size: 12px; }
+  #note {
+    margin: 0 0 10px; padding: 6px 8px; border: 1px solid var(--line);
+    border-radius: 6px; color: var(--muted); font-size: 12px;
+  }
+  #grid {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  }
+  .cell { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--cell); }
+  .thumb {
+    display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain;
+    background: var(--cell); border: 0;
+  }
+  .ph {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; aspect-ratio: 1 / 1; color: var(--muted); font-size: 11px;
+    text-align: center; padding: 6px;
+  }
+  .label {
+    padding: 6px 8px; font-size: 12px; line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  #diag {
+    margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+    color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  #diag[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="head"><h1>Products</h1><span id="count"></span></div>
+<p id="note" hidden></p>
+<div id="grid"></div>
+<pre id="diag" hidden></pre>
+
+<script>
+(function () {
+  "use strict";
+
+  var PAYLOAD_KIND = "autods.images/1";
+  var $ = function (id) { return document.getElementById(id); };
+  var post = function (msg) { try { window.parent.postMessage(msg, "*"); } catch (_) {} };
+
+  // The host sizes the frame from what the app reports and defaults to ~150px
+  // otherwise, which reads as a blank region rather than as a failure. Measured
+  // at max-content so the reported height is the height the content wants.
+  var reportSize = function () {
+    var root = document.documentElement;
+    var prev = root.style.height;
+    root.style.height = "max-content";
+    var height = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = prev;
+    post({
+      jsonrpc: "2.0", method: "ui/notifications/size-changed",
+      params: { width: Math.ceil(window.innerWidth), height: height }
+    });
+  };
+
+  var seenMethods = [];
+  var diag = function (line) {
+    var node = $("diag");
+    node.hidden = false;
+    node.textContent += line + "\n";
+    reportSize();
+  };
+
+  // The payload's location in the host's message is not specified by anything
+  // we have measured, so find it by shape: the first object anywhere in the
+  // message tagged with our own kind marker. Bounded depth so a cyclic or huge
+  // host payload cannot spin here.
+  var findPayload = function (node, depth) {
+    if (!node || typeof node !== "object" || depth > 8) return null;
+    if (node.kind === PAYLOAD_KIND && Array.isArray(node.items)) return node;
+    var keys = Array.isArray(node) ? node : Object.keys(node);
+    for (var i = 0; i < keys.length; i++) {
+      var child = Array.isArray(node) ? keys[i] : node[keys[i]];
+      var hit = findPayload(child, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  var rendered = false;
+
+  var render = function (payload) {
+    if (rendered) return;
+    rendered = true;
+
+    var items = payload.items || [];
+    var total = typeof payload.total === "number" ? payload.total : items.length;
+    $("count").textContent = items.length === total
+      ? String(total) + (total === 1 ? " product" : " products")
+      : String(items.length) + " of " + total + " products";
+
+    if (payload.note) {
+      $("note").textContent = payload.note;
+      $("note").hidden = false;
+    }
+
+    var grid = $("grid");
+    items.forEach(function (item) {
+      var cell = document.createElement("div");
+      cell.className = "cell";
+
+      var first = (item.images || [])[0];
+      if (first && first.url) {
+        var img = document.createElement("img");
+        img.className = "thumb";
+        // Bandwidth, not tokens: a 900KB original in a 120px cell is fine, but
+        // 20 of them are not, so nothing loads until it scrolls into view.
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.alt = item.label || "";
+        // A host outside the declared CSP allowlist, an expired signed URL, a
+        // WAF-hostile host: all of them arrive here as an error event, and all
+        // of them must degrade to "no image", never to a full-size retry.
+        img.onerror = function () {
+          var ph = document.createElement("div");
+          ph.className = "ph";
+          ph.textContent = "image unavailable";
+          if (img.parentNode) img.parentNode.replaceChild(ph, img);
+          reportSize();
+        };
+        img.onload = reportSize;
+        img.src = first.url;
+        cell.appendChild(img);
+      } else {
+        var empty = document.createElement("div");
+        empty.className = "ph";
+        empty.textContent = "no image";
+        cell.appendChild(empty);
+      }
+
+      if (item.label) {
+        var label = document.createElement("div");
+        label.className = "label";
+        label.textContent = item.label;
+        cell.appendChild(label);
+      }
+      grid.appendChild(cell);
+    });
+
+    if (!items.length) {
+      var none = document.createElement("div");
+      none.className = "ph";
+      none.textContent = "no products in this result";
+      grid.appendChild(none);
+    }
+    reportSize();
+  };
+
+  var initDone = false;
+
+  window.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || typeof data !== "object") return;
+
+    if (data.method && seenMethods.indexOf(data.method) === -1) seenMethods.push(data.method);
+    if (data.method === "ui/notifications/host-context-changed") reportSize();
+
+    var payload = findPayload(data, 0);
+    if (payload) render(payload);
+
+    var result = data.result;
+    if (result && !initDone) {
+      initDone = true;
+      // Only now: announcing initialized before the response lands makes
+      // claude.ai ignore every later notification, sizing included.
+      post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+      reportSize();
+      setTimeout(reportSize, 250);
+    }
+  });
+
+  post({
+    jsonrpc: "2.0", id: 1, method: "ui/initialize",
+    params: {
+      appInfo: { name: "autods-product-grid", version: "1.0.0" },
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      protocolVersion: "2025-11-21"
+    }
+  });
+
+  reportSize();
+  window.addEventListener("load", reportSize);
+  window.addEventListener("resize", reportSize);
+
+  // If nothing tagged with our marker arrived, say which methods the host DID
+  // send. An empty grid with no explanation is the failure mode this whole
+  // ticket is about; naming the channel turns a silent blank into a one-line
+  // bug report.
+  setTimeout(function () {
+    if (rendered) return;
+    diag("No product payload reached this widget.");
+    diag("Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.");
+    diag("Host methods seen: " + (seenMethods.join(", ") || "(none)"));
+    diag("The image URLs are still in this tool result's structuredContent.");
+  }, 3000);
+})();
+</script>
+</body>
+</html>

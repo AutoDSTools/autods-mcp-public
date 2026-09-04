@@ -40,6 +40,7 @@ import json
 
 import pytest
 
+from autods_mcp_server.mcp_transport import _PLAYBOOK_RESOURCE_SCHEME
 from tests.e2e.conftest import Handshake, LocalBuild
 from tests.mcp_server.test_polling_conventions import (
     CADENCE_TOKENS,
@@ -56,8 +57,11 @@ _POLLING_TOOL = "get_bulk_action_items"
 _INSTRUCTIONS_HEADER = "## AutoDS MCP — start here"
 
 # Fields that make up a tool descriptor on the wire. ``name`` is the key, so the
-# set difference is reported separately.
-_DESCRIPTOR_FIELDS = ("description", "inputSchema", "annotations")
+# set difference is reported separately. ``_meta`` is here because RD-92's
+# ``ui.resourceUri`` rides it, and a metadata key that does not arrive is the one
+# failure mcp still produces in total silence — no error, no data, and a tool
+# that simply never renders its widget.
+_DESCRIPTOR_FIELDS = ("description", "inputSchema", "annotations", "_meta")
 
 
 def _first_difference(local: str, live: str) -> str:
@@ -148,7 +152,9 @@ def test_c4_c5_every_descriptor_field_matches_the_manifests(
     (RD-100) — both unguessable, so their absence silently degrades an agent
     rather than erroring. ``annotations`` is what hosts gate confirmation
     prompts on, so a lost ``destructiveHint`` is a safety regression that no
-    call would ever reveal.
+    call would ever reveal. ``_meta`` carries RD-92's ``ui.resourceUri`` and the
+    CSP origins its sandbox needs; dropped, the tool works and simply never
+    shows a picture.
     """
     shared = sorted(set(local_build.tools) & set(deployed_handshake.tools))
     drifted = []
@@ -174,13 +180,17 @@ def test_c4_c5_every_descriptor_field_matches_the_manifests(
 def test_c6_c8_playbook_resources_are_advertised_and_shaped(
     deployed_handshake: Handshake, local_build: LocalBuild
 ) -> None:
-    """C8 — the playbook resource mirror, and the capability it declares.
+    """C8 — both kinds of resource, and the capability they declare.
 
     Registering ``on_list_resources`` is what puts ``resources`` in the
     handshake's capability block, so an error here means the server stopped
-    declaring the capability — a regression, not a client quirk. The explicit
-    ``mimeType`` matters too: a bare string advertises ``text/plain`` and the
-    markdown body is lost.
+    declaring the capability — a regression, not a client quirk.
+
+    The explicit ``mimeType`` matters for both kinds and for different reasons:
+    a bare string advertises ``text/plain``, which loses the markdown for a
+    playbook (RD-100) and stops the host treating a ``ui://`` widget as an MCP
+    App at all (RD-92). They share one handler, so a change made for one is
+    exactly how the other breaks.
     """
     assert deployed_handshake.resources is not None, (
         f"resources/list failed on the deployed server ({deployed_handshake.resources_error}) — the server "
@@ -208,7 +218,9 @@ def test_c6_get_playbook_enum_indexes_every_registered_playbook(
     separately from the schema diff so that failure names its own cause.
     """
     enum = deployed_handshake.tools["get_playbook"]["inputSchema"]["properties"]["name"].get("enum")
-    expected = sorted(r["name"] for r in local_build.resources)
+    # Playbook resources only: the same list also carries RD-92's ``ui://``
+    # widgets, which are not playbooks and must not be expected in this enum.
+    expected = sorted(r["name"] for r in local_build.resources if r["uri"].startswith(_PLAYBOOK_RESOURCE_SCHEME))
     assert enum, "get_playbook advertises no playbook enum — the playbook files did not ship in the image"
     assert sorted(enum) == expected, (
         f"get_playbook enum {sorted(enum)} does not index the registered playbooks {expected}"

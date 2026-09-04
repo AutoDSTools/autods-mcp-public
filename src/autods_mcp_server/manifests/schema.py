@@ -67,6 +67,65 @@ class BusinessErrors(BaseModel):
     codes: dict[str, str] = Field(default_factory=dict)
 
 
+class ImagesBlock(BaseModel):
+    """Where the product images live inside one operation's response (RD-92).
+
+    Product photos arrive as plain CDN URLs buried in the upstream payload, so
+    neither the model nor the user ever sees a picture. This block tells the
+    transport how to *address* them — as data, because every operation buries
+    them somewhere slightly different — and the transport publishes what it
+    finds as an ``images`` field beside ``data`` (never inside it, the same rule
+    as ``business_error`` and ``playbook``).
+
+    ``item_path`` and ``image_paths`` are dotted paths into the upstream payload
+    resolved by ``payload_paths``, so ``*`` — never ``[]`` — fans out over a
+    list's elements or a dict's values. One notation across every manifest
+    block was worth more than matching RD-92's illustrative ``images[].url``
+    spelling, and ``assert_images_usable`` rejects the bracket form outright so
+    the decision cannot quietly rot.
+
+    * ``item_path`` addresses the list of items (``"results"``). Omitted ⇒ the
+      root payload object is the single item, which is what a by-id read
+      returns.
+    * ``image_paths`` are tried **in order per item, first match wins**: a
+      product carries several plausible image fields and they are not equally
+      good. ``original_image_url`` is deliberately never listed — it is the
+      un-edited original and would misrepresent what is actually listed.
+    * ``per_item`` × ``max`` is bounded at 20 by a boot lint, because 20 × 252 px
+      is the measured base64 ceiling below the point where the client truncates
+      silently (RD-82: a run claimed "19 of 20" while holding 16, and described
+      a half-decoded JPEG as a different product).
+    * ``label_path`` / ``id_path`` are per-item paths for the caption and the id
+      a widget cell needs. Both optional; a cell with no label renders the
+      image alone.
+    * ``widget`` names the ``ui://`` widget this operation's result should
+      render in, and must be one the widget registry serves. Omitted ⇒ the URLs
+      are published in ``structuredContent`` and nothing is rendered.
+    * ``base64`` decides whether the synthetic ``include_images`` parameter is
+      offered at all, and what it defaults to. Three values because the
+      surfaces genuinely need three: ``"opt_in"`` (offered, default off) is the
+      normal case; ``"off"`` withholds the parameter entirely, which is where
+      ``list_products`` sits until the scraper bucket has a thumbnail source —
+      that is the one surface where the missing small variant actually bites,
+      because a full-size original is what would get encoded; and
+      ``"default_on"`` is for the one shape where the *model* must judge the
+      picture rather than the user choosing from a set (an image-search offer
+      list, RD-95), which is the only thing that justifies paying vision
+      tokens.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    item_path: str = ""
+    image_paths: list[str] = Field(default_factory=list)
+    per_item: int = 1
+    max: int = 20
+    label_path: str = ""
+    id_path: str = ""
+    widget: str | None = None
+    base64: Literal["off", "opt_in", "default_on"] = "opt_in"
+
+
 class ManifestParameter(BaseModel):
     """A single path/query/header parameter of an operation."""
 
@@ -108,6 +167,11 @@ class ManifestOperation(BaseModel):
     # look for, which is the case for every operation whose failures arrive as
     # a non-2xx status.
     business_errors: BusinessErrors | None = None
+    # RD-92: where this operation's response carries product images, and which
+    # widget (if any) renders them. ``None`` — the common case — means the
+    # operation has no image surface: no ``images`` envelope field, no
+    # ``_meta.ui`` on the descriptor, and no ``include_images`` parameter.
+    images: ImagesBlock | None = None
     # Whether the operation is side-effect-free is advertised to clients via
     # ``annotations.read_only_hint`` (the MCP-canonical signal), so the
     # generator's separate ``safe`` flag is intentionally not modelled here —

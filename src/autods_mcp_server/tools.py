@@ -18,12 +18,19 @@ from typing import Any
 from mcp import types
 from pydantic import BaseModel, Field, create_model
 
+from autods_mcp_server.images import (
+    BASE64_EDGE_PX,
+    INCLUDE_IMAGES_ARG,
+    MAX_IMAGES,
+    assert_images_usable,
+)
 from autods_mcp_server.manifests.playbooks import (
     HANDLER_PLAYBOOK,
     PlaybookRegistry,
     render_description_tail,
 )
 from autods_mcp_server.manifests.schema import ManifestOperation, SchemaType
+from autods_mcp_server.widgets import tool_meta
 
 # autods-mcp ``schema_type`` -> Python type used for the generated pydantic field.
 # Mirrors the mapping in the autods-mcp TS runtime (int/float/bool/list/dict/str).
@@ -78,6 +85,18 @@ class OperationHandlerError(ValueError):
 # list of playbooks reaches the model even in a client that drops ``instructions``
 # entirely.
 _PLAYBOOK_NAME_PARAM = "name"
+
+# Tier 1 for the base64 path (RD-92): everything needed to decide whether to
+# send *this* argument goes on the argument, priced, because the decision is a
+# cost/benefit one and the model is the one making it.
+_INCLUDE_IMAGES_DESCRIPTION = (
+    "Attach base64 thumbnails of the results so the model can see the pictures. Costs vision tokens: each "
+    f"image is capped server-side at {BASE64_EDGE_PX}px (81 tokens) and at most {MAX_IMAGES} are attached "
+    "(~1,620 tokens), and a result over that cap is truncated with a note saying so. Set it only when the "
+    "image itself has to be judged — a hero shot that is really a size chart, a watermark, a collage of "
+    "unrelated items. Do NOT set it to show products to the user: clients that render the result do that "
+    "from the URLs at no token cost, and the URLs are in the response either way."
+)
 
 
 def build_input_model(operation: ManifestOperation) -> type[BaseModel]:
@@ -142,6 +161,21 @@ def _build_input_schema(operation: ManifestOperation, playbooks: PlaybookRegistr
     schema = build_input_model(operation).model_json_schema()
     if operation.has_json_body and operation.body_schema is not None:
         schema.setdefault("properties", {})["body"] = dict(operation.body_schema)
+    if operation.images is not None and operation.images.base64 != "off":
+        # RD-92: a *synthetic* parameter — it belongs to this server, not to the
+        # upstream, and it never becomes an upstream field
+        # (``dispatch._build_request`` reads only declared parameters and
+        # ``body``, so an undeclared key is dropped; a test pins that). It has
+        # to be injected *here* rather than only on the client-facing
+        # descriptor, because ``_build_validators`` compiles its validators from
+        # this same schema and since mcp 2.x that validator is the only schema
+        # gate left on the call path — a field the validator has not been told
+        # about is rejected before the dispatcher ever runs.
+        schema.setdefault("properties", {})[INCLUDE_IMAGES_ARG] = {
+            "type": "boolean",
+            "default": operation.images.base64 == "default_on",
+            "description": _INCLUDE_IMAGES_DESCRIPTION,
+        }
     if operation.handler == HANDLER_PLAYBOOK and playbooks is not None:
         # The registered names are runtime data, so they can't be authored in
         # the manifest; injecting them here is what keeps the enum and the
@@ -153,8 +187,20 @@ def _build_input_schema(operation: ManifestOperation, playbooks: PlaybookRegistr
 
 
 def to_tool(operation: ManifestOperation, playbooks: PlaybookRegistry | None = None) -> types.Tool:
-    """Convert a manifest operation into an MCP ``Tool`` descriptor."""
+    """Convert a manifest operation into an MCP ``Tool`` descriptor.
+
+    An operation whose ``images`` block names a widget also carries
+    ``_meta.ui`` (RD-92): the ``resourceUri`` the host renders and the CSP
+    origins its sandbox must approve. It rides the model's **real** ``meta``
+    field — mcp 2.x sets ``populate_by_name=True``, so ``meta=`` populates the
+    field that serialises as ``_meta``, while ``extra="allow"`` is gone, so any
+    *other* key would be accepted at construction and then discarded with no
+    error and no data. That is the trap RD-82's probes rode into, inverted by
+    the 2.x port; ``test_widgets`` asserts the metadata actually arrives at a
+    client rather than that it was passed in.
+    """
     annotations = operation.annotations
+    meta = tool_meta(operation.images.widget) if operation.images and operation.images.widget else None
     return types.Tool(
         name=operation.operation_id,
         description=_build_description(operation, playbooks),
@@ -164,6 +210,7 @@ def to_tool(operation: ManifestOperation, playbooks: PlaybookRegistry | None = N
             read_only_hint=annotations.read_only_hint,
             destructive_hint=annotations.destructive_hint,
         ),
+        meta=meta,
     )
 
 
@@ -297,4 +344,5 @@ def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry
         _assert_integer_enum_fields(operation)
         _assert_business_errors_usable(operation)
         _assert_handler_or_upstream(operation, playbooks)
+        assert_images_usable(operation)  # RD-92
     return [to_tool(operation, playbooks) for operation in operations]

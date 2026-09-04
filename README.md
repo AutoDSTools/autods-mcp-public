@@ -183,6 +183,8 @@ All settings come from environment variables. See
 | `REDIS_URL` | yes in non-local | Shared Redis backing the per-user rate limiter (`redis://` / `rediss://`). Unset in local falls back to an in-process limiter |
 | `RATE_LIMIT_PER_MINUTE` | no (default `60`) | Per-user token-bucket ceiling; `0` disables this bucket |
 | `RATE_LIMIT_PER_HOUR` | no (default `1000`) | Per-user token-bucket ceiling; `0` disables this bucket |
+| `IMAGE_FETCH_TIMEOUT_SECONDS` | no (default `5`) | Per-image timeout on the opt-in base64 thumbnail path (`include_images: true`). Bounds work done against supplier CDNs on the tool-call path |
+| `IMAGE_FETCH_MAX_BYTES` | no (default `8000000`) | Per-image byte ceiling before decoding — refuses an absurd original rather than second-guessing a legitimate 900 KB PNG. The image cap itself (20 × 252 px) is **not** configurable |
 | `MIXPANEL_TOKEN` | no | Mixpanel project token for the tool-call event. Unset → analytics disabled (the local default) |
 | `SENTRY_URL` | no | Self-hosted Sentry DSN (`https://<key>@sentry.autods.com/<id>`). Unset (or `MCP_ENV=local`) makes Sentry init a no-op. Delivered via External Secrets in staging/prod |
 | `SENTRY_ENVIRONMENT` | no (default `MCP_ENV`) | Sentry environment tag. The release is derived from `__version__` in code, not an env var |
@@ -481,6 +483,66 @@ uv run python scripts/mcp_call.py resources
 uv run python scripts/mcp_call.py get_playbook '{"name":"product_import"}'
 ```
 
+#### Product images (RD-92)
+
+Product photos used to be plain CDN URLs buried in the JSON envelope: neither
+the model nor the user ever saw a picture, which makes "pick the one that looks
+right" impossible to do visually. Three things now ship together.
+
+**1. An `images` block in the envelope.** An operation declares, as manifest
+data, where the items are and where each item's images are:
+
+```json
+"images": {
+  "item_path": "results",
+  "image_paths": ["main_picture_url.url", "images.*.url", "variations.*.main_picture_url.url"],
+  "per_item": 1, "max": 20,
+  "label_path": "title", "id_path": "id",
+  "widget": "product-grid", "base64": "off"
+}
+```
+
+Paths are resolved by the shared `payload_paths` resolver — dotted, with `*`
+fanning out over a list's elements or a dict's values, the same notation
+`business_errors` uses — and are tried **in order per item, first match wins**,
+because a product carries several plausible image fields and they are not
+equally good. The result lands as an `images` field *beside* `data`, never
+inside it, so `data` stays the upstream payload verbatim. Boot lints reject a
+block with no paths, bracket-notation paths, `per_item × max > 20`, a widget
+nothing serves, or an operation whose `notes` never mention thumbnails.
+
+**2. `ui://autods/...` widgets** (MCP Apps). `product-grid` and `product-card`
+are hand-written, self-contained HTML documents with no build step, served as
+resources with `mimeType: text/html;profile=mcp-app` alongside the playbook
+mirror. A tool opts in via `_meta.ui.resourceUri`, and `_meta.ui.csp` declares
+the supplier CDN origins the host's sandbox must approve — on the list entry
+*and* on the read response, because the host renders from the read. In a client
+that renders MCP Apps this costs **zero vision tokens** for any number of
+products: the browser fetches the images. The widgets are read-only by
+construction — no `tools/call`, no `ui/message`, nothing that could mutate
+state and duplicate a write.
+
+**3. A CDN thumbnail-rewrite table** (`image_rewrites.py`), as config data per
+host family: Amazon's `._SS256_.`, Shopify's `?width=256`, eBay's `s-l225`,
+TikTok's `:256:256`, and the rest RD-82 measured against real bytes. Where a
+host offers no small variant — about half of `list_products`, all of it in the
+scraper bucket — the original URL is used unchanged, which in a 120 px grid cell
+costs bandwidth rather than tokens.
+
+Opt-in base64 is the fourth piece and exists for a different reader. When the
+**model itself** has to judge a picture (a hero shot that is really a size
+chart, a watermark, a collage of unrelated items), `include_images: true`
+attaches `ImageContent` blocks — fetched, downscaled to 252 px by resampling and
+re-encoded server-side, capped at 20, with a note whenever the set came back
+short. It is off by default everywhere, absent entirely on `list_products`
+(half those images have no small variant to fetch), and priced in its own
+parameter description: 81 vision tokens per image, ~1,620 for a full set.
+
+The text and `structuredContent` path stays correct on its own. Claude Code,
+Cursor and MCP Inspector render no widget, and Claude Desktop over a *remote*
+connector shows raw `structuredContent` — so the `images` block is also the
+compact, ordered "here are the pictures" list those clients read.
+
 ### Self-identity (RD-68)
 
 The caller's own AutoDS identity (`id`, `name`, `email`) is resolved by the
@@ -653,6 +715,31 @@ choice here:
 
 ## Troubleshooting
 
+- **A product grid renders as a thin blank strip, or as a box saying "No product
+  payload reached this widget".** Two different failures with the same look.
+  A blank strip means the host never received a `ui/notifications/size-changed`
+  and left the frame at its ~150 px default — check that the widget asset still
+  sends it, and that `ui/notifications/initialized` is sent only *after* the
+  `ui/initialize` **response** (announced early, claude.ai ignores every later
+  notification, sizing included). The explicit diagnostic instead means the
+  document rendered and ran but no payload tagged `autods.images/1` arrived; it
+  prints the host methods it did see, which names the channel to look at. The
+  image URLs are in `structuredContent` in both cases.
+- **The grid renders but every cell says "image unavailable".** The host's
+  sandbox is blocking the loads. The approved policy comes from
+  `_meta.ui.csp.resourceDomains`, which must be declared on the `resources/read`
+  response and not only on the `resources/list` entry — declared only on the
+  list, `hostCapabilities.sandbox` comes back empty and the default policy
+  (`img-src 'self' data: blob: assets.claude.ai`) blocks every supplier CDN with
+  no error anywhere. A *single* failing cell is different and expected: a
+  merchant self-host outside the allowlist, an expired signed TikTok URL, or a
+  WAF that refuses parameterised requests. Those degrade to the placeholder by
+  design and never to a full-size retry.
+- **`include_images: true` came back with fewer pictures than results.** Read the
+  `note` in the `images` block — it says how many of how many were attached.
+  Each miss is one image that timed out, 404'd, or was not decodable (several
+  supplier hosts answer 200 with an HTML body under an `image/*` content type).
+  The tool call itself still succeeded; the URLs are in `data`.
 - **Client shows a connection error right after authorizing (but retry works).** The first
   authenticated call (`initialize`) resolves the caller's identity synchronously via a
   blocking upstream call. On a cold cache with a slow upstream this can exceed the MCP

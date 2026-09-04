@@ -109,6 +109,7 @@ from autods_mcp_server.mcp_transport import (
 )
 from autods_mcp_server.settings import Settings
 from autods_mcp_server.tools import build_tools
+from autods_mcp_server.widgets import WIDGET_MIME_TYPE, WIDGETS
 
 # Env vars that must all be present (in addition to RUN_STAGING_E2E=1) for the
 # suite to run; any missing one skips the whole module.
@@ -489,6 +490,19 @@ def local_build() -> LocalBuild:
             "mimeType": _PLAYBOOK_MIME_TYPE,
         }
         for playbook in playbooks.list_playbooks()
+    ] + [
+        # RD-92's widgets share the resource list with RD-100's playbook mirror,
+        # so C6/C8 diff both kinds. Derived from the registry rather than listed
+        # here, for the same reason C3's tool set is: a literal here is a fourth
+        # inventory to keep in step, which is exactly what went stale before.
+        {
+            "uri": widget.uri,
+            "name": widget.name,
+            "title": widget.title,
+            "description": widget.description,
+            "mimeType": WIDGET_MIME_TYPE,
+        }
+        for widget in WIDGETS
     ]
     return LocalBuild(
         server_version=__version__,

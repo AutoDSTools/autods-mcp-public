@@ -283,8 +283,12 @@ async def run_call(url: str, token: str, operation: str, arguments: dict) -> int
                 print(client.instructions or "(the server advertised no instructions)")
                 return 0
             if operation in ("resources", "resources/list"):
-                # The playbook mirror (RD-100). Also the quickest check that the
-                # server is declaring the ``resources`` capability at all.
+                # Both kinds: the playbook mirror (RD-100) and the ``ui://``
+                # widgets (RD-92). Also the quickest check that the server is
+                # declaring the ``resources`` capability at all. The mime type is
+                # printed because it is load-bearing and invisible otherwise —
+                # a widget advertising ``text/plain`` is one the host will not
+                # treat as an MCP App.
                 listed = await client.list_resources()
                 for resource in listed.resources:
                     print(f"{resource.uri}\t{resource.mime_type}\t{resource.title or resource.name}")

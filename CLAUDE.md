@@ -86,13 +86,27 @@ Module map (`src/autods_mcp_server/`):
 - `mcp_transport.py` — builds the runtime and mounts the **stateless** Streamable HTTP
   transport behind the auth dependency; the `call_tool` handler applies rate limiting,
   emits the audit log, branches to the local-handler seam (RD-100), and attaches the
-  playbook hints. Also serves the playbook resource mirror (`resources/list`+`read`).
+  playbook hints and the RD-92 `images` block. Also serves both kinds of resource
+  (`resources/list`+`read`): the playbook mirror and the `ui://` widgets.
 - `errors.py` — MCP tool error construction + upstream error mapping.
 - `business_errors.py` — detects a business rejection reported *inside* an HTTP
   200 payload (per-operation config is manifest data) and renders it as the
   `business_error` envelope field.
 - `payload_paths.py` — the shared dotted-path-with-`*`-wildcard resolver used to
   address a place inside an upstream payload from manifest data.
+- `images.py` — RD-92: reads product-image URLs out of a response through
+  `payload_paths` (per-operation config is the manifest `images` block), runs
+  its boot lint, and renders the `images` envelope field + the honest-truncation
+  note.
+- `image_rewrites.py` — the CDN thumbnail-URL rewrite table as config data, one
+  row per host family (rewrite rules + the CSP origins the widget sandbox
+  needs). Measured in RD-82; pinned by `tests/mcp_server/test_image_rewrites.py`.
+- `image_fetch.py` — the opt-in base64 path: fetch, downscale to 252 px with
+  Pillow, re-encode. Best-effort per image, and never fails the tool call.
+- `widgets/` — RD-92's MCP Apps. `__init__.py` is the registry (`ui://autods/…`
+  URIs, the `text/html;profile=mcp-app` mime type, the `_meta.ui` blocks);
+  `product_grid.html` / `product_card.html` are hand-written, self-contained
+  assets with **no build step**.
 - `analytics.py` — Mixpanel "MCP Call Received" event per tool call, keyed by the
   stable `autods_user_id`; fire-and-forget, fails open, no-op without `MIXPANEL_TOKEN`.
 - `identity.py` — `SelfIdentityResolver` resolves the caller's AutoDS identity via the
@@ -130,6 +144,10 @@ client:
 - Exactly one of `handler` / `base_url_key` per operation; a forwarding operation needs
   `method` + `path`; `handler` must name a handler the closed local registry serves
   (RD-100).
+- An `images` block must declare at least one `image_paths` entry, use `*` and not
+  bracket notation, keep `per_item × max ≤ 20`, name a widget the registry serves, and
+  its operation's `notes` must mention thumbnails (RD-92). Every one of those fails
+  silently otherwise — see **Product images** below.
 - The six playbook lints (RD-100), below.
 
 ### Where text goes: the four tiers
@@ -207,6 +225,86 @@ boot lint above enforces that, and that `paths` is non-empty.
 This covers a rejection inside a **2xx** only. A business rejection that arrives as a
 non-2xx is not deliverable to the model at all (see the Gotcha below), so don't describe
 one in `notes` as something the caller will be able to read.
+
+### Product images: the `images` block, the widgets, the base64 opt-in (RD-92)
+
+Product photos arrive as CDN URLs buried in a response, so nobody ever sees a
+picture. An operation declares where they are, as data, and the transport
+publishes what it finds as an `images` field **beside** `data` — never inside it,
+same rule and same reason as `business_error` and `playbook`:
+
+```json
+"images": {
+  "item_path": "results",
+  "image_paths": ["main_picture_url.url", "images.*.url", "variations.*.main_picture_url.url"],
+  "per_item": 1, "max": 20,
+  "label_path": "title", "id_path": "id",
+  "widget": "product-grid", "base64": "off"
+}
+```
+
+**Three decisions RD-92 left open, and how they landed.**
+
+1. **Notation: `*`, not `[]`.** The ticket sketched `images[].url`; the landed
+   paths speak the `*` wildcard `payload_paths` already implements, and
+   `assert_images_usable` **rejects** a bracketed path so the decision cannot rot
+   back into a second synonym. One notation across every manifest block was
+   worth more than matching the sketch, and extending a module `business_errors`
+   depends on is the larger blast radius.
+2. **Ordered paths, first match wins per item** — not a union. A product carries
+   several plausible image fields and they are not equally good; the manifest
+   lists the best first and the fallbacks after it, and stopping at the first
+   path that yields anything is what makes that ordering mean something.
+   `original_image_url` is deliberately never listed: it is the un-edited
+   original and would misrepresent what is actually listed.
+3. **`base64` is three-valued, because the surfaces need three.** `"opt_in"`
+   offers `include_images` defaulting off (every research surface); `"off"`
+   withholds the parameter entirely (`list_products`, where ~51% of images sit in
+   the scraper bucket with no small variant, so the model would be handed
+   full-size originals); `"default_on"` is reserved for the one shape where the
+   *model* must judge the picture rather than the user choosing from a set.
+
+**`include_images` is synthetic and has to be in exactly two places.** It is
+ours, not the upstream's. It is injected into the tool `inputSchema` — which is
+also what `_build_validators` compiles from, and since mcp 2.x that validator is
+the **only** schema gate on the call path, so injecting it into the client-facing
+descriptor alone would get the call rejected before the dispatcher ran. And it
+must never reach upstream, which `dispatch._build_request` already guarantees by
+reading only declared parameters and `body`; that guarantee is passive, so
+`test_image_base64.py` pins both halves.
+
+**The 20 × 252 px cap is a correctness bound, not a tuning knob**, which is why
+it is a constant and not a setting. RD-82 watched Claude Desktop keep 16 of 20
+images, report "19 of 20", and describe a half-decoded JPEG as a different
+product. Past the ceiling the client truncates *silently and wrongly*, so the cap
+is ours to enforce — by resampling in `image_fetch`, never by trusting a CDN
+rewrite to have produced a small variant (coverage is ~46% on `list_products`
+and eBay's ladder tops out at 400 px).
+
+**The `images` block duplicates URLs that are already in `data`, deliberately.**
+Roughly 2 KB of text on a 20-item page. It buys one resolver and one rewrite
+table instead of a second pair in JavaScript that would drift silently; a
+self-describing payload the widget can find *by shape* (see the gotcha about the
+unmeasured data channel); and, in the clients that render no widget at all, a
+compact ordered list instead of the same URLs scattered through 40 KB of product
+documents. It costs *text* tokens, is bounded by `max` however large the page is,
+and does not touch the zero-vision-token claim the widget path rests on.
+
+**Text placement, by tier.** `include_images` and its price are tier 1, on the
+parameter. The rendering behaviour ("thumbnails where the client supports it;
+the URLs are in the response either way") is tier 2, in each carrying
+operation's `notes` — and the boot lint above requires the mention, in the same
+spirit as the `ok` mention `business_errors` requires. `instructions` (tier 4)
+gets **one** line in `manifests/_server.json` and nothing more.
+
+**The widgets are read-only by construction.** No `tools/call`, no `ui/message`,
+no `ui/update-model-context` — `test_widgets.py` asserts their absence from the
+served assets. RD-97 measured the direct `tools/call` path as *invisible to the
+model*: six calls executed, and afterwards the model insisted none had run and
+would not invent a marker. For a write that means the user retries and
+duplicates. If an action is ever added, it goes through `ui/message` (a composer
+prefill the user sends, which the model then owns) and the arguments are staged
+server-side rather than relayed — see the argument-relay gotcha.
 
 ### Polling conventions for async operations (RD-91)
 
@@ -425,6 +523,7 @@ this checklist and update whatever it touches **in the same commit**:
 | adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
 | adds a tool that has to be polled, or changes the cadence / a completion state machine | `docs/polling-conventions.md` (the numbers live there **once**), plus the `notes` and playbook `body` that state them, plus the delivery test |
 | adds a fixture the checklist needs (a store, an entitlement, a supplier id) or a step that makes an agent stop and ask mid-run | a check in section `P` of `docs/release-checks.md`, or a rule that lets the run continue with a `skipped` |
+| adds a `ui://` widget, an `images` block, or a CDN host family | the **Product images** section here; a widget also needs a fixture row in `tests/mcp_server/data/cdn_rewrite_sample.tsv` if it brought a host family, and a check in `docs/release-checks.md` — a widget is the one surface whose failure is *invisible* to every test we can run in CI (nothing here renders HTML in a host's sandbox) |
 | adds an upstream, a stateful dependency, a deployed process or an exposed API surface — or changes deployment / ownership metadata | `catalog-info.yaml`, per the trigger list in **Service Descriptor** below (most changes are *not* triggers — read the list, don't guess) |
 
 Rule of thumb: if you added an invariant a reviewer would flag if broken (a
@@ -651,6 +750,30 @@ RD-50 :: Logging cleanup ::
   what prevents a duplicated write — so it can afford to name the verification tool and
   how to use it. Both are boot lints, not runtime truncation: half a sentence about a
   duplicated write is worse than a deploy that refuses to start.
+- **An `images` block rides beside `data` too** (RD-92) — third member of the family
+  after `business_error` and `playbook`, same rule for the same reason: `data` is the
+  upstream payload verbatim and `dispatch.py` stays a pure forwarder. An operation with
+  no `images` block gets an envelope byte-identical to pre-RD-92, which
+  `test_widgets.py` pins alongside `test_success_result_shape_matches_the_1x_wire_format`.
+- **The widget CSP is declared twice, on the `resources/list` entry *and* on the
+  `resources/read` response** (RD-92). It looks like duplication and is not: the host
+  renders from the read, so a policy declared only on the list leaves
+  `hostCapabilities.sandbox` empty and the default `img-src 'self' data: blob:
+  assets.claude.ai` blocks every supplier image — with no error in the widget, in the
+  host, or in our logs. Removing either declaration is invisible until someone looks at
+  a rendered grid.
+- **The base64 image path fails to *fewer* pictures, never to a failed call** (RD-92).
+  `_attach_thumbnails` swallows everything, per image and in bulk. The tool call already
+  succeeded; the URLs, the text envelope and the widget are the contract and the base64
+  blocks are an enhancement, so letting a slow CDN turn a good answer into
+  `internal_error` (which the catch-all in `on_call_tool` would happily do) is strictly
+  worse. A short set always carries the note saying how many of how many landed.
+- **The image fetch reuses the dispatcher's HTTP client but never its posture** (RD-92).
+  One client to own and close, and the image request is built from scratch — no
+  `Authorization` header, ever, since these are public CDN objects. `follow_redirects`
+  is a *per-request* override there (CDNs use redirects for their size ladders), so the
+  client-level `False` that stops a forwarded bearer token leaking on a 3xx still
+  governs every upstream call. Don't promote that override to the client.
 - **OpenTelemetry stays inert** (RD-99): mcp 2.x hard-depends on `opentelemetry-api`
   and instruments its request path, but with no `opentelemetry-sdk` installed the API
   hands back non-recording spans — nothing is collected or exported, and Sentry remains
@@ -976,6 +1099,99 @@ production incident; don't undo the guard without understanding why it's there.
   you stuff into an MCP model is accepted at construction and then discarded. Same
   failure shape as before (no error, no data), different cause: relevant to the RD-82 /
   RD-97 widget probes, which rode extra fields.
+- **Ten MCP Apps protocol bugs, every one of which failed with no error and no log
+  line** (RD-82 bugs 1–6, RD-97 bugs 7–10). This list cost most of two spikes, and bug 1
+  alone nearly produced the wrong recommendation. The first six live in the widget
+  assets and the resource handler, so they are the ones a change here can reintroduce;
+  `test_widgets.py` checks the assets for each construct rather than trusting review.
+  1. **`_meta.ui.csp` must be on the `resources/read` response, not only the
+     `resources/list` entry.** Declared only on the list, `hostCapabilities.sandbox`
+     returns `{}` and the default policy blocks every external image. (Also a
+     Conventions bullet — it is the one most likely to be "cleaned up".)
+  2. **A non-schema key stuffed into an MCP model evaporates.** Under 1.x the models
+     were `extra="allow"` without `populate_by_name`, so `types.Tool(meta=…)` created a
+     junk `"meta"` field the client never saw and the fix was `**{"_meta": …}`. mcp 2.x
+     inverted it: `populate_by_name=True` makes `meta=` populate the real field, and
+     `extra="allow"` is gone, so any *other* key is accepted at construction and then
+     discarded. Same failure shape, opposite cause. Anything attached to a descriptor
+     must go through a real field, and the test must assert it **arrived at a client**.
+  3. **`read_resource` returning a bare `str` defaults the mime type to `text/plain`**
+     and the host stops treating the document as an MCP App. Set `mime_type`
+     explicitly — `text/html;profile=mcp-app` for a widget, `text/markdown` for a
+     playbook. Both kinds share one handler, so this bites in two directions.
+  4. **A widget must send `ui/notifications/size-changed`**, repeatedly, or the host
+     leaves the frame at a ~150 px default and it reads as a blank region rather than as
+     a failure.
+  5. **`ui/notifications/initialized` must follow the `ui/initialize` *response*.** Sent
+     early, claude.ai ignores every later notification, sizing included — so bug 5
+     presents as bug 4.
+  6. **The approved CSP is at `result.hostCapabilities.sandbox`, not `result.sandbox`.**
+     Reading the top level leaves a widget reporting "no policy" while the approval is
+     right there in the payload.
+  7. **`ui/message`'s `params.content` must be an array.** The published spec example
+     shows a bare `{type, text}` object and claude.ai rejects it with `-32603 … expected
+     array, received object`. Trust the host over the example.
+  8. **`tools/list` is not available to an app** — `-32601 Method not found`, even
+     though `hostCapabilities.serverTools` is advertised. `serverTools` means the app may
+     *call* tools, not enumerate them, so **a widget must know its tool names at build
+     time**. That couples widget and tool schema, and version skew is a real failure
+     mode.
+  9. **`ui/update-model-context` returns success and does nothing.** Empty result in
+     23–32 ms, twice, with unambiguous wording carrying a server-minted marker; the model
+     still denied the call. Never treat its success as evidence the model was informed.
+  10. **`ui/message` is a composer prefill, not an autonomous send.** An app can propose
+      a turn, never force one. Don't design a flow that assumes the message was sent.
+- **A widget can call a tool, and for a write that is worse than useless** (RD-97). Six
+  direct `tools/call`s executed, 673 ms–3.4 s, each recorded server-side with a resolved
+  `user_sub` — and **nothing rendered**: no consent prompt, no turn, no collapsed tool
+  block, on either side. Afterwards the model insisted `probe_action` "has not been
+  invoked … by me or by the widget" and, asked to name the markers, answered "There are
+  no markers — not one, and not two." That is a confident **false negative**, not a
+  fabrication, and for a write it means the user retries and duplicates. Hence: direct
+  `tools/call` for reads only; a write goes through `ui/message` so the model makes the
+  call and holds the result. And **nothing a write depends on may be an optional
+  argument** — RD-97 watched the model drop them (`nonce: null` twice, `note` dropped
+  entirely), so the arguments get staged server-side (Redis, explicit TTL — the transport
+  is stateless, so "persist" can never mean process memory) and `ui/message` proposes a
+  write taking only the staging id. That is the recorded decision; it lands with RD-95
+  and the extra RD-94 operation, since there is no sourcing tool to picker yet.
+- **`visibility: ["app"]` is a host courtesy, not an authorization mechanism** (RD-97).
+  It works on claude.ai web — `probe_action_app_only` appeared in neither the model's
+  tool list nor its tool search, yet the app called it successfully — but **the server
+  offers it unconditionally** and Claude Code both listed *and* called it. The filtering
+  is entirely the host's. Enforce write authorization server-side regardless.
+- **How a host hands a tool result to a widget is the one link in this chain nobody has
+  measured** (RD-92). RD-82 and RD-97 both proved the widget renders, sizes itself and
+  can postMessage — and both rendered *hard-coded* URLs, so neither ever read
+  `structuredContent` from inside the frame. The assets therefore find their payload
+  **by shape**: they walk every inbound message for an object tagged
+  `kind: "autods.images/1"`, which `images.py` mints. If that marker changes, change both
+  HTML files. And if a host uses a channel the search does not reach, the widget prints
+  which methods it *did* see instead of rendering an empty box — which turns the silent
+  blank this whole ticket is about into a one-line bug report.
+- **`resourceDomains` is an allowlist and the long tail is irreducible** (RD-92). RD-82's
+  store-quote sample had 59 host families across 70 images, most of them merchant
+  self-hosts; `list_products` is ~97% covered by the declared origins and marketplace
+  research is 100%, but the remainder is blocked by the host's CSP and falls back to the
+  placeholder. That is the intended degradation, and widening the declaration to a bare
+  wildcard was considered and rejected — it would hand the frame permission to fetch from
+  anywhere for a few percent of rows that already degrade gracefully. Two things are
+  declared but **not yet verified against a live host**: the scraper bucket
+  (`autods-scraper-images.s3-us-west-2.amazonaws.com`, 51% of `list_products` rows and
+  not among RD-82's five tested hosts) and the wildcard forms. Both are release checks,
+  not assumptions.
+- **The per-client widget matrix was measured on mcp 1.x and is not re-verified.**
+  claude.ai web over a remote connector renders and honours `visibility`; Claude Desktop
+  over a *remote* connector does **not** render and shows raw `structuredContent`;
+  Desktop over local stdio renders; Claude Code renders nothing and ignores `visibility`.
+  The 2.x handshake changed enough that "unaffected" is an assumption — hence release
+  check R14, and hence the hard requirement that the text/`structuredContent` path stays
+  correct on its own.
+- **Signed CDN URLs expire, and a widget refetches on scroll** (RD-92). TikTok
+  marketplace URLs carry `t`/`ps`/`shp`/`shcp`; the rewrite deliberately leaves the query
+  untouched (it authorises the object, not the size), but a persisted conversation
+  reopened later shows broken images regardless. Proxy-vs-accept-decay is undecided and
+  has to be decided before a TikTok surface ships.
 - **OAuth metadata URL fields are typed `str`, not `AnyUrl`/`HttpUrl`** — `AnyUrl` appends a
   trailing slash and breaks the byte-identity RFC 8414/9728 require between `issuer`/
   `resource` and the discovery URL. Don't "clean up" the types. Relatedly, the advertised

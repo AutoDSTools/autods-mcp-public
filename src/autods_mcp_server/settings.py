@@ -160,6 +160,19 @@ class Settings(BaseSettings):
         validation_alias="COGNITO_ATTR_POSITIVE_CACHE_TTL_SECONDS",
     )
 
+    # RD-92, the opt-in base64 thumbnail path. Both bound work that happens on
+    # the tool-call path against third-party CDNs we do not control, so they are
+    # knobs rather than constants: a supplier host that turns slow should be
+    # survivable by config, not by a release. The *image* cap (20 × 252 px) is
+    # deliberately NOT configurable — it is a correctness bound derived from the
+    # client's silent truncation threshold, not a tuning parameter.
+    image_fetch_timeout_seconds: float = Field(default=5.0, validation_alias="IMAGE_FETCH_TIMEOUT_SECONDS")
+    # Per-image byte ceiling before decoding. Generous, because the point is to
+    # refuse an absurd original (a 40 MB TIFF) rather than to second-guess a
+    # legitimate 900 KB PNG — RD-82 measured plenty of those in the scraper
+    # bucket, and they downscale to a few KB.
+    image_fetch_max_bytes: int = Field(default=8_000_000, validation_alias="IMAGE_FETCH_MAX_BYTES")
+
     # Self-hosted Sentry DSN (``https://<key>@sentry.autods.com/<id>``),
     # delivered via External Secrets in staging/prod and unset locally. Kept
     # deliberately optional — no boot-time validator — so a missing DSN (or a

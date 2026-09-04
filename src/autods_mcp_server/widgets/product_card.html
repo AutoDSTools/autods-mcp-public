@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<!--
+AutoDS product card — MCP App served as ui://autods/product-card with
+mimeType "text/html;profile=mcp-app" (RD-92).
+
+One product, its hero image and the rest of its gallery as thumbnails that swap
+the hero on click. Same contract as product_grid.html: the browser fetches the
+images from the URLs in structuredContent (zero vision tokens), the document is
+self-contained with no build step, and it is read-only — no tools/call and no
+ui/message, so nothing here can mutate state or produce a duplicate write.
+
+The four load-bearing protocol rules and the reason findPayload() searches by
+shape rather than by channel name are documented at the top of
+product_grid.html; both files obey the same ones.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AutoDS product card</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #16181d; --muted: #6b7280;
+    --line: #e5e7eb; --cell: #f6f7f9; --accent: #0f62fe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e8eaed; --muted: #9aa2ad;
+      --line: #2a2e35; --cell: #1c1f25; --accent: #6ea8ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; background: var(--bg); color: var(--fg);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1 { font-size: 14px; font-weight: 600; margin: 0 0 10px; line-height: 1.35; }
+  #hero-wrap {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--cell);
+    overflow: hidden; max-width: 420px;
+  }
+  #hero { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: var(--cell); }
+  .ph {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; aspect-ratio: 1 / 1; color: var(--muted); font-size: 12px;
+  }
+  #strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; max-width: 420px; }
+  #strip button {
+    padding: 0; width: 56px; height: 56px; border: 1px solid var(--line);
+    border-radius: 6px; overflow: hidden; background: var(--cell); cursor: pointer;
+  }
+  #strip button[aria-current="true"] { border-color: var(--accent); border-width: 2px; }
+  #strip img { display: block; width: 100%; height: 100%; object-fit: contain; }
+  #note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+  #note[hidden], #strip[hidden] { display: none; }
+  #diag {
+    margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+    color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  #diag[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1 id="title">Product</h1>
+<div id="hero-wrap"></div>
+<div id="strip" hidden></div>
+<p id="note" hidden></p>
+<pre id="diag" hidden></pre>
+
+<script>
+(function () {
+  "use strict";
+
+  var PAYLOAD_KIND = "autods.images/1";
+  var $ = function (id) { return document.getElementById(id); };
+  var post = function (msg) { try { window.parent.postMessage(msg, "*"); } catch (_) {} };
+
+  var reportSize = function () {
+    var root = document.documentElement;
+    var prev = root.style.height;
+    root.style.height = "max-content";
+    var height = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = prev;
+    post({
+      jsonrpc: "2.0", method: "ui/notifications/size-changed",
+      params: { width: Math.ceil(window.innerWidth), height: height }
+    });
+  };
+
+  var seenMethods = [];
+  var diag = function (line) {
+    var node = $("diag");
+    node.hidden = false;
+    node.textContent += line + "\n";
+    reportSize();
+  };
+
+  var findPayload = function (node, depth) {
+    if (!node || typeof node !== "object" || depth > 8) return null;
+    if (node.kind === PAYLOAD_KIND && Array.isArray(node.items)) return node;
+    var keys = Array.isArray(node) ? node : Object.keys(node);
+    for (var i = 0; i < keys.length; i++) {
+      var child = Array.isArray(node) ? keys[i] : node[keys[i]];
+      var hit = findPayload(child, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  var placeholder = function (text) {
+    var node = document.createElement("div");
+    node.className = "ph";
+    node.textContent = text;
+    return node;
+  };
+
+  var showHero = function (url, alt) {
+    var wrap = $("hero-wrap");
+    wrap.textContent = "";
+    if (!url) {
+      wrap.appendChild(placeholder("no image"));
+      reportSize();
+      return;
+    }
+    var img = document.createElement("img");
+    img.id = "hero";
+    img.decoding = "async";
+    img.alt = alt || "";
+    img.onerror = function () {
+      wrap.textContent = "";
+      wrap.appendChild(placeholder("image unavailable"));
+      reportSize();
+    };
+    img.onload = reportSize;
+    img.src = url;
+    wrap.appendChild(img);
+  };
+
+  var rendered = false;
+
+  var render = function (payload) {
+    if (rendered) return;
+    rendered = true;
+
+    // A card renders one item; a payload carrying several (a by-id read that
+    // returned a list) shows the first and says so rather than dropping the
+    // rest without a word.
+    var item = (payload.items || [])[0] || { images: [] };
+    var images = item.images || [];
+    if (item.label) $("title").textContent = item.label;
+
+    showHero(images.length ? images[0].url : null, item.label);
+
+    if (images.length > 1) {
+      var strip = $("strip");
+      strip.hidden = false;
+      images.forEach(function (image, index) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.setAttribute("aria-current", index === 0 ? "true" : "false");
+        button.title = "Image " + (index + 1) + " of " + images.length;
+        var thumb = document.createElement("img");
+        thumb.loading = "lazy";
+        thumb.decoding = "async";
+        thumb.alt = "";
+        thumb.onerror = function () { button.disabled = true; button.textContent = "×"; };
+        thumb.src = image.url;
+        button.appendChild(thumb);
+        button.addEventListener("click", function () {
+          Array.prototype.forEach.call(strip.children, function (other) {
+            other.setAttribute("aria-current", "false");
+          });
+          button.setAttribute("aria-current", "true");
+          showHero(image.url, item.label);
+        });
+        strip.appendChild(button);
+      });
+    }
+
+    var notes = [];
+    if (payload.note) notes.push(payload.note);
+    if ((payload.items || []).length > 1) {
+      notes.push("Showing the first of " + payload.items.length + " products in this result.");
+    }
+    if (notes.length) {
+      $("note").textContent = notes.join(" ");
+      $("note").hidden = false;
+    }
+    reportSize();
+  };
+
+  var initDone = false;
+
+  window.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || typeof data !== "object") return;
+
+    if (data.method && seenMethods.indexOf(data.method) === -1) seenMethods.push(data.method);
+    if (data.method === "ui/notifications/host-context-changed") reportSize();
+
+    var payload = findPayload(data, 0);
+    if (payload) render(payload);
+
+    var result = data.result;
+    if (result && !initDone) {
+      initDone = true;
+      post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+      reportSize();
+      setTimeout(reportSize, 250);
+    }
+  });
+
+  post({
+    jsonrpc: "2.0", id: 1, method: "ui/initialize",
+    params: {
+      appInfo: { name: "autods-product-card", version: "1.0.0" },
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+      protocolVersion: "2025-11-21"
+    }
+  });
+
+  reportSize();
+  window.addEventListener("load", reportSize);
+  window.addEventListener("resize", reportSize);
+
+  setTimeout(function () {
+    if (rendered) return;
+    diag("No product payload reached this widget.");
+    diag("Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.");
+    diag("Host methods seen: " + (seenMethods.join(", ") || "(none)"));
+    diag("The image URLs are still in this tool result's structuredContent.");
+  }, 3000);
+})();
+</script>
+</body>
+</html>

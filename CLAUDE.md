@@ -1328,13 +1328,30 @@ production incident; don't undo the guard without understanding why it's there.
   (`autods-scraper-images.s3-us-west-2.amazonaws.com`, 51% of `list_products` rows and
   not among RD-82's five tested hosts) and the wildcard forms. Both are release checks,
   not assumptions.
-- **The per-client widget matrix was measured on mcp 1.x and is not re-verified.**
-  claude.ai web over a remote connector renders and honours `visibility`; Claude Desktop
-  over a *remote* connector does **not** render and shows raw `structuredContent`;
-  Desktop over local stdio renders; Claude Code renders nothing and ignores `visibility`.
-  The 2.x handshake changed enough that "unaffected" is an assumption — hence release
-  check R14, and hence the hard requirement that the text/`structuredContent` path stays
-  correct on its own.
+- **The per-client widget matrix, re-measured on mcp 2.x** (2026-09-15, against staging
+  0.7.3; client versions were not recorded, so read the rows as "this client, that date").
+  Every row matched its 1.x reading, so the 2.x handshake changed nothing here:
+
+  | Client | Renders the widget? |
+  |---|---|
+  | claude.ai web (remote connector) | **yes**, and honours `visibility` |
+  | Claude Desktop (remote connector) | **no** — shows raw `structuredContent` |
+  | Claude Code | **no**, and ignores `visibility` |
+
+  Desktop over a *remote* connector showing no grid is the expected answer, not a fault.
+  It is the most common false alarm this matrix exists to settle, because it looks exactly
+  like a broken widget to whoever reports it — so establish the transport before believing
+  any "Desktop shows no grid" report, and never grade it from what the assistant says about
+  which client it is running in. Hence also the hard requirement that the
+  text/`structuredContent` path stays correct on its own.
+
+  **Local stdio is deliberately not a row.** This server has no stdio transport — it is
+  HTTP-only — so reaching it that way needs a hand-written `mcp-remote` bridge, which no
+  user has. That configuration is worth keeping as a *development* technique, for trying a
+  widget change against a locally launched server before it goes to staging; it is not a
+  client to compare against, and a result measured through a bridge cannot tell a client
+  problem from a bridge problem. The three rows above are how the server is actually
+  reached.
 - **The widget's own "nothing arrived" diagnostic was armed on a fixed timer, and
   fired on healthy calls** (RD-92, found on the first staging release). The box read
   "No product payload reached this widget" while sitting under a grid full of

@@ -121,7 +121,7 @@ environment a call lands in. Before the first tool call:
 | 3 | **C3–C9** — handshake payload | `make release-checks-c` (shell) | nothing |
 | 4 | **P** — account readiness | Claude, MCP | which of R/W can run at all |
 | 5 | **R** — reads | Claude, MCP | W |
-| 5b | **R15.2 / R16** — widget rendering | human, at claude.ai web | nothing |
+| 5b | **R15.2** — widget rendering | human, at claude.ai web | nothing |
 | 6 | **W** — writes | Claude, MCP, gated | nothing |
 | 7 | **O** — observability | mixed | nothing |
 
@@ -588,8 +588,8 @@ connector added, and nothing Claude can drive substitutes for it. Establish it
 here rather than discovering it at R15 — ask once, alongside C1, whether the human
 has that session open (C1 normally leaves them signed in on web anyway, which is
 why this costs nothing).
-*Fixture:* whether R15.2 and R16 can run at all.
-*If not available:* R15.2 and R16 are `skipped (no widget-rendering client)`, and
+*Fixture:* whether R15.2 can run at all.
+*If not available:* R15.2 is `skipped (no widget-rendering client)`, and
 the report says the rendering path is unverified for this release. R15.1 still
 runs and still grades the data.
 *Note it if* the only client to hand is Claude Desktop over a remote connector or
@@ -846,6 +846,12 @@ against the released commit, which takes seconds.
 - **No widget at all, raw JSON instead** → expected in Claude Code, Cursor and
   MCP Inspector, and expected in Claude **Desktop over a remote connector**.
   Only claude.ai web is a pass/fail here. Note which client was used.
+  Establish the *transport* before treating any "Desktop shows no grid" report
+  as a finding — over a remote connector that is the documented answer, and it
+  is the most common false alarm here. A model's own claim about which client
+  it is running in is not evidence: grade this from whether a grid appeared.
+  The per-client matrix in `CLAUDE.md` was re-measured on mcp 2.x on 2026-09-15
+  and every row matched 1.x, so it needs no per-release re-check.
 
 *If R15.2 cannot be run* (no browser, no web session): `skipped`, and say plainly
 that the rendering path is unverified for this release — R15.1 passing proves the
@@ -863,13 +869,6 @@ once: if its scraper-bucket cells load, record it. That is what keeps the
 Content-Type mismatch a cosmetic ticket in another repository rather than a
 blocker here.
 
-**R16 — The per-client widget matrix, on mcp 2.x.** The matrix in `CLAUDE.md` was
-measured on mcp 1.x and the 2.x handshake changed enough that carrying it forward
-is an assumption. On the first release that ships a widget, run R15.2's prompt in
-each client available and record the row with the client version and the date:
-claude.ai web (remote connector), Claude Desktop (remote connector), Claude
-Desktop (local stdio), Claude Code. Then update the matrix. This is a one-off, not
-a per-release check — once recorded, drop R16 from the run.
 
 ---
 

@@ -76,9 +76,19 @@ an empty box, and the transcript names the method that carried the data.
     width: 100%; aspect-ratio: 1 / 1; color: var(--muted); font-size: 11px;
     text-align: center; padding: 6px;
   }
-  .label {
-    padding: 6px 8px; font-size: 12px; line-height: 1.35;
+  /* The padding is on the wrapper and the clamp is on the inner span, which is
+     not a nesting for its own sake: -webkit-line-clamp limits the CONTENT box
+     and lets the next line paint into the element's own bottom padding, so a
+     clamped box with padding shows two ellipsised lines plus a sliced third one
+     (seen on staging). With no padding of its own, the clamped span clips
+     exactly where it ends. */
+  .label { padding: 6px 8px; font-size: 12px; line-height: 1.35; }
+  .label > span {
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    /* Not a duplicate of the clamp: a browser that does not honour
+       -webkit-line-clamp cuts at two whole lines here instead of a half one. */
+    max-height: 2.7em;
+    overflow-wrap: anywhere;
   }
   #diag {
     margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
@@ -117,12 +127,42 @@ an empty box, and the transcript names the method that carried the data.
     });
   };
 
+  // The diagnostic is a report about silence, so it is armed as an IDLE timer —
+  // restarted by every host message — and it is retractable. A fixed timer from
+  // load fires while the tool call itself is still running (the host sends
+  // tool-input-partial before the tool is even called), and a diagnostic that
+  // cannot be taken back then sits under a grid that rendered perfectly a moment
+  // later. Both halves are needed: the idle timer stops it appearing on a slow
+  // call, and clearDiagnostic() removes it if the payload arrives even so.
+  var DIAG_IDLE_MS = 20000;
+  var diagTimer = null;
   var seenMethods = [];
-  var diag = function (line) {
+
+  var clearDiagnostic = function () {
+    if (diagTimer !== null) { clearTimeout(diagTimer); diagTimer = null; }
+    var node = $("diag");
+    if (node.hidden) return false;
+    node.textContent = "";
+    node.hidden = true;
+    return true;
+  };
+
+  var showDiagnostic = function () {
+    if (rendered) return;
     var node = $("diag");
     node.hidden = false;
-    node.textContent += line + "\n";
+    node.textContent =
+      "No product payload reached this widget.\n" +
+      "Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.\n" +
+      "Host methods seen: " + (seenMethods.join(", ") || "(none)") + "\n" +
+      "The image URLs are still in this tool result's structuredContent.\n";
     reportSize();
+  };
+
+  var armDiagnostic = function () {
+    if (rendered) return;
+    if (diagTimer !== null) clearTimeout(diagTimer);
+    diagTimer = setTimeout(showDiagnostic, DIAG_IDLE_MS);
   };
 
   // The payload's location in the host's message is not specified by anything
@@ -146,6 +186,7 @@ an empty box, and the transcript names the method that carried the data.
   var render = function (payload) {
     if (rendered) return;
     rendered = true;
+    clearDiagnostic();
 
     var items = payload.items || [];
     var total = typeof payload.total === "number" ? payload.total : items.length;
@@ -195,7 +236,13 @@ an empty box, and the transcript names the method that carried the data.
       if (item.label) {
         var label = document.createElement("div");
         label.className = "label";
-        label.textContent = item.label;
+        // Two lines is all a 120px cell can carry, and supplier titles are
+        // keyword-stuffed well past that, so the full one goes on the cell as a
+        // tooltip rather than being lost at the ellipsis.
+        cell.title = item.label;
+        var labelText = document.createElement("span");
+        labelText.textContent = item.label;
+        label.appendChild(labelText);
         cell.appendChild(label);
       }
       grid.appendChild(cell);
@@ -218,6 +265,9 @@ an empty box, and the transcript names the method that carried the data.
 
     if (data.method && seenMethods.indexOf(data.method) === -1) seenMethods.push(data.method);
     if (data.method === "ui/notifications/host-context-changed") reportSize();
+    // The host is talking, so whatever it is about to send has not stopped
+    // coming. Restart the countdown.
+    armDiagnostic();
 
     var payload = findPayload(data, 0);
     if (payload) render(payload);
@@ -246,17 +296,11 @@ an empty box, and the transcript names the method that carried the data.
   window.addEventListener("load", reportSize);
   window.addEventListener("resize", reportSize);
 
-  // If nothing tagged with our marker arrived, say which methods the host DID
+  // If nothing tagged with our marker arrives, say which methods the host DID
   // send. An empty grid with no explanation is the failure mode this whole
   // ticket is about; naming the channel turns a silent blank into a one-line
   // bug report.
-  setTimeout(function () {
-    if (rendered) return;
-    diag("No product payload reached this widget.");
-    diag("Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.");
-    diag("Host methods seen: " + (seenMethods.join(", ") || "(none)"));
-    diag("The image URLs are still in this tool result's structuredContent.");
-  }, 3000);
+  armDiagnostic();
 })();
 </script>
 </body>

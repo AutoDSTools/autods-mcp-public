@@ -1335,6 +1335,33 @@ production incident; don't undo the guard without understanding why it's there.
   The 2.x handshake changed enough that "unaffected" is an assumption — hence release
   check R14, and hence the hard requirement that the text/`structuredContent` path stays
   correct on its own.
+- **The widget's own "nothing arrived" diagnostic was armed on a fixed timer, and
+  fired on healthy calls** (RD-92, found on the first staging release). The box read
+  "No product payload reached this widget" while sitting under a grid full of
+  pictures, and it went away on its own if the same search happened to be quicker —
+  which reads as a flaky widget rather than as a message about timing. Two causes,
+  both needing a fix. The timer ran 3 s from document load, but claude.ai loads the
+  frame while the tool *input* is still streaming (`ui/notifications/tool-input-partial`
+  is the first method the widget sees) and delivers the result only after the tool has
+  run, so on any call slower than three seconds the deadline passed before the payload
+  could exist. And the box could not be taken back: `render()` never touched it. So the
+  timer is now an *idle* one — restarted by every inbound host message, on the reading
+  that a host still talking has not finished sending — and `render()` clears the box if
+  it printed anyway. Keep both halves: the idle timer alone still misfires on a long
+  silent tool call, and the retraction alone leaves a box that flashes up on every slow
+  search. Verified by driving the asset in headless chromium against a fake host;
+  `test_the_diagnostic_is_idle_armed_and_retractable` greps the served asset, because
+  nothing in CI renders HTML.
+- **`-webkit-line-clamp` clips the content box and lets the next line paint into the
+  element's own bottom padding** (RD-92, same release). The grid's product titles
+  showed two ellipsised lines *plus* a sliced third one — not a clamp that failed, but
+  a clamp that worked and then leaked into its 6 px of padding, which is why the
+  ellipsis was right there on line two while a third line was visible under it. The
+  clamp now sits on an inner `span` with no padding of its own and the padding stays on
+  the `.label` wrapper; the extra `max-height` beside it is for a browser that ignores
+  the clamp, not a duplicate of it. Don't merge the two elements back together to tidy
+  the markup. The full title rides on the cell's `title` attribute, since no cell width
+  fits a keyword-stuffed supplier title.
 - **Signed CDN URLs expire, and a widget refetches on scroll** (RD-92). TikTok
   marketplace URLs carry `t`/`ps`/`shp`/`shcp`; the rewrite deliberately leaves the query
   untouched (it authorises the object, not the size), but a persisted conversation

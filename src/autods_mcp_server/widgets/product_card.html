@@ -88,12 +88,38 @@ product_grid.html; both files obey the same ones.
     });
   };
 
+  // Idle timer, and retractable — see the comment on the same block in
+  // product_grid.html for why a fixed timer from load prints a diagnostic under
+  // a card that renders correctly a moment later.
+  var DIAG_IDLE_MS = 20000;
+  var diagTimer = null;
   var seenMethods = [];
-  var diag = function (line) {
+
+  var clearDiagnostic = function () {
+    if (diagTimer !== null) { clearTimeout(diagTimer); diagTimer = null; }
+    var node = $("diag");
+    if (node.hidden) return false;
+    node.textContent = "";
+    node.hidden = true;
+    return true;
+  };
+
+  var showDiagnostic = function () {
+    if (rendered) return;
     var node = $("diag");
     node.hidden = false;
-    node.textContent += line + "\n";
+    node.textContent =
+      "No product payload reached this widget.\n" +
+      "Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.\n" +
+      "Host methods seen: " + (seenMethods.join(", ") || "(none)") + "\n" +
+      "The image URLs are still in this tool result's structuredContent.\n";
     reportSize();
+  };
+
+  var armDiagnostic = function () {
+    if (rendered) return;
+    if (diagTimer !== null) clearTimeout(diagTimer);
+    diagTimer = setTimeout(showDiagnostic, DIAG_IDLE_MS);
   };
 
   var findPayload = function (node, depth) {
@@ -142,6 +168,7 @@ product_grid.html; both files obey the same ones.
   var render = function (payload) {
     if (rendered) return;
     rendered = true;
+    clearDiagnostic();
 
     // A card renders one item; a payload carrying several (a by-id read that
     // returned a list) shows the first and says so rather than dropping the
@@ -198,6 +225,7 @@ product_grid.html; both files obey the same ones.
 
     if (data.method && seenMethods.indexOf(data.method) === -1) seenMethods.push(data.method);
     if (data.method === "ui/notifications/host-context-changed") reportSize();
+    armDiagnostic();
 
     var payload = findPayload(data, 0);
     if (payload) render(payload);
@@ -224,13 +252,7 @@ product_grid.html; both files obey the same ones.
   window.addEventListener("load", reportSize);
   window.addEventListener("resize", reportSize);
 
-  setTimeout(function () {
-    if (rendered) return;
-    diag("No product payload reached this widget.");
-    diag("Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.");
-    diag("Host methods seen: " + (seenMethods.join(", ") || "(none)"));
-    diag("The image URLs are still in this tool result's structuredContent.");
-  }, 3000);
+  armDiagnostic();
 })();
 </script>
 </body>

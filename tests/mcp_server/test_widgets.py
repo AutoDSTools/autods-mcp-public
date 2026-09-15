@@ -297,3 +297,34 @@ async def test_widget_assets_obey_the_measured_protocol_order(
         assert "ui/update-model-context" not in methods, uri
         # The payload marker both assets search for must match the server's.
         assert "autods.images/1" in html, uri
+
+
+async def test_the_diagnostic_is_idle_armed_and_retractable(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """The diagnostic must be able to take itself back.
+
+    Staging showed the "No product payload reached this widget" box sitting
+    under a grid full of pictures: the box was armed on a fixed timer from load,
+    and claude.ai delivers the tool result only once the tool has actually run —
+    which is later than any fixed timer worth having. So the timer is restarted
+    by every host message (a host that is still talking has not stopped
+    sending), and ``render`` clears the box if it printed anyway.
+
+    Nothing in CI renders HTML in a host's sandbox, so this greps the served
+    asset for the two constructs, the same way the protocol-order test above
+    does. A fixed ``setTimeout(..., 3000)`` on the diagnostic is what it is
+    written to keep out.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        served = {widget.uri: (await session.read_resource(widget.uri)).contents[0].text for widget in WIDGETS}
+
+    for uri, html in served.items():
+        assert "armDiagnostic" in html, uri
+        # Restarted on inbound host messages, not only armed once at boot.
+        assert html.count("armDiagnostic()") >= 2, uri
+        # And rendering retracts it.
+        assert re.search(r"rendered = true;\s*\n\s*clearDiagnostic\(\);", html), uri

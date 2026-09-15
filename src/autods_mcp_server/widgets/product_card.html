@@ -53,6 +53,11 @@ product_grid.html; both files obey the same ones.
   #strip img { display: block; width: 100%; height: 100%; object-fit: contain; }
   #note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
   #note[hidden], #strip[hidden] { display: none; }
+  /* Until the payload arrives the frame is an empty box, which reads as a
+     broken widget. See product_grid.html for why this covers the wait and the
+     diagnostic no longer does. */
+  #wait { margin: 0; color: var(--muted); font-size: 12px; }
+  #wait[hidden] { display: none; }
   #diag {
     margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
     color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -63,6 +68,7 @@ product_grid.html; both files obey the same ones.
 </head>
 <body>
 <h1 id="title">Product</h1>
+<p id="wait">Loading product…</p>
 <div id="hero-wrap"></div>
 <div id="strip" hidden></div>
 <p id="note" hidden></p>
@@ -90,8 +96,8 @@ product_grid.html; both files obey the same ones.
 
   // Idle timer, and retractable — see the comment on the same block in
   // product_grid.html for why a fixed timer from load prints a diagnostic under
-  // a card that renders correctly a moment later.
-  var DIAG_IDLE_MS = 20000;
+  // a card that renders correctly a moment later, and why the wait is a minute.
+  var DIAG_IDLE_MS = 60000;
   var diagTimer = null;
   var seenMethods = [];
 
@@ -106,6 +112,7 @@ product_grid.html; both files obey the same ones.
 
   var showDiagnostic = function () {
     if (rendered) return;
+    $("wait").hidden = true;
     var node = $("diag");
     node.hidden = false;
     node.textContent =
@@ -169,6 +176,7 @@ product_grid.html; both files obey the same ones.
     if (rendered) return;
     rendered = true;
     clearDiagnostic();
+    $("wait").hidden = true;
 
     // A card renders one item; a payload carrying several (a by-id read that
     // returned a list) shows the first and says so rather than dropping the

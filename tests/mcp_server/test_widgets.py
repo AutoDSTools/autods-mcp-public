@@ -328,3 +328,33 @@ async def test_the_diagnostic_is_idle_armed_and_retractable(
         assert html.count("armDiagnostic()") >= 2, uri
         # And rendering retracts it.
         assert re.search(r"rendered = true;\s*\n\s*clearDiagnostic\(\);", html), uri
+        # The wait is covered by a quiet line instead, so the diagnostic can
+        # afford to wait out a genuinely long call before accusing the host.
+        assert 'id="wait"' in html, uri
+        assert "DIAG_IDLE_MS = 60000" in html, uri
+
+
+async def test_the_grid_caption_is_not_truncated(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """Product's call: a supplier title is shown in full, however tall it makes
+    the cell.
+
+    The words that tell two near-identical listings apart sit at the *end* of a
+    keyword-stuffed title, so an ellipsis removes precisely the part a user is
+    choosing on. A two-line ``-webkit-line-clamp`` was shipped first and is the
+    thing this test keeps out — both because product rejected the truncation and
+    because the clamp bounds the content box while letting the next line paint
+    into the element's own padding, which rendered a sliced third line.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        grid = (await session.read_resource("ui://autods/product-grid")).contents[0].text
+
+    # Matched as CSS *declarations* — with the colon — because the asset
+    # discusses the clamp in a comment saying why it is not there, and a bare
+    # substring match would find the explanation rather than the rule.
+    assert "-webkit-line-clamp:" not in grid
+    assert "text-overflow:" not in grid

@@ -1349,19 +1349,23 @@ production incident; don't undo the guard without understanding why it's there.
   that a host still talking has not finished sending — and `render()` clears the box if
   it printed anyway. Keep both halves: the idle timer alone still misfires on a long
   silent tool call, and the retraction alone leaves a box that flashes up on every slow
-  search. Verified by driving the asset in headless chromium against a fake host;
+  search. The idle wait is a **minute**, and the empty wait is covered by a muted
+  "Loading products…" line instead: at twenty seconds the box still flashed up on
+  ordinary searches, and a user must never meet a technical diagnostic on a healthy
+  call — it is there for a *broken* channel, where a minute costs nothing. Verified by
+  driving the asset in headless chromium against a fake host;
   `test_the_diagnostic_is_idle_armed_and_retractable` greps the served asset, because
   nothing in CI renders HTML.
-- **`-webkit-line-clamp` clips the content box and lets the next line paint into the
-  element's own bottom padding** (RD-92, same release). The grid's product titles
-  showed two ellipsised lines *plus* a sliced third one — not a clamp that failed, but
-  a clamp that worked and then leaked into its 6 px of padding, which is why the
-  ellipsis was right there on line two while a third line was visible under it. The
-  clamp now sits on an inner `span` with no padding of its own and the padding stays on
-  the `.label` wrapper; the extra `max-height` beside it is for a browser that ignores
-  the clamp, not a duplicate of it. Don't merge the two elements back together to tidy
-  the markup. The full title rides on the cell's `title` attribute, since no cell width
-  fits a keyword-stuffed supplier title.
+- **The grid caption is shown in full, and truncating it is a product decision, not a
+  styling one** (RD-92). Supplier titles are keyword-stuffed and the words that tell two
+  near-identical listings apart sit at the *end*, so an ellipsis removes exactly what the
+  user is choosing on; cells stretching to the tallest title is the accepted cost.
+  A two-line `-webkit-line-clamp` shipped first and was wrong twice over — rejected on
+  the product question, and broken on its own terms: the clamp bounds the CONTENT box
+  and lets the next line paint into the element's own bottom padding, so it rendered two
+  ellipsised lines *plus* a sliced third one, which reads as a rendering fault rather
+  than as truncation. `test_the_grid_caption_is_not_truncated` keeps both clamping and
+  `text-overflow` out of the asset.
 - **Signed CDN URLs expire, and a widget refetches on scroll** (RD-92). TikTok
   marketplace URLs carry `t`/`ps`/`shp`/`shcp`; the rewrite deliberately leaves the query
   untouched (it authorises the object, not the size), but a persisted conversation

@@ -821,13 +821,16 @@ holders"* and look at the answer.
 - A box reading **"No product payload reached this widget"** → the document
   rendered and ran, but nothing tagged `autods.images/1` arrived. It prints the
   host methods it *did* see: quote that line, it names the channel. It appears
-  only after 20 s with no word from the host and disappears again if the payload
-  turns up late, so a box **under a grid that has pictures in it** is a bug in
-  the widget, not a report about the data — say so rather than reading it as a
-  finding about the images.
-- **Titles sliced mid-line** under the thumbnails (two lines, then the top of a
-  third) → the label clamp is leaking into its padding again. The picture itself
-  is fine; report it as cosmetic.
+  only after a full minute with no word from the host, and it retracts if the
+  payload turns up late, so a box **under a grid that has pictures in it** is a
+  bug in the widget, not a report about the data — say so rather than reading it
+  as a finding about the images.
+- A muted **"Loading products…"** line while the search runs → expected, and it
+  is what a user should see for the whole wait. Seeing the diagnostic box
+  instead, on a search that then succeeded, is a finding.
+- **Titles cut off** under the thumbnails — with an ellipsis, or sliced
+  mid-line → a regression. The caption is deliberately shown in full, however
+  tall the cell gets. The picture itself is fine; report it as cosmetic.
 - **Every cell "image unavailable"** → the sandbox is blocking the loads; the CSP
   is not reaching the host from the `resources/read` response.
 - **No widget at all, raw JSON instead** → expected in Claude Code, Cursor and

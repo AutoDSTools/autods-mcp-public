@@ -76,20 +76,23 @@ an empty box, and the transcript names the method that carried the data.
     width: 100%; aspect-ratio: 1 / 1; color: var(--muted); font-size: 11px;
     text-align: center; padding: 6px;
   }
-  /* The padding is on the wrapper and the clamp is on the inner span, which is
-     not a nesting for its own sake: -webkit-line-clamp limits the CONTENT box
-     and lets the next line paint into the element's own bottom padding, so a
-     clamped box with padding shows two ellipsised lines plus a sliced third one
-     (seen on staging). With no padding of its own, the clamped span clips
-     exactly where it ends. */
-  .label { padding: 6px 8px; font-size: 12px; line-height: 1.35; }
-  .label > span {
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-    /* Not a duplicate of the clamp: a browser that does not honour
-       -webkit-line-clamp cuts at two whole lines here instead of a half one. */
-    max-height: 2.7em;
+  /* The caption is deliberately NOT truncated. A supplier title is keyword-
+     stuffed and the distinguishing words sit at the end, so an ellipsis takes
+     away exactly what tells two similar products apart; the cost is that cells
+     in a row stretch to the tallest title, which is the accepted trade.
+     A two-line -webkit-line-clamp was tried first and is worth not bringing
+     back: the clamp bounds the CONTENT box and lets the next line paint into
+     the element's own bottom padding, so it rendered two ellipsised lines plus
+     a sliced third one. */
+  .label {
+    padding: 6px 8px; font-size: 12px; line-height: 1.35;
     overflow-wrap: anywhere;
   }
+  /* Until the payload arrives the frame is an empty box, which reads as a
+     broken widget. One muted line says it is working; the diagnostic below
+     replaces it only once the silence is long enough to be a real fault. */
+  #wait { margin: 0; color: var(--muted); font-size: 12px; }
+  #wait[hidden] { display: none; }
   #diag {
     margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
     color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -101,6 +104,7 @@ an empty box, and the transcript names the method that carried the data.
 <body>
 <div id="head"><h1>Products</h1><span id="count"></span></div>
 <p id="note" hidden></p>
+<p id="wait">Loading products…</p>
 <div id="grid"></div>
 <pre id="diag" hidden></pre>
 
@@ -134,7 +138,12 @@ an empty box, and the transcript names the method that carried the data.
   // cannot be taken back then sits under a grid that rendered perfectly a moment
   // later. Both halves are needed: the idle timer stops it appearing on a slow
   // call, and clearDiagnostic() removes it if the payload arrives even so.
-  var DIAG_IDLE_MS = 20000;
+  //
+  // A minute of host silence, because this box is for a BROKEN channel, and a
+  // user waiting through a slow search must never see it. Twenty seconds was
+  // still short enough to flash up on a normal search; the quiet "Loading"
+  // line is what covers that wait instead.
+  var DIAG_IDLE_MS = 60000;
   var diagTimer = null;
   var seenMethods = [];
 
@@ -149,6 +158,7 @@ an empty box, and the transcript names the method that carried the data.
 
   var showDiagnostic = function () {
     if (rendered) return;
+    $("wait").hidden = true;
     var node = $("diag");
     node.hidden = false;
     node.textContent =
@@ -187,6 +197,7 @@ an empty box, and the transcript names the method that carried the data.
     if (rendered) return;
     rendered = true;
     clearDiagnostic();
+    $("wait").hidden = true;
 
     var items = payload.items || [];
     var total = typeof payload.total === "number" ? payload.total : items.length;
@@ -236,13 +247,7 @@ an empty box, and the transcript names the method that carried the data.
       if (item.label) {
         var label = document.createElement("div");
         label.className = "label";
-        // Two lines is all a 120px cell can carry, and supplier titles are
-        // keyword-stuffed well past that, so the full one goes on the cell as a
-        // tooltip rather than being lost at the ellipsis.
-        cell.title = item.label;
-        var labelText = document.createElement("span");
-        labelText.textContent = item.label;
-        label.appendChild(labelText);
+        label.textContent = item.label;
         cell.appendChild(label);
       }
       grid.appendChild(cell);

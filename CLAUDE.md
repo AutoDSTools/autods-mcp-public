@@ -1351,6 +1351,21 @@ production incident; don't undo the guard without understanding why it's there.
   than shipping blind. Don't "simplify" that file away: it is the only thing standing
   between a mistyped path and a grid of empty cells, and empty cells are worse than no
   widget, because the client renders them as confidently as real ones.
+- **The second way a grid comes up empty: the *request* narrowed the payload** (RD-92,
+  fixed in 0.7.7). `list_products` told the model "for listing/summary use cases ALWAYS
+  pass `projection`" and gave an example listing neither `main_picture_url` nor `images` —
+  so an agent that followed the instruction got a rendered grid in which every cell read
+  "no image". The warning to project `main_picture_url` was in the same `notes`, two
+  paragraphs below the example that contradicted it, and the example is the half that gets
+  copied. Nothing could report this: the manifest block is correct, the paths are right,
+  the upstream answered 200, and the widget did its job on the data it was given. Note the
+  two failure modes are opposites and both look identical to a user — the block addressing
+  a field the payload never had (`get_recommended_products`) and the payload not carrying
+  a field the block correctly addresses (this one). `test_a_projection_example_keeps_the_
+  field_its_own_images_block_reads` now checks every projection example against its own
+  operation's `image_paths`, with prefix matching, so `variations.price` does not count as
+  covering `variations.*.main_picture_url.url`. If you add a projection example to a tool
+  that carries an images block, it must keep the pictures.
 - **The per-client widget matrix, re-measured on mcp 2.x** (2026-09-15, against staging
   0.7.3; client versions were not recorded, so read the rows as "this client, that date").
   Every row matched its 1.x reading, so the 2.x handshake changed nothing here:

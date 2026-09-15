@@ -8,6 +8,7 @@ would otherwise ship looking like protection and quietly do nothing.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -369,6 +370,62 @@ def test_every_shipped_images_block_resolves_a_url_against_its_own_payload(
             f"image_paths={operation.images.image_paths!r}. The widget renders those as empty cells "
             f"while the payload still carries a picture — check the path against a real response."
         )
+
+
+_JSON_ARRAY = re.compile(r"\[[^\[\]]*\]")
+
+
+def _projection_examples(notes: str) -> list[list[str]]:
+    """Every JSON list-of-strings literal in ``notes`` — i.e. its projection examples."""
+    examples: list[list[str]] = []
+    for candidate in _JSON_ARRAY.findall(notes):
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            continue  # prose like "{results: [...]}", not an example
+        if isinstance(parsed, list) and parsed and all(isinstance(entry, str) for entry in parsed):
+            examples.append(parsed)
+    return examples
+
+
+def _covers(projected: str, image_path: str) -> bool:
+    """Would projecting ``projected`` keep ``image_path`` in the response?"""
+    return image_path == projected or image_path.startswith(f"{projected}.")
+
+
+def test_a_projection_example_keeps_the_field_its_own_images_block_reads(
+    bundled_manifest_dir: Path,
+) -> None:
+    """An operation that tells the model to narrow the response must not hand it a
+    projection that drops the pictures.
+
+    ``list_products`` shipped exactly that: "ALWAYS pass `projection`" followed by an
+    example listing neither `main_picture_url` nor `images`. Following the instruction
+    literally produced a grid where every cell read "no image" — the tool answering 200,
+    the widget rendering, and nothing anywhere reporting a fault. The warning to project
+    `main_picture_url` was in the same `notes`, two paragraphs below the example that
+    contradicted it, and the example is the half that gets copied.
+    """
+    registry = build_registry(bundled_manifest_dir)
+    for operation in registry.list_operations():
+        if not operation.images or not operation.notes:
+            continue
+        if "projection" not in operation.notes:
+            continue
+
+        examples = _projection_examples(operation.notes)
+        assert examples, (
+            f"{operation.operation_id}: notes talk about `projection` and the operation declares an "
+            f"images block, but no example projection could be parsed out to check."
+        )
+        paths = operation.images.image_paths
+        for example in examples:
+            assert any(_covers(field, path) for field in example for path in paths), (
+                f"{operation.operation_id}: the example projection {example!r} keeps none of "
+                f"image_paths={paths!r}, so an agent copying it gets a grid of empty cells. "
+                f"Project the field the images block reads — for a nested path, the prefix that "
+                f"contains it."
+            )
 
 
 def test_no_payload_sample_outlives_the_block_it_documents(bundled_manifest_dir: Path) -> None:

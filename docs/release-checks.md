@@ -813,6 +813,16 @@ automated and it is the only check that sees what a user sees. In **claude.ai
 web** with the connector added, ask *"search the AutoDS Marketplace for phone
 holders"* and look at the answer.
 
+**If this release changed a widget, reconnect the connector before looking.**
+Disconnect it, close the tab, open a new one, connect and re-authenticate. An
+already-connected client keeps rendering the widget document it was served
+before — through a browser restart and a new conversation, and in Claude Desktop
+too — so without the reconnect this check grades the *previous* release and
+reports a shipped fix as missing. A stale render is the first thing to suspect
+when the symptom is "the fix is not there"; confirm which side is stale by
+reading `ui://autods/product-grid` back from the deployed server and diffing it
+against the released commit, which takes seconds.
+
 - A **thumbnail grid** with pictures in it → pass. Say roughly how many cells
   loaded; a few placeholders in the long tail are expected.
 - A **thin blank strip** → the host left the frame at its ~150 px default. The

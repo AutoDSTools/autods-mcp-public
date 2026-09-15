@@ -1356,6 +1356,23 @@ production incident; don't undo the guard without understanding why it's there.
   driving the asset in headless chromium against a fake host;
   `test_the_diagnostic_is_idle_armed_and_retractable` greps the served asset, because
   nothing in CI renders HTML.
+- **A widget change is invisible to an already-connected client until it reconnects, so a
+  screenshot is evidence about the host's cache, not about the deploy** (RD-92). After a
+  release, claude.ai kept rendering the *previously* served `ui://autods/product-grid`
+  document — through a browser restart and a brand-new conversation — so a fix that was
+  live on every replica looked like it had simply not shipped. What picked up the new
+  document was disconnecting the connector, closing the tab, reconnecting and
+  re-authenticating. Claude Desktop behaved the same way, so "I also checked the other
+  client" does not rule the cache out. The trap is that the obvious readings — a failed
+  deploy, a half-finished rollout, a CSS rule that does not work on the host — all fit the
+  evidence, and chasing any of them is wasted. So **check the server side first**: read the
+  resource back from the deployed host (the `ReadMcpResourceTool` against the connected
+  server, or `scripts/mcp_call.py`) and compare it to the checkout. It takes seconds and it
+  says which layer to look at; `scripts/mcp_token.py autods-public-staging` plus a handful
+  of fresh sessions also tells a rolling deploy apart from a cache, since each connection
+  reports `serverInfo.version` alongside the asset it serves. If this ever has to be fixed
+  rather than worked around, the lever is putting the build version in the widget's URI, so
+  every deploy is a URI no cache can answer with a stale copy.
 - **The grid caption is shown in full, and truncating it is a product decision, not a
   styling one** (RD-92). Supplier titles are keyword-stuffed and the words that tell two
   near-identical listings apart sit at the *end*, so an ellipsis removes exactly what the

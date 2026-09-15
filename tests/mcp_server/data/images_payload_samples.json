@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "One representative upstream payload per operation that declares an `images` block.",
+    "Shapes were captured from staging during a release check (2026-09-15) and trimmed to",
+    "the fields the block addresses. They exist so that the declared `image_paths` are",
+    "checked against the payload the upstream really returns, which no boot lint can do:",
+    "a block can satisfy every lint and still resolve nothing, which is how",
+    "get_recommended_products shipped a grid whose cells were all empty.",
+    "Adding an images block to an operation means adding its sample here."
+  ],
+  "search_products": {
+    "results": [
+      {
+        "_id": "66de36fb28873e16d24d953b",
+        "title": "Stroller Phone Mount Phone Holder Shopping Cart Phone Holder",
+        "images": [
+          "https://i5.walmartimages.com/seo/stroller-phone-mount.jpeg",
+          "https://i5.walmartimages.com/asr/second.jpeg"
+        ]
+      }
+    ],
+    "region": "US",
+    "currency": "USD"
+  },
+  "get_winning_products": {
+    "results": [
+      {
+        "_id": "6585f70120bc91eb30dbc23c",
+        "title": "Talking Flash Cards Early Educational Toys",
+        "images": [
+          "https://ae01.alicdn.com/kf/Sc3b30353cfd146359da76d22f48ef0e9a.jpg"
+        ]
+      }
+    ]
+  },
+  "get_similar_products": {
+    "results": [
+      {
+        "_id": "6777f715aa8722073a7b8dcb",
+        "title": "Car Dashboard Phone Holder",
+        "images": [
+          "https://ae01.alicdn.com/kf/S96ad4390225c4f229644d47a1b44e4b3S.jpg"
+        ]
+      }
+    ]
+  },
+  "get_recommended_products": {
+    "totalResults": 1,
+    "results": [
+      {
+        "_id": "66c4328758dc14460040d19a",
+        "autodsProductId": "66c4328758dc14460040d19a",
+        "parentId": "66de36fb28873e16d24d953b",
+        "title": "WEISIPU Motorcycle Phone Mount, 2024 Upgrade Bike Phone Holder",
+        "imgUrl": "https://i5.walmartimages.com/seo/weisipu-motorcycle-phone-mount.png"
+      }
+    ]
+  },
+  "get_product_by_id": {
+    "id": "66de36fb28873e16d24d953b",
+    "title": "Stroller Phone Mount Phone Holder Shopping Cart Phone Holder",
+    "imgUrl": "https://i5.walmartimages.com/seo/hero.jpeg",
+    "images": [
+      "https://i5.walmartimages.com/seo/gallery-one.jpeg",
+      "https://i5.walmartimages.com/asr/gallery-two.jpeg"
+    ],
+    "variations": [
+      {
+        "id": "2326363383",
+        "img_url": "https://i5.walmartimages.com/seo/variation.jpeg"
+      }
+    ]
+  },
+  "list_products": {
+    "results": [
+      {
+        "id": "6a8ff8cec4299075987b1b04",
+        "title": "USB Rechargeable LED Sensor Headlamp",
+        "main_picture_url": {
+          "image_id": "3439f282-426c-4ad1-9e4b-513dc5ddc943",
+          "url": "https://cdn.shopify.com/s/files/1/0661/2575/8634/files/headlamp.jpg?v=1787820432",
+          "index": 8
+        }
+      }
+    ]
+  }
+}

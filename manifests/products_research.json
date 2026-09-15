@@ -352,7 +352,8 @@
       "images": {
         "item_path": "results",
         "image_paths": [
-          "images.*"
+          "images.*",
+          "imgUrl"
         ],
         "per_item": 1,
         "max": 20,

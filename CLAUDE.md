@@ -258,6 +258,13 @@ same rule and same reason as `business_error` and `playbook`:
    path that yields anything is what makes that ordering mean something.
    `original_image_url` is deliberately never listed: it is the un-edited
    original and would misrepresent what is actually listed.
+
+   The paths are only as good as the payload they were written against, and the
+   grids do **not** share one shape — `get_recommended_products` returns a
+   singular `imgUrl` where the others return an `images` list. So a new or
+   edited block needs a recorded sample of its own upstream response in
+   `tests/mcp_server/data/images_payload_samples.json`; see the gotcha on a
+   block that passes every lint and still addresses nothing.
 3. **`base64` is three-valued, because the surfaces need three.** `"opt_in"`
    offers `include_images` defaulting off; `"off"` withholds the parameter
    entirely; `"default_on"` is reserved for the one shape where the *model* must
@@ -1328,6 +1335,22 @@ production incident; don't undo the guard without understanding why it's there.
   (`autods-scraper-images.s3-us-west-2.amazonaws.com`, 51% of `list_products` rows and
   not among RD-82's five tested hosts) and the wildcard forms. Both are release checks,
   not assumptions.
+- **An `images` block can pass every boot lint and still address nothing** (RD-92, found
+  by a release check against staging 0.7.3, fixed in 0.7.6). `get_recommended_products`
+  declared `image_paths: ["images.*"]`, but that operation is the one grid whose results
+  carry a singular **`imgUrl`** and no `images` list at all — so every item resolved an
+  empty URL list. Nothing reported it: the block had a non-empty `image_paths`, no bracket
+  notation, `per_item × max ≤ 20`, a registered widget and `notes` mentioning thumbnails,
+  so `assert_images_usable` passed; the tool answered 200; and the envelope still
+  advertised `shown: 20 / total: 20` while the widget rendered twenty empty cells. The
+  lints check a block's *shape* and cannot check that its paths hit anything, because that
+  needs the upstream payload. So every shipped block is now run against a recorded sample
+  of its own upstream shape in `tests/mcp_server/data/images_payload_samples.json`
+  (`test_every_shipped_images_block_resolves_a_url_against_its_own_payload`). **Adding an
+  `images` block means adding its sample** — a block with no sample fails the suite rather
+  than shipping blind. Don't "simplify" that file away: it is the only thing standing
+  between a mistyped path and a grid of empty cells, and empty cells are worse than no
+  widget, because the client renders them as confidently as real ones.
 - **The per-client widget matrix, re-measured on mcp 2.x** (2026-09-15, against staging
   0.7.3; client versions were not recorded, so read the rows as "this client, that date").
   Every row matched its 1.x reading, so the 2.x handshake changed nothing here:

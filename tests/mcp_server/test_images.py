@@ -7,6 +7,10 @@ field is simply absent. ``assert_images_usable`` refuses to boot on a block that
 would otherwise ship looking like protection and quietly do nothing.
 """
 
+import json
+from pathlib import Path
+from typing import Any
+
 import pytest
 
 from autods_mcp_server.images import (
@@ -18,6 +22,7 @@ from autods_mcp_server.images import (
     extract_images,
     truncation_note,
 )
+from autods_mcp_server.manifests.loader import build_registry
 from autods_mcp_server.manifests.schema import ManifestOperation
 
 _NOTES = "Read-only. Thumbnails ride beside `data`."
@@ -309,3 +314,67 @@ def test_a_valid_block_passes() -> None:
 
 def test_an_operation_with_no_block_passes() -> None:
     assert_images_usable(_operation())
+
+
+# --------------------------------------------------------------------------
+# Every shipped block, against the payload its own upstream really returns
+# --------------------------------------------------------------------------
+#
+# The lints above check a block's *shape*; they cannot check that its paths
+# address anything, because that needs the upstream payload. A block can pass
+# every lint and resolve nothing — which is exactly how ``get_recommended_products``
+# shipped a grid whose cells were all empty: it declared ``images.*`` against a
+# payload whose only picture is a singular ``imgUrl``. Nothing failed. The tool
+# answered 200, the envelope advertised ``shown: 20 / total: 20``, and every item
+# carried an empty list. It took a human looking at a live client to see it.
+#
+# So each shipped block is run against a recorded sample of its own upstream's
+# shape. A new images block with no sample fails here rather than shipping blind.
+
+_SAMPLE_FILE = Path(__file__).parent / "data" / "images_payload_samples.json"
+
+
+def _payload_samples() -> dict[str, Any]:
+    samples = json.loads(_SAMPLE_FILE.read_text(encoding="utf-8"))
+    return {key: value for key, value in samples.items() if not key.startswith("_")}
+
+
+def test_every_shipped_images_block_resolves_a_url_against_its_own_payload(
+    bundled_manifest_dir: Path,
+) -> None:
+    """A declared block must actually yield a picture for the shape it ships against."""
+    registry = build_registry(bundled_manifest_dir)
+    carrying = [op for op in registry.list_operations() if op.images]
+    assert carrying, "no shipped operation declares an images block — this test proves nothing"
+
+    samples = _payload_samples()
+    unsampled = sorted(op.operation_id for op in carrying if op.operation_id not in samples)
+    assert not unsampled, (
+        f"these operations declare an images block with no recorded payload sample: {unsampled}. "
+        f"Add one to {_SAMPLE_FILE.name}, taken from a real response — the boot lints cannot tell "
+        f"whether the declared image_paths address anything in the payload."
+    )
+
+    for operation in carrying:
+        payload = samples[operation.operation_id]
+        block = extract_images(operation, payload)
+        assert block is not None, f"{operation.operation_id}: declared an images block but extracted nothing"
+
+        items = block["items"]
+        assert items, f"{operation.operation_id}: extracted no items from its own payload sample"
+
+        empty = [item.get("id") for item in items if not item.get("images")]
+        assert not empty, (
+            f"{operation.operation_id}: {len(empty)} of {len(items)} item(s) resolved no image URL from "
+            f"image_paths={operation.images.image_paths!r}. The widget renders those as empty cells "
+            f"while the payload still carries a picture — check the path against a real response."
+        )
+
+
+def test_no_payload_sample_outlives_the_block_it_documents(bundled_manifest_dir: Path) -> None:
+    """A sample for an operation that no longer declares a block is dead weight that
+    reads as coverage."""
+    registry = build_registry(bundled_manifest_dir)
+    declaring = {op.operation_id for op in registry.list_operations() if op.images}
+    stale = sorted(set(_payload_samples()) - declaring)
+    assert not stale, f"payload samples with no images block left to check: {stale}"

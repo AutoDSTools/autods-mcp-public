@@ -10,7 +10,7 @@
       "path": "/products/",
       "summary": "Search the product-research catalog by filter.",
       "description": "",
-      "notes": "Read-only POST. Searches the product-research catalog and returns `{results: [...], region, currency}`. Winning products and deleted products are excluded automatically.\n\nThe body is a filter object. `order_by` ({name, direction}) and `filters` are both REQUIRED. `filters` is a list of {name, value, value_type, op}, all combined with AND; an unfiltered listing is `filters: []` — a body with no `filters` key at all is refused before the call is made, because the upstream answers that shape with an error rather than a listing. The whole filter vocabulary, with the `value_type` and `op` each field takes, is documented on the `filters[].name` parameter; the three most useful: free text is `{name: \"search_query\", value_type: \"string\", op: \"search\"}`, the AutoDS Marketplace is `{name: \"site_name\", value: \"private_suppliers\", value_type: \"list\", op: \"in\"}`, and a category is `{name: \"categories.autods_category_id.$id\", value_type: \"objectId\", op: \"=\"}` with an id from `get_categories` (a parent id matches every product in its whole subtree). `region` is resolved from the user's settings server-side and is ignored if sent.\n\nThree things about the response a caller gets wrong otherwise:\n\n- **Results are card-shaped, not full products.** Each result carries 12 fields — the ids, `title`, `images`, `categories`, `site_name`, `supplier_name`, `private_supplier`, `product_details` and the winning-product flags. Fields you can *filter* on are not all fields you *get back*: `rating`, `description`, `brand`, `url` and the per-variation details are absent here. Call `get_product_by_id` with a result's `_id` for the full document.\n- **No total count is returned.** Page with `offset`/`limit` (default limit 10) and stop on an empty page — but read the next bullet before treating a short page as the end.\n- **Paging ends at 10,000 results, and the final page comes back short rather than empty.** An `offset` beyond that window is refused as `invalid_arguments` (it is capped at 9999 in this schema), but a page that merely runs past the ceiling from inside the window is silently truncated instead — `offset: 9999, limit: 2` returns one result. So a short page near the ceiling is not proof the catalog is exhausted; narrow the filters instead of paging on.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there.",
+      "notes": "Read-only POST. Searches the product-research catalog and returns `{results: [...], region, currency}`. Winning products and deleted products are excluded automatically.\n\nThe body is a filter object. `order_by` ({name, direction}) and `filters` are both REQUIRED. `filters` is a list of {name, value, value_type, op}, all combined with AND; an unfiltered listing is `filters: []` — a body with no `filters` key at all is refused before the call is made, because the upstream answers that shape with an error rather than a listing. The whole filter vocabulary, with the `value_type` and `op` each field takes, is documented on the `filters[].name` parameter; the three most useful: free text is `{name: \"search_query\", value_type: \"string\", op: \"search\"}`, the AutoDS Marketplace is `{name: \"site_name\", value: \"private_suppliers\", value_type: \"list\", op: \"in\"}`, and a category is `{name: \"categories.autods_category_id.$id\", value_type: \"objectId\", op: \"=\"}` with an id from `get_categories` (a parent id matches every product in its whole subtree). `region` is resolved from the user's settings server-side and is ignored if sent.\n\nThree things about the response a caller gets wrong otherwise:\n\n- **Results are card-shaped, not full products.** Each result carries 12 fields — the ids, `title`, `images`, `categories`, `site_name`, `supplier_name`, `private_supplier`, `product_details` and the winning-product flags. Fields you can *filter* on are not all fields you *get back*: `rating`, `description`, `brand`, `url` and the per-variation details are absent here. Call `get_product_by_id` with a result's `_id` for the full document.\n- **No total count is returned.** Page with `offset`/`limit` (default limit 10) and stop on an empty page — but read the next bullet before treating a short page as the end.\n- **Paging ends at 10,000 results, and the final page comes back short rather than empty.** An `offset` beyond that window is refused as `invalid_arguments` (it is capped at 9999 in this schema), but a page that merely runs past the ceiling from inside the window is silently truncated instead — `offset: 9999, limit: 2` returns one result. So a short page near the ceiling is not proof the catalog is exhausted; narrow the filters instead of paging on.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -32,7 +32,12 @@
         "label_path": "title",
         "id_path": "_id",
         "widget": "product-grid",
-        "base64": "off"
+        "base64": "off",
+        "links": [
+          {
+            "route": "marketplace_product"
+          }
+        ]
       },
       "body_schema": {
         "type": "object",
@@ -134,7 +139,7 @@
       "path": "/products/winning",
       "summary": "List winning products with optional discovery filters.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (24-character hex id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there.",
+      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (24-character hex id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -227,7 +232,12 @@
         "label_path": "title",
         "id_path": "_id",
         "widget": "product-grid",
-        "base64": "off"
+        "base64": "off",
+        "links": [
+          {
+            "route": "hand_picked_product"
+          }
+        ]
       }
     },
     {
@@ -236,7 +246,7 @@
       "path": "/products/{product_id}",
       "summary": "Get a single product by its id.",
       "description": "",
-      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices/region normalised to the user's settings. A winning product the caller is not entitled to see (no Product Finding Hub add-on) is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\" — that error means the entitlement is missing, not that the id is wrong or the service is down, so do not retry it and do not report a fault: say the product needs the Product Finding Hub add-on. `get_winning_products` still returns the limited free set without it.\n\nProduct images: this product's gallery (up to 8 images) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The full-size URLs stay in `data` either way — `images` (the gallery), `imgUrl` (the hero) and `variations[].img_url` (per variation). Set `include_images: true` only when the model itself has to judge a picture — it attaches base64 thumbnails and does cost vision tokens.",
+      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices/region normalised to the user's settings. A winning product the caller is not entitled to see (no Product Finding Hub add-on) is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\" — that error means the entitlement is missing, not that the id is wrong or the service is down, so do not retry it and do not report a fault: say the product needs the Product Finding Hub add-on. `get_winning_products` still returns the limited free set without it.\n\nProduct images: this product's gallery (up to 8 images) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The full-size URLs stay in `data` either way — `images` (the gallery), `imgUrl` (the hero) and `variations[].img_url` (per variation). Set `include_images: true` only when the model itself has to judge a picture — it attaches base64 thumbnails and does cost vision tokens. The block also carries a `link` to this product's page in the AutoDS web app: a client that renders the card makes the title clickable, and the URL is in the block either way.",
       "tags": [
         "products"
       ],
@@ -267,7 +277,12 @@
         "label_path": "title",
         "id_path": "id",
         "widget": "product-card",
-        "base64": "opt_in"
+        "base64": "opt_in",
+        "links": [
+          {
+            "route": "marketplace_product"
+          }
+        ]
       }
     },
     {
@@ -276,7 +291,7 @@
       "path": "/products/{product_id}/similar",
       "summary": "Get products similar to the given product.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there.",
+      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -306,7 +321,12 @@
         "label_path": "title",
         "id_path": "_id",
         "widget": "product-grid",
-        "base64": "off"
+        "base64": "off",
+        "links": [
+          {
+            "route": "marketplace_product"
+          }
+        ]
       }
     },
     {
@@ -315,7 +335,7 @@
       "path": "/products/recommended/{product_id}",
       "summary": "Get products recommended for the given product.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...], total_results} of products recommended for the given product id, with prices normalised to the user's currency/region. Use `offset`/`limit` for pagination (default limit 10).\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there.",
+      "notes": "Read-only. Returns {results: [...], total_results} of products recommended for the given product id, with prices normalised to the user's currency/region. Use `offset`/`limit` for pagination (default limit 10).\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -360,7 +380,12 @@
         "label_path": "title",
         "id_path": "_id",
         "widget": "product-grid",
-        "base64": "off"
+        "base64": "off",
+        "links": [
+          {
+            "route": "marketplace_product"
+          }
+        ]
       }
     },
     {

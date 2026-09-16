@@ -53,6 +53,12 @@ product_grid.html; both files obey the same ones.
   #strip img { display: block; width: 100%; height: 100%; object-fit: contain; }
   #note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
   #note[hidden], #strip[hidden] { display: none; }
+  /* The title is the link when the server sent one — the hero image is not,
+     because clicking the picture is how the gallery is browsed. */
+  h1 a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  h1 a:hover { color: var(--accent); }
+  #blocked { margin: 10px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
+  #blocked[hidden] { display: none; }
   /* Until the payload arrives the frame is an empty box, which reads as a
      broken widget. See product_grid.html for why this covers the wait and the
      diagnostic no longer does. */
@@ -72,6 +78,7 @@ product_grid.html; both files obey the same ones.
 <div id="hero-wrap"></div>
 <div id="strip" hidden></div>
 <p id="note" hidden></p>
+<p id="blocked" hidden></p>
 <pre id="diag" hidden></pre>
 
 <script>
@@ -141,6 +148,44 @@ product_grid.html; both files obey the same ones.
     return null;
   };
 
+  // Opening the product's page. Same three-step chain as product_grid.html,
+  // and the comment there explains why it is a chain: nothing has ever measured
+  // whether a host lets a widget leave the frame, window.open returns null
+  // without a word when the sandbox forbids it, and the openLinks method name
+  // is a reading of the spec rather than a measurement. Duplicated rather than
+  // shared because these assets have no build step.
+  var OPEN_LINK_METHOD = "ui/open-link";
+  var OPEN_LINK_TIMEOUT_MS = 1500;
+  var hostCapabilities = {};
+  var pendingOpens = {};
+  var nextRequestId = 2;
+
+  var showBlockedLink = function (url) {
+    var node = $("blocked");
+    // Conditional wording, for the reason product_grid.html explains: a host
+    // that opens the link and answers nothing is indistinguishable from one
+    // that refused.
+    node.textContent = "If no new tab opened, the product page is: " + url;
+    node.hidden = false;
+    reportSize();
+  };
+
+  var openProduct = function (url) {
+    var win = null;
+    try { win = window.open(url, "_blank", "noopener"); } catch (_) {}
+    if (win) return;
+    if (hostCapabilities && hostCapabilities.openLinks) {
+      var id = nextRequestId++;
+      pendingOpens[id] = url;
+      post({ jsonrpc: "2.0", id: id, method: OPEN_LINK_METHOD, params: { url: url } });
+      setTimeout(function () {
+        if (pendingOpens[id]) { delete pendingOpens[id]; showBlockedLink(url); }
+      }, OPEN_LINK_TIMEOUT_MS);
+      return;
+    }
+    showBlockedLink(url);
+  };
+
   var placeholder = function (text) {
     var node = document.createElement("div");
     node.className = "ph";
@@ -184,6 +229,20 @@ product_grid.html; both files obey the same ones.
     var item = (payload.items || [])[0] || { images: [] };
     var images = item.images || [];
     if (item.label) $("title").textContent = item.label;
+    if (item.link) {
+      var anchor = document.createElement("a");
+      anchor.href = item.link;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = $("title").textContent;
+      anchor.addEventListener("click", function (event) {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+        event.preventDefault();
+        openProduct(item.link);
+      });
+      $("title").textContent = "";
+      $("title").appendChild(anchor);
+    }
 
     showHero(images.length ? images[0].url : null, item.label);
 
@@ -238,9 +297,19 @@ product_grid.html; both files obey the same ones.
     var payload = findPayload(data, 0);
     if (payload) render(payload);
 
+    // A reply to our own open-link request; an error means the host does not
+    // know that method, which is a fall-through and not something to report.
+    if (data.id !== undefined && pendingOpens[data.id]) {
+      var openedUrl = pendingOpens[data.id];
+      delete pendingOpens[data.id];
+      if (data.error) showBlockedLink(openedUrl);
+      return;
+    }
+
     var result = data.result;
     if (result && !initDone) {
       initDone = true;
+      hostCapabilities = result.hostCapabilities || {};
       post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
       reportSize();
       setTimeout(reportSize, 250);

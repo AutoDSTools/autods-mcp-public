@@ -153,10 +153,13 @@ client:
   bracket notation, keep `per_item × max ≤ 20`, name a widget the registry serves, and
   its operation's `notes` must mention thumbnails (RD-92). Every one of those fails
   silently otherwise — see **Product images** below.
-- An `images.link` block must name a route `product_links` serves, set both halves
-  of its body gate or neither, gate on a field the operation's own `body_schema`
-  declares, and carry an `id_path` when its route needs an id (RD-92). Each of
-  those otherwise ships as a link that is never built, or one built wrong.
+- Every entry of `images.links` must name a route `product_links` serves, set both
+  halves of its body gate or neither, gate on a field the operation's own
+  `body_schema` declares **and on a value that field's `enum` accepts**, carry an
+  `id_path` when its route needs an id, and — for a route whose path holds a
+  product status — be gated on that same status. An ungated entry must be last
+  (RD-92). Each of those otherwise ships as a link that is never built, one built
+  wrong, or one that hides every entry after it.
 - The six playbook lints (RD-100), below.
 
 ### Where text goes: the four tiers
@@ -380,27 +383,48 @@ operation's `notes` — and the boot lint above requires the mention, in the sam
 spirit as the `ok` mention `business_errors` requires. `instructions` (tier 4)
 gets **one** line in `manifests/_server.json` and nothing more.
 
-**Each rendered product can link to its page in the web app, and only two
-things about that are free.** The `link` sub-block names a route; everything
-else is Python. `product_links._ROUTES` is closed and holds only the routes
-actually wired (today: `store_product` → `/products/{id}`, for
-`list_products` with `product_status: 2`), because the paths belong to
-`v2-frontend`'s `ui-platform-commons/routePaths` and an unconfirmed literal is
-a guess that reads like config. The host comes from `settings.app_base_url`,
-keyed on `MCP_ENV` (prod → `platform.autods.com`, everything else →
-`v2-staging.autods.com`) with `AUTODS_APP_BASE_URL` as an override — a deploy
-that says nothing about links must still link to its own environment, because a
-staging widget pointing into production resolves, loads, and shows someone
-else's catalogue.
+**Each rendered product links to its page in the web app, and only the route
+*name* is manifest data.** `product_links._ROUTES` is closed, and every row is
+copied from `AutoDSTools/ui-platform-commons`'s `src/routePaths.ts`, which is
+the app's single source for these:
 
-Three rules that each exist to prevent a link that *looks* like it works:
+| Route | Path | Tool |
+|---|---|---|
+| `store_draft` | `/upload/{id}&1` | `list_products`, `product_status: 1` |
+| `store_product` | `/products/{id}&2` | `list_products`, `product_status: 2` |
+| `hand_picked_product` | `/marketplace/hand-picked-products/{id}` | `get_winning_products` |
+| `marketplace_product` | `/marketplace/all-products/{id}` | `search_products`, `get_similar_products`, `get_recommended_products`, `get_product_by_id` |
+
+Two of those are not what they look like, and both are in the Gotchas below: a
+store product's page takes the status *in the path*, and the catalogue page is
+`all-products`. Trending products (`/marketplace/trending-products/{id}`) are
+deliberately absent — they come from ads-spy and no tool returns them, so a row
+would be config nothing can reach. The host comes from
+`settings.app_base_url`, keyed on `MCP_ENV` (prod → `platform.autods.com`,
+everything else → `v2-staging.autods.com`) with `AUTODS_APP_BASE_URL` as an
+override — a deploy that says nothing about links must still link to its own
+environment, because a staging widget pointing into production resolves, loads,
+and shows someone else's catalogue.
+
+Four rules that each exist to prevent a link that *looks* like it works:
 
 - **The gate reads the request, not the response.** `list_products` answers for
   drafts or active products according to `product_status` in the body, and the
   payload carries nothing that distinguishes them — which is why
-  `extract_images` takes `arguments` at all. Only status 2 is linked; ended,
+  `extract_images` takes `arguments` at all. Only 1 and 2 are linked; ended,
   untracked, scheduled and pre-draft carry no link, since the app has no page
   that lists one product of theirs.
+- **Links are ordered and the first matching gate wins**, same as
+  `image_paths`. An ungated entry therefore has to be last, and a lint enforces
+  it — otherwise every entry after it is unreachable while looking configured.
+- **A store route's path carries its own status, and the gate must agree with
+  it.** `/upload/{id}&1` is the draft page whatever selects it, so pairing
+  `store_draft` with `product_status: 2` sends every active product to a page
+  holding a different one — and leaving such a route ungated sends every status
+  to one page. Both still open the app. `_Route.status` names the number already
+  written in the path so `assert_images_usable` can compare the two; it is not a
+  second place to configure anything, and a research route leaves it unset
+  because those pages take any product.
 - **Anything missing means no link**: no id, no host, a gate that does not
   match, a route the table does not serve. Never a URL with a hole in it. A
   half-built link still opens, lands somewhere plausible, and tells the user
@@ -408,6 +432,12 @@ Three rules that each exist to prevent a link that *looks* like it works:
 - **The link is built once, in Python, and published per item** — not as a
   template the widget or the model fills in. The clients that render no widget
   get an openable URL, and no route is ever assembled in JavaScript.
+
+`test_every_shipped_link_builds_a_url_against_its_own_payload` runs each shipped
+link against that operation's recorded payload sample, for the same reason the
+`images` block has one: a link whose `id_path` addresses a field the payload
+does not carry produces a grid that renders perfectly and is simply not
+clickable, which reads as "not implemented here" rather than as a bug.
 
 **Opening that link is a chain, because nothing has measured whether a host
 allows it.** RD-82 captured `openLinks` in `hostCapabilities` and never called
@@ -1486,6 +1516,22 @@ production incident; don't undo the guard without understanding why it's there.
   ellipsised lines *plus* a sliced third one, which reads as a rendering fault rather
   than as truncation. `test_the_grid_caption_is_not_truncated` keeps both clamping and
   `text-overflow` out of the asset.
+- **Two of the web app's product routes are not the paths anyone would guess, and
+  a wrong one still opens the app** (RD-92). A store product's page is
+  `SINGLE_PRODUCT_PATH = '/products/:productId&:productStatus'` — the status is
+  part of the path, in the same segment, after a literal `&` — so
+  `/products/4242` matches **no** route and lands wherever the app's fallback
+  goes. A draft is the same shape at `/upload/{id}&1`. And the Marketplace
+  catalogue page is `/marketplace/all-products/:id`, not
+  `/marketplace/products/:id`. Both wrong forms look like a working link from the
+  outside: a tab opens, the app loads, and the person who clicked assumes the
+  product is gone. Read the literal out of
+  [`ui-platform-commons/src/routePaths.ts`](https://github.com/AutoDSTools/ui-platform-commons/blob/master/src/routePaths.ts)
+  before adding a row to `_ROUTES`, never from a route *name* in `v2-frontend`'s
+  `routesConfig.jsx` — that file imports the constants and shows none of their
+  values. Note also that `v2-frontend`'s own `QuotesTable` builds a draft URL as
+  `/drafts/{id}&1` via `getProductsListByProductStatus`, which matches no route
+  in that file either; do not take another component's URL as confirmation.
 - **Signed CDN URLs expire, and a widget refetches on scroll** (RD-92). TikTok
   marketplace URLs carry `t`/`ps`/`shp`/`shcp`; the rewrite deliberately leaves the query
   untouched (it authorises the object, not the size), but a persisted conversation

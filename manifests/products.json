@@ -320,7 +320,7 @@
       "has_json_body": true,
       "request_body_required": true,
       "is_top_typed_tool": false,
-      "notes": "Read-only POST. Queries products by filter and returns {results: [...]}. Filterable fields include title, tags, note, status, site_id, variations.price, variations.quantity, variations.inventory_status, variations.active_buy_item.price/site_id/region, error_list.error_type, created_date, upload_date, total_sold_count, views, watchers, etc. There is no top-level `region` field — the item's region is `variations.active_buy_item.region`. Enum-valued filter values take their INTEGER value, never the name — every allowed value is listed on the `filters[].value` schema of this tool. Filter by `id` with value_type `object_id` (each id is a 24-character hex string); multi-value ops (in/not_in) and value_type list/list_int put their values in `value_list`. Product objects are LARGE (variations, images, description, item_specifics): for listing/summary use cases ALWAYS pass `projection` (e.g. [\"title\",\"main_picture_url\",\"variations.price\",\"amount_of_variations\",\"total_sold_count\",\"item_id_on_site\",\"upload_date\"]) and/or a small `limit` — a full-object page of 100 can exceed ~80 KB and overflow response token limits. Keep `main_picture_url` in any projection you send: it is what the thumbnail grid is built from, and a projection without it returns a grid of empty cells rather than no grid at all.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the sell channel's CDN offers one — about half of them do, and the rest render at full size in a small cell, which costs bandwidth rather than tokens. A client that renders MCP Apps shows them as a thumbnail grid; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The block is built from whatever the response actually carries, so a `projection` that omits `main_picture_url` (and `images`) yields an `images` block whose every entry has no URL — the client still draws the grid, and every cell reads \"no image\". That is the one way to make this tool look broken while it answers 200, so project `main_picture_url` whenever a person will see the result. There is deliberately no `include_images` base64 option on this tool: roughly half of these images have no small variant to fetch, so the model would be sent full-size originals to downscale.\n\nWhen `product_status` is 2 (active), each entry in that block also carries a `link` to that product's own page in the AutoDS web app — a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link. Products of any other status carry no link: the app has no page that lists one product of theirs, and a link to a page without the product on it is worse than none.",
+      "notes": "Read-only POST. Queries products by filter and returns {results: [...]}. Filterable fields include title, tags, note, status, site_id, variations.price, variations.quantity, variations.inventory_status, variations.active_buy_item.price/site_id/region, error_list.error_type, created_date, upload_date, total_sold_count, views, watchers, etc. There is no top-level `region` field — the item's region is `variations.active_buy_item.region`. Enum-valued filter values take their INTEGER value, never the name — every allowed value is listed on the `filters[].value` schema of this tool. Filter by `id` with value_type `object_id` (each id is a 24-character hex string); multi-value ops (in/not_in) and value_type list/list_int put their values in `value_list`. Product objects are LARGE (variations, images, description, item_specifics): for listing/summary use cases ALWAYS pass `projection` (e.g. [\"title\",\"main_picture_url\",\"variations.price\",\"amount_of_variations\",\"total_sold_count\",\"item_id_on_site\",\"upload_date\"]) and/or a small `limit` — a full-object page of 100 can exceed ~80 KB and overflow response token limits. Keep `main_picture_url` in any projection you send: it is what the thumbnail grid is built from, and a projection without it returns a grid of empty cells rather than no grid at all.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the sell channel's CDN offers one — about half of them do, and the rest render at full size in a small cell, which costs bandwidth rather than tokens. A client that renders MCP Apps shows them as a thumbnail grid; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The block is built from whatever the response actually carries, so a `projection` that omits `main_picture_url` (and `images`) yields an `images` block whose every entry has no URL — the client still draws the grid, and every cell reads \"no image\". That is the one way to make this tool look broken while it answers 200, so project `main_picture_url` whenever a person will see the result. There is deliberately no `include_images` base64 option on this tool: roughly half of these images have no small variant to fetch, so the model would be sent full-size originals to downscale.\n\nWhen `product_status` is 2 (active) or 1 (draft), each entry in that block also carries a `link` to that product's own page in the AutoDS web app — a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link. Products of any other status carry no link: the app has no page that lists one product of theirs, and a link to a page without the product on it is worse than none.",
       "safe": true,
       "annotations": {
         "title": "List Products",
@@ -340,11 +340,18 @@
         "id_path": "id",
         "widget": "product-grid",
         "base64": "off",
-        "link": {
-          "route": "store_product",
-          "when_body_field": "product_status",
-          "when_body_equals": 2
-        }
+        "links": [
+          {
+            "route": "store_product",
+            "when_body_field": "product_status",
+            "when_body_equals": 2
+          },
+          {
+            "route": "store_draft",
+            "when_body_field": "product_status",
+            "when_body_equals": 1
+          }
+        ]
       },
       "body_schema": {
         "type": "object",

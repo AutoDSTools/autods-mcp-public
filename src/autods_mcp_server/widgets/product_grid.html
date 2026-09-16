@@ -155,7 +155,12 @@ an empty box, and the transcript names the method that carried the data.
 
   var showBlockedLink = function (url) {
     var node = $("blocked");
-    node.textContent = "This client would not open a new tab. The product page is: " + url;
+    // Phrased as a condition, not as a verdict. This runs both when we know
+    // the tab was blocked (window.open returned null and no openLinks channel
+    // was advertised) and when we simply never heard back — a host that opens
+    // the link and answers nothing looks identical from here, and telling
+    // someone their click failed when it worked is its own kind of wrong.
+    node.textContent = "If no new tab opened, the product page is: " + url;
     node.hidden = false;
     reportSize();
   };

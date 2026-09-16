@@ -44,7 +44,7 @@ from typing import Any
 from autods_mcp_server.image_rewrites import rewrite_thumbnail
 from autods_mcp_server.manifests.schema import ImagesBlock, ManifestOperation
 from autods_mcp_server.payload_paths import resolve_path
-from autods_mcp_server.product_links import build_link, route_names, route_needs_id
+from autods_mcp_server.product_links import build_link, route_names, route_needs_id, route_status
 from autods_mcp_server.widgets import widget_names
 
 # Envelope key the extracted images are published under — a sibling of ``data``.
@@ -145,8 +145,7 @@ def assert_images_usable(operation: ManifestOperation) -> None:
             f"Operation '{op_id}' declares 'images' but its 'notes' never mention thumbnails; a tool whose "
             f"result renders pictures in some clients and not others has to say so on the tool itself."
         )
-    if block.link is not None:
-        link = block.link
+    for link in block.links:
         if link.route not in route_names():
             raise ImagesError(
                 f"Operation '{op_id}' links its items to route '{link.route}', which the product-link table "
@@ -158,15 +157,39 @@ def assert_images_usable(operation: ManifestOperation) -> None:
                 f"{link.when_body_field!r}, when_body_equals={link.when_body_equals!r}); set both or neither. "
                 f"Half a gate links every call, which is the opposite of what a gate is for."
             )
-        if link.when_body_field and link.when_body_field not in (operation.body_schema or {}).get("properties", {}):
+        if link.when_body_field:
+            field_schema = (operation.body_schema or {}).get("properties", {}).get(link.when_body_field)
+            if field_schema is None:
+                raise ImagesError(
+                    f"Operation '{op_id}' gates its link on body field '{link.when_body_field}', which its "
+                    f"'body_schema' does not declare; the gate could never match."
+                )
+            allowed = field_schema.get("enum")
+            if allowed is not None and link.when_body_equals not in allowed:
+                raise ImagesError(
+                    f"Operation '{op_id}' gates its '{link.route}' link on {link.when_body_field}="
+                    f"{link.when_body_equals!r}, which is not a value that field accepts "
+                    f"({', '.join(repr(value) for value in allowed)}); the gate could never match, so the "
+                    f"link would simply never appear — which reads as 'not implemented here', not as a typo."
+                )
+        expected_status = route_status(link.route)
+        if expected_status is not None and link.when_body_equals != expected_status:
             raise ImagesError(
-                f"Operation '{op_id}' gates its link on body field '{link.when_body_field}', which its "
-                f"'body_schema' does not declare; the gate could never match."
+                f"Operation '{op_id}' selects route '{link.route}' with when_body_equals="
+                f"{link.when_body_equals!r}, but that route's path already carries status {expected_status}. "
+                f"The two have to be the same number: this pairing would send a product of one status to the "
+                f"page of another, which still opens the app and so looks like a working link."
             )
         if route_needs_id(link.route) and not block.id_path:
             raise ImagesError(
                 f"Operation '{op_id}' links to route '{link.route}', whose path needs an item id, but declares "
                 f"no 'id_path'; no item could ever get a link."
+            )
+    for index, link in enumerate(block.links[:-1]):
+        if not link.when_body_field:
+            raise ImagesError(
+                f"Operation '{op_id}' declares an ungated link ('{link.route}') at position {index}, before the "
+                f"end of the list; the first matching gate wins, so every entry after it is unreachable."
             )
 
 
@@ -276,21 +299,23 @@ def extract_images(
         label = _first_str(item, block.label_path)
         if label is not None:
             entry["label"] = label[:_MAX_LABEL_CHARS]
-        if block.link is not None:
-            # Built per item and published as a whole URL rather than as a
-            # template the client fills in: the clients that render no widget
-            # (Claude Code, Cursor, MCP Inspector, Desktop over a remote
-            # connector) get something the user can open, and no route is ever
-            # assembled by a model or by JavaScript. ``None`` for anything that
-            # cannot be built honestly — the key is simply absent then.
+        # Built per item and published as a whole URL rather than as a template
+        # the client fills in: the clients that render no widget (Claude Code,
+        # Cursor, MCP Inspector, Desktop over a remote connector) get something
+        # the user can open, and no route is ever assembled by a model or by
+        # JavaScript. Ordered, first match wins — same rule as ``image_paths``.
+        # Nothing that cannot be built honestly is published; the key is simply
+        # absent then.
+        for candidate in block.links:
             link = build_link(
-                block.link,
+                candidate,
                 identifier=identifier,
                 arguments=arguments,
                 base_url=app_base_url,
             )
             if link is not None:
                 entry["link"] = link
+                break
         rendered.append(entry)
 
     payload: dict[str, Any] = {

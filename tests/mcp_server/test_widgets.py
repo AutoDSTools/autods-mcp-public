@@ -255,17 +255,18 @@ async def test_an_operation_without_an_images_block_gets_an_untouched_envelope(
     assert [block.type for block in result.content] == ["text"]
 
 
-async def test_only_an_active_product_listing_carries_web_app_links(
+async def test_a_store_listing_links_by_the_status_it_was_asked_for(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:
     """RD-92's link addition, end to end and through the real manifest.
 
-    The same tool, the same upstream payload, two calls: the only difference is
-    the ``product_status`` in the request body, which is also the only place the
-    difference exists at all — the response carries nothing that tells a draft
-    from an active product. Status 2 links to the product page; status 1 (and
-    every other status) carries no link, because the app has no page listing one
-    draft and a link to a page without the product on it is worse than none.
+    The same tool, the same upstream payload, three calls: the only difference
+    is the ``product_status`` in the request body, which is also the only place
+    the difference exists at all — the response carries nothing that tells a
+    draft from an active product. Active and draft each link to their own page;
+    every other status carries no link, because the app has no page that lists
+    one of theirs and a link to a page without the product on it is worse than
+    none.
     """
     upstream_payload = {
         "results": [
@@ -286,20 +287,24 @@ async def test_only_an_active_product_listing_carries_web_app_links(
     async with mcp_client_session(app, runtime, token=access_token) as session:
         active = await session.call_tool("list_products", {"store_ids": "7", "body": {"product_status": 2}})
         draft = await session.call_tool("list_products", {"store_ids": "7", "body": {"product_status": 1}})
+        ended = await session.call_tool("list_products", {"store_ids": "7", "body": {"product_status": 3}})
 
     assert active.structured_content is not None
     assert draft.structured_content is not None
+    assert ended.structured_content is not None
     # The host is the environment's: these settings are MCP_ENV=local, which
     # points at staging. A production link from a non-production deploy resolves
     # and loads, so nothing would ever report it.
-    assert active.structured_content["images"]["items"][0]["link"] == "https://v2-staging.autods.com/products/4242"
-    assert "link" not in draft.structured_content["images"]["items"][0]
-    # Everything else about the two blocks is the same — the link is additive.
+    assert active.structured_content["images"]["items"][0]["link"] == "https://v2-staging.autods.com/products/4242&2"
+    assert draft.structured_content["images"]["items"][0]["link"] == "https://v2-staging.autods.com/upload/4242&1"
+    assert "link" not in ended.structured_content["images"]["items"][0]
+    # Everything else about the three blocks is the same — the link is additive.
     assert active.structured_content["data"] == upstream_payload
     assert draft.structured_content["data"] == upstream_payload
+    assert ended.structured_content["data"] == upstream_payload
 
 
-async def test_the_grid_opens_a_product_link_without_assuming_the_host_allows_it(
+async def test_both_widgets_open_a_product_link_without_assuming_the_host_allows_it(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:
     """Neither RD-82 nor RD-97 ever opened a link from a widget, and an anchor a
@@ -315,19 +320,19 @@ async def test_the_grid_opens_a_product_link_without_assuming_the_host_allows_it
     app, runtime = make_mcp_app(settings)
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        grid = (await session.read_resource("ui://autods/product-grid")).contents[0].text
+        served = {widget.uri: (await session.read_resource(widget.uri)).contents[0].text for widget in WIDGETS}
 
-    assert grid is not None
-    assert 'window.open(url, "_blank", "noopener")' in grid
-    assert "hostCapabilities.openLinks" in grid
-    assert 'OPEN_LINK_METHOD = "ui/open-link"' in grid
-    assert "showBlockedLink" in grid
-    assert 'cell.rel = "noopener noreferrer"' in grid
-    assert 'cell.target = "_blank"' in grid
-    # A host that simply ignores an unknown method answers nothing at all, and
-    # without this the click is silently dead — which is the failure being
-    # measured, not one to reproduce.
-    assert "OPEN_LINK_TIMEOUT_MS" in grid
+    for uri, html in served.items():
+        assert 'window.open(url, "_blank", "noopener")' in html, uri
+        assert "hostCapabilities.openLinks" in html, uri
+        assert 'OPEN_LINK_METHOD = "ui/open-link"' in html, uri
+        assert "showBlockedLink" in html, uri
+        assert '.rel = "noopener noreferrer"' in html, uri
+        assert '.target = "_blank"' in html, uri
+        # A host that simply ignores an unknown method answers nothing at all,
+        # and without this the click is silently dead — which is the failure
+        # being measured, not one to reproduce.
+        assert "OPEN_LINK_TIMEOUT_MS" in html, uri
 
 
 async def test_widget_assets_obey_the_measured_protocol_order(

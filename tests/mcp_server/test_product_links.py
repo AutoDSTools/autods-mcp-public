@@ -11,7 +11,7 @@ walk the user into production.
 import pytest
 
 from autods_mcp_server.manifests.schema import LinkBlock
-from autods_mcp_server.product_links import build_link, gate_matches, route_names, route_needs_id
+from autods_mcp_server.product_links import build_link, gate_matches, route_names, route_needs_id, route_status
 from autods_mcp_server.settings import McpEnv, Settings
 
 _STAGING = "https://v2-staging.autods.com"
@@ -29,12 +29,12 @@ def _gated() -> LinkBlock:
 
 def test_an_active_product_links_to_its_single_product_page() -> None:
     link = build_link(_gated(), identifier="4242", arguments=_ACTIVE_BODY, base_url=_STAGING)
-    assert link == "https://v2-staging.autods.com/products/4242"
+    assert link == "https://v2-staging.autods.com/products/4242&2"
 
 
 def test_a_trailing_slash_on_the_host_does_not_double_up() -> None:
     link = build_link(_gated(), identifier="4242", arguments=_ACTIVE_BODY, base_url=_STAGING + "/")
-    assert link == "https://v2-staging.autods.com/products/4242"
+    assert link == "https://v2-staging.autods.com/products/4242&2"
 
 
 @pytest.mark.parametrize(
@@ -79,10 +79,40 @@ def test_an_ungated_block_matches_every_call() -> None:
     assert gate_matches(LinkBlock(route="store_product"), {"body": {"product_status": 6}}) is True
 
 
+@pytest.mark.parametrize(
+    ("route", "expected"),
+    [
+        ("store_draft", "https://v2-staging.autods.com/upload/4242&1"),
+        ("store_product", "https://v2-staging.autods.com/products/4242&2"),
+        ("hand_picked_product", "https://v2-staging.autods.com/marketplace/hand-picked-products/4242"),
+        ("marketplace_product", "https://v2-staging.autods.com/marketplace/all-products/4242"),
+    ],
+)
+def test_every_route_builds_the_path_the_app_actually_registers(route: str, expected: str) -> None:
+    """Copied from ``ui-platform-commons/src/routePaths.ts``, and two of them are
+    not what they look like: a store product's page takes the status in the path
+    (``/products/:productId&:productStatus``), so ``/products/4242`` matches no
+    route, and the catalogue page is ``/marketplace/all-products/:id``, not
+    ``/marketplace/products/:id``. Both would open the app and land elsewhere,
+    which is indistinguishable from working unless it is pinned here."""
+    assert build_link(LinkBlock(route=route), identifier="4242", arguments=None, base_url=_STAGING) == expected
+
+
 def test_the_route_table_reports_what_it_serves() -> None:
-    assert route_names() == ["store_product"]
-    assert route_needs_id("store_product") is True
+    assert route_names() == ["store_draft", "store_product", "hand_picked_product", "marketplace_product"]
+    assert all(route_needs_id(name) for name in route_names())
     assert route_needs_id("not_a_route") is False
+
+
+def test_a_store_route_reports_the_status_written_into_its_own_path() -> None:
+    """What the boot lint compares a gate against. Only the store routes carry
+    a status; the two research pages take any product, so a gate on them is
+    free to be anything — or absent."""
+    assert route_status("store_draft") == 1
+    assert route_status("store_product") == 2
+    assert route_status("hand_picked_product") is None
+    assert route_status("marketplace_product") is None
+    assert route_status("not_a_route") is None
 
 
 # --------------------------------------------------------------------------

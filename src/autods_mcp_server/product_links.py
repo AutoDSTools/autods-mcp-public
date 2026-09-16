@@ -31,26 +31,61 @@ is gone.
 """
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from autods_mcp_server.manifests.schema import LinkBlock
 
-# route name -> path template, ``{id}`` substituted with the item's id.
+
+class _Route(NamedTuple):
+    """One row of the table below.
+
+    ``status`` is the product status the *path* already carries, for the two
+    store routes that hold it as a literal (``/products/{id}&2``). It is not
+    extra configuration: it is the number that is already written in ``path``,
+    named so a lint can read it. A route whose path carries no status leaves it
+    ``None``, and any gate may select that route.
+    """
+
+    path: str
+    status: int | None = None
+
+
+# route name -> the page it opens, ``{id}`` substituted with the item's id.
 #
-# Only the routes actually wired to a tool are listed. The other product types
-# RD-92 names (drafts at ``/upload``, hand-picked, trending, the marketplace
-# catalog) each need their literal confirmed against ``routePaths`` before it is
-# written down here, and an unconfirmed row is not config, it is a guess that
-# reads like config.
-_ROUTES: dict[str, str] = {
-    # An active store product: the single-product page, keyed by AutoDS product
-    # id (``list_products`` with ``product_status: 2``).
-    "store_product": "/products/{id}",
+# Every row is copied from ``AutoDSTools/ui-platform-commons``'s
+# ``src/routePaths.ts``, which is the app's single source for these, and two of
+# them are not what they look like:
+#
+# * a store product's page takes **two** values in one segment joined by ``&`` —
+#   ``SINGLE_PRODUCT_PATH = '/products/:productId&:productStatus'`` — so
+#   ``/products/4242`` matches no route at all. It opens the app and lands
+#   somewhere else, which is the failure this module exists to avoid and which
+#   looks exactly like success from the outside.
+# * the Marketplace catalog page is ``/marketplace/all-products/:id``, not
+#   ``/marketplace/products/:id``.
+#
+# Trending products (``/marketplace/trending-products/:id``) are deliberately
+# absent: they come from the ads-spy surface and no tool returns them, so a row
+# here would be config nothing can reach.
+_ROUTES: dict[str, _Route] = {
+    # Store products, by status. The status is part of the path, not a query
+    # parameter, and it must equal the status the gate selecting this route
+    # matches on — ``assert_images_usable`` refuses a manifest that pairs them
+    # differently, because ``store_draft`` behind a ``product_status: 2`` gate
+    # would send every active product to a draft page and still open the app.
+    "store_draft": _Route("/upload/{id}&1", status=1),
+    "store_product": _Route("/products/{id}&2", status=2),
+    # Research catalog. ``get_winning_products`` is the hand-picked surface and
+    # only it — it calls ``/products/winning``, which is what the app's
+    # hand-picked page calls; the other grids exclude winning products, so the
+    # two sets never overlap.
+    "hand_picked_product": _Route("/marketplace/hand-picked-products/{id}"),
+    "marketplace_product": _Route("/marketplace/all-products/{id}"),
 }
 
 
 def route_names() -> list[str]:
-    """Every route a manifest ``images.link.route`` may name."""
+    """Every route a manifest ``images.links[].route`` may name."""
     return list(_ROUTES)
 
 
@@ -61,7 +96,22 @@ def route_needs_id(route: str) -> bool:
     ``/upload`` list, because the app has no draft deep link — so "needs an id"
     is a property of the route, not of linking in general.
     """
-    return "{id}" in _ROUTES.get(route, "")
+    row = _ROUTES.get(route)
+    return row is not None and "{id}" in row.path
+
+
+def route_status(route: str) -> int | None:
+    """The product status this route's path already carries, if any.
+
+    Only the two store routes have one. It exists so the boot lint can check
+    that a gate selects the page its own status belongs to; nothing on the
+    request path reads it, because by then the manifest has already been
+    checked. An unknown route answers ``None`` — the route-name lint is what
+    rejects that, and reporting "no status" for a route that does not exist
+    would be the wrong complaint.
+    """
+    row = _ROUTES.get(route)
+    return row.status if row is not None else None
 
 
 def gate_matches(block: LinkBlock, arguments: Mapping[str, Any] | None) -> bool:
@@ -101,11 +151,12 @@ def build_link(
     """
     if not base_url:
         return None
-    path = _ROUTES.get(block.route)
-    if path is None:
+    row = _ROUTES.get(block.route)
+    if row is None:
         return None
     if not gate_matches(block, arguments):
         return None
+    path = row.path
     if "{id}" in path:
         if not identifier:
             return None

@@ -88,6 +88,11 @@ class LinkBlock(BaseModel):
     tells them apart. Both must be set together, or neither — a gate with only
     a field name would match every call, which is the opposite of what someone
     writing one intends.
+
+    An operation declares a **list** of these and the first whose gate matches
+    wins, the same rule as ``image_paths``. A tool that answers for one product
+    type declares one ungated entry; ``list_products`` declares one per status
+    it links, and a status with no entry gets no link at all.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -132,10 +137,10 @@ class ImagesBlock(BaseModel):
     * ``widget`` names the ``ui://`` widget this operation's result should
       render in, and must be one the widget registry serves. Omitted ⇒ the URLs
       are published in ``structuredContent`` and nothing is rendered.
-    * ``link`` gives each item a URL into the AutoDS web app, so a rendered
-      grid is something the user can act on rather than only look at. Omitted
-      ⇒ no item carries a link, which is also what happens when the gate does
-      not match or the item has no id.
+    * ``links`` give each item a URL into the AutoDS web app, so a rendered
+      grid is something the user can act on rather than only look at. Tried in
+      order, first matching gate wins. Empty ⇒ no item carries a link, which is
+      also what happens when no gate matches or the item has no id.
     * ``base64`` decides whether the synthetic ``include_images`` parameter is
       offered at all, and what it defaults to. Three values because the
       surfaces genuinely need three: ``"opt_in"`` (offered, default off) is the
@@ -159,7 +164,7 @@ class ImagesBlock(BaseModel):
     id_path: str = ""
     widget: str | None = None
     base64: Literal["off", "opt_in", "default_on"] = "opt_in"
-    link: LinkBlock | None = None
+    links: list[LinkBlock] = Field(default_factory=list)
 
 
 class ManifestParameter(BaseModel):

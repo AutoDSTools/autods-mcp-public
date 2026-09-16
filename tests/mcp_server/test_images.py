@@ -322,14 +322,30 @@ def test_an_operation_with_no_block_passes() -> None:
 # --------------------------------------------------------------------------
 
 
-def _linking_operation(link: dict[str, object], **overrides: object) -> ManifestOperation:
+_ACTIVE_LINK: dict[str, object] = {
+    "route": "store_product",
+    "when_body_field": "product_status",
+    "when_body_equals": 2,
+}
+_DRAFT_LINK: dict[str, object] = {
+    "route": "store_draft",
+    "when_body_field": "product_status",
+    "when_body_equals": 1,
+}
+
+
+def _linking_operation(
+    *links: dict[str, object],
+    body_schema: dict[str, object] | None = None,
+    **overrides: object,
+) -> ManifestOperation:
     """A ``list_products``-shaped operation: a body-gated link needs a body schema."""
     images: dict[str, object] = {
         "item_path": "results",
         "image_paths": ["main_picture_url.url"],
         "id_path": "id",
         "label_path": "title",
-        "link": link,
+        "links": list(links),
     }
     images.update(overrides)
     return ManifestOperation(
@@ -339,7 +355,7 @@ def _linking_operation(link: dict[str, object], **overrides: object) -> Manifest
         notes=_NOTES,
         base_url_key="autods_api",
         annotations={"title": "Probe", "readOnlyHint": True},
-        body_schema={"type": "object", "properties": {"product_status": {"type": "integer"}}},
+        body_schema=body_schema or {"type": "object", "properties": {"product_status": {"type": "integer"}}},
         images=images,
     )
 
@@ -370,21 +386,66 @@ def test_a_gate_on_a_body_field_the_schema_never_declares_is_rejected() -> None:
         )
 
 
+def test_a_gate_on_a_value_the_field_never_accepts_is_rejected() -> None:
+    """The gate is well-formed, the field is declared, and the link still never
+    appears — because 7 is not a product status. A link that never appears reads
+    as "not implemented for this tool" rather than as the typo it is."""
+    schema: dict[str, object] = {
+        "type": "object",
+        "properties": {"product_status": {"type": "integer", "enum": [1, 2, 3, 4, 5, 6]}},
+    }
+    with pytest.raises(ImagesError, match="not a value that field accepts"):
+        assert_images_usable(
+            _linking_operation(
+                {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 7},
+                body_schema=schema,
+            )
+        )
+    # The same schema with the right value is what the shipped manifest does.
+    assert_images_usable(_linking_operation(_ACTIVE_LINK, _DRAFT_LINK, body_schema=schema))
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        pytest.param(
+            {"route": "store_draft", "when_body_field": "product_status", "when_body_equals": 2},
+            id="draft-page-for-active-products",
+        ),
+        pytest.param({"route": "store_product"}, id="no-gate-at-all"),
+    ],
+)
+def test_a_route_carrying_a_status_must_be_gated_on_that_same_status(link: dict[str, object]) -> None:
+    """``/upload/{id}&1`` is the draft page whatever gate selects it, so pairing
+    it with ``product_status: 2`` links every active product to a page holding a
+    different product — and an ungated store route links every status to one
+    page. Both open the app, which is the whole failure this table exists to
+    avoid, and neither is visible in a manifest diff."""
+    with pytest.raises(ImagesError, match="path already carries status"):
+        assert_images_usable(_linking_operation(link))
+
+
 def test_a_link_whose_route_needs_an_id_is_rejected_without_an_id_path() -> None:
     with pytest.raises(ImagesError, match="declares no 'id_path'"):
-        assert_images_usable(_linking_operation({"route": "store_product"}, id_path=""))
+        assert_images_usable(_linking_operation({"route": "marketplace_product"}, id_path=""))
+
+
+def test_an_ungated_link_before_the_end_of_the_list_is_rejected() -> None:
+    """First matching gate wins, so an ungated entry swallows everything after
+    it — and the entries it hides look perfectly configured in review."""
+    with pytest.raises(ImagesError, match="before the end of the list"):
+        assert_images_usable(_linking_operation({"route": "marketplace_product"}, _ACTIVE_LINK))
 
 
 def test_a_valid_link_block_passes() -> None:
-    assert_images_usable(
-        _linking_operation({"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2})
-    )
+    assert_images_usable(_linking_operation(_ACTIVE_LINK, _DRAFT_LINK))
+    # One ungated entry is the normal case for a tool that answers for exactly
+    # one kind of product.
+    assert_images_usable(_linking_operation({"route": "marketplace_product"}))
 
 
 def test_each_item_carries_its_own_product_page_link() -> None:
-    operation = _linking_operation(
-        {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2}
-    )
+    operation = _linking_operation(_ACTIVE_LINK, _DRAFT_LINK)
     data = {
         "results": [
             {"id": 4242, "title": "Bed Sheets", "main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}},
@@ -398,23 +459,39 @@ def test_each_item_carries_its_own_product_page_link() -> None:
         app_base_url="https://v2-staging.autods.com",
     )
     assert block is not None
+    # ``&2`` is part of the path, not a query string: the app's route is
+    # ``/products/:productId&:productStatus`` and ``/products/4242`` matches no
+    # route at all.
     assert [item["link"] for item in block["items"]] == [
-        "https://v2-staging.autods.com/products/4242",
-        "https://v2-staging.autods.com/products/4243",
+        "https://v2-staging.autods.com/products/4242&2",
+        "https://v2-staging.autods.com/products/4243&2",
     ]
 
 
-def test_a_call_outside_the_gate_carries_no_link_at_all() -> None:
-    """Drafts, ended, untracked, scheduled and pre-draft products render exactly
-    as they did before links existed: the key is absent, not empty."""
-    operation = _linking_operation(
-        {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2}
+def test_the_matching_gate_decides_which_page_an_item_links_to() -> None:
+    """Same tool, same payload, two different pages — decided by the request."""
+    operation = _linking_operation(_ACTIVE_LINK, _DRAFT_LINK)
+    data = {"results": [{"id": 4242, "main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}}]}
+    draft = extract_images(
+        operation,
+        data,
+        arguments={"body": {"product_status": 1}},
+        app_base_url="https://v2-staging.autods.com",
     )
+    assert draft is not None
+    assert draft["items"][0]["link"] == "https://v2-staging.autods.com/upload/4242&1"
+
+
+@pytest.mark.parametrize("status", [3, 4, 5, 6])
+def test_a_status_with_no_entry_carries_no_link_at_all(status: int) -> None:
+    """Ended, untracked, scheduled and pre-draft render exactly as they did
+    before links existed: the key is absent, not empty."""
+    operation = _linking_operation(_ACTIVE_LINK, _DRAFT_LINK)
     data = {"results": [{"id": 4242, "main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}}]}
     block = extract_images(
         operation,
         data,
-        arguments={"store_ids": "7", "body": {"product_status": 1}},
+        arguments={"store_ids": "7", "body": {"product_status": status}},
         app_base_url="https://v2-staging.autods.com",
     )
     assert block is not None
@@ -422,9 +499,7 @@ def test_a_call_outside_the_gate_carries_no_link_at_all() -> None:
 
 
 def test_an_item_with_no_id_carries_no_link() -> None:
-    operation = _linking_operation(
-        {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2}
-    )
+    operation = _linking_operation(_ACTIVE_LINK)
     data = {"results": [{"main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}}]}
     block = extract_images(
         operation,
@@ -437,7 +512,7 @@ def test_an_item_with_no_id_carries_no_link() -> None:
     assert "id" not in block["items"][0]
 
 
-def test_an_operation_with_no_link_block_is_unaffected_by_the_arguments() -> None:
+def test_an_operation_with_no_links_is_unaffected_by_the_arguments() -> None:
     """The regression guard: passing the two new arguments to a block that does
     not link must produce exactly the block it produced before."""
     operation = _operation(item_path="results", image_paths=["images.*"], id_path="_id")
@@ -499,6 +574,38 @@ def test_every_shipped_images_block_resolves_a_url_against_its_own_payload(
             f"image_paths={operation.images.image_paths!r}. The widget renders those as empty cells "
             f"while the payload still carries a picture — check the path against a real response."
         )
+
+
+def test_every_shipped_link_builds_a_url_against_its_own_payload(bundled_manifest_dir: Path) -> None:
+    """The same argument as the test above, for the other half of an item.
+
+    A route resolves, a gate is well-formed and the block still produces no link
+    — because ``id_path`` addresses a field this payload does not carry. Nothing
+    reports that: the grid renders, the pictures load, and the cells are simply
+    not clickable, which reads as "links were not implemented for this tool"
+    rather than as a bug. So every shipped link is built against the recorded
+    sample of its own upstream, with arguments its own gate accepts.
+    """
+    registry = build_registry(bundled_manifest_dir)
+    carrying = [op for op in registry.list_operations() if op.images and op.images.links]
+    assert carrying, "no shipped operation declares a link — this test proves nothing"
+
+    samples = _payload_samples()
+    for operation in carrying:
+        for link in operation.images.links:
+            arguments = {"body": {link.when_body_field: link.when_body_equals}} if link.when_body_field else {}
+            block = extract_images(
+                operation,
+                samples[operation.operation_id],
+                arguments=arguments,
+                app_base_url="https://v2-staging.autods.com",
+            )
+            assert block is not None
+            missing = [index for index, item in enumerate(block["items"]) if not item.get("link")]
+            assert not missing, (
+                f"{operation.operation_id}: route {link.route!r} built no link for item(s) {missing} of its own "
+                f"payload sample. id_path={operation.images.id_path!r} — check it against a real response."
+            )
 
 
 _JSON_ARRAY = re.compile(r"\[[^\[\]]*\]")

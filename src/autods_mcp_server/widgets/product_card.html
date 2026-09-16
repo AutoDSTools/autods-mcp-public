@@ -53,10 +53,12 @@ product_grid.html; both files obey the same ones.
   #strip img { display: block; width: 100%; height: 100%; object-fit: contain; }
   #note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
   #note[hidden], #strip[hidden] { display: none; }
-  /* The title is the link when the server sent one — the hero image is not,
-     because clicking the picture is how the gallery is browsed. */
-  h1 a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
-  h1 a:hover { color: var(--accent); }
+  /* The hero picture is the link when the server sent one, and the title is
+     not: a linked title cannot be dragged over and copied, and the title is
+     what people copy. Browsing the gallery is the strip below, never the hero,
+     so nothing competes for the click. */
+  a.shot { display: block; cursor: pointer; }
+  a.shot:hover, a.shot:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   #blocked { margin: 10px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
   #blocked[hidden] { display: none; }
   /* Until the payload arrives the frame is an empty box, which reads as a
@@ -193,11 +195,39 @@ product_grid.html; both files obey the same ones.
     return node;
   };
 
-  var showHero = function (url, alt) {
+  // Set from the payload before the first showHero, and read on every later
+  // one: the strip re-runs showHero on each thumbnail click, so the anchor has
+  // to be rebuilt rather than attached once.
+  var productLink = null;
+
+  // Puts the hero picture — or whichever placeholder stands in for it — into
+  // the frame, inside an anchor when the server sent a link. Only the picture
+  // is ever the link: an anchor around the title would make the title
+  // unselectable, and copying the title is the common thing to want here.
+  var mountHero = function (node) {
     var wrap = $("hero-wrap");
     wrap.textContent = "";
+    if (!productLink) {
+      wrap.appendChild(node);
+      return;
+    }
+    var anchor = document.createElement("a");
+    anchor.className = "shot";
+    anchor.href = productLink;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.addEventListener("click", function (event) {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+      event.preventDefault();
+      openProduct(productLink);
+    });
+    anchor.appendChild(node);
+    wrap.appendChild(anchor);
+  };
+
+  var showHero = function (url, alt) {
     if (!url) {
-      wrap.appendChild(placeholder("no image"));
+      mountHero(placeholder("no image"));
       reportSize();
       return;
     }
@@ -206,13 +236,12 @@ product_grid.html; both files obey the same ones.
     img.decoding = "async";
     img.alt = alt || "";
     img.onerror = function () {
-      wrap.textContent = "";
-      wrap.appendChild(placeholder("image unavailable"));
+      mountHero(placeholder("image unavailable"));
       reportSize();
     };
     img.onload = reportSize;
     img.src = url;
-    wrap.appendChild(img);
+    mountHero(img);
   };
 
   var rendered = false;
@@ -229,21 +258,10 @@ product_grid.html; both files obey the same ones.
     var item = (payload.items || [])[0] || { images: [] };
     var images = item.images || [];
     if (item.label) $("title").textContent = item.label;
-    if (item.link) {
-      var anchor = document.createElement("a");
-      anchor.href = item.link;
-      anchor.target = "_blank";
-      anchor.rel = "noopener noreferrer";
-      anchor.textContent = $("title").textContent;
-      anchor.addEventListener("click", function (event) {
-        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
-        event.preventDefault();
-        openProduct(item.link);
-      });
-      $("title").textContent = "";
-      $("title").appendChild(anchor);
-    }
 
+    // Before the first showHero, so the hero is built as an anchor straight
+    // away. The title stays plain text on purpose — see the CSS above.
+    productLink = item.link || null;
     showHero(images.length ? images[0].url : null, item.label);
 
     if (images.length > 1) {

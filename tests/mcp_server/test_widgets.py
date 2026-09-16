@@ -414,6 +414,42 @@ async def test_the_diagnostic_is_idle_armed_and_retractable(
         assert "DIAG_IDLE_MS = 60000" in html, uri
 
 
+async def test_only_the_picture_carries_the_link_never_the_text(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """Reported from staging: the anchor wrapped the whole cell, so dragging
+    across a product title selected the link instead of the words — and copying
+    a title is the commonest thing to want off a grid you are picking from.
+
+    So the anchor wraps the thumbnail (or its placeholder) and stops there, and
+    on the card it wraps the hero picture rather than the ``h1``. Nothing in CI
+    renders HTML, so this greps the served assets the way its neighbours do.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        served = {widget.uri: (await session.read_resource(widget.uri)).contents[0].text for widget in WIDGETS}
+
+    for uri, html in served.items():
+        # The anchor is its own element with its own class, not the cell and not
+        # the heading; `a.cell` and `h1 a` are the two shapes being kept out.
+        assert "a.shot" in html, uri
+        assert "a.cell" not in html, uri
+        assert "h1 a" not in html, uri
+
+    grid = served["ui://autods/product-grid"]
+    # The caption is appended to the cell, the picture to the anchor. If these
+    # ever read the same variable again, the title is inside the link.
+    assert "shot.appendChild(img)" in grid
+    assert "cell.appendChild(label)" in grid
+
+    card = served["ui://autods/product-card"]
+    # The title is set as text and left alone; the hero is what gets wrapped.
+    assert 'if (item.label) $("title").textContent = item.label;' in card
+    assert "appendChild(anchor)" not in card.split("var mountHero")[0]
+
+
 async def test_the_grid_caption_is_not_truncated(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

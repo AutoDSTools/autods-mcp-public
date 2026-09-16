@@ -38,11 +38,13 @@ the widget path rests on is untouched.
 """
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from autods_mcp_server.image_rewrites import rewrite_thumbnail
 from autods_mcp_server.manifests.schema import ImagesBlock, ManifestOperation
 from autods_mcp_server.payload_paths import resolve_path
+from autods_mcp_server.product_links import build_link, route_names, route_needs_id
 from autods_mcp_server.widgets import widget_names
 
 # Envelope key the extracted images are published under — a sibling of ``data``.
@@ -143,6 +145,29 @@ def assert_images_usable(operation: ManifestOperation) -> None:
             f"Operation '{op_id}' declares 'images' but its 'notes' never mention thumbnails; a tool whose "
             f"result renders pictures in some clients and not others has to say so on the tool itself."
         )
+    if block.link is not None:
+        link = block.link
+        if link.route not in route_names():
+            raise ImagesError(
+                f"Operation '{op_id}' links its items to route '{link.route}', which the product-link table "
+                f"does not serve; registered routes: {', '.join(route_names()) or 'none'}."
+            )
+        if bool(link.when_body_field) != (link.when_body_equals is not None):
+            raise ImagesError(
+                f"Operation '{op_id}' declares half a link gate (when_body_field="
+                f"{link.when_body_field!r}, when_body_equals={link.when_body_equals!r}); set both or neither. "
+                f"Half a gate links every call, which is the opposite of what a gate is for."
+            )
+        if link.when_body_field and link.when_body_field not in (operation.body_schema or {}).get("properties", {}):
+            raise ImagesError(
+                f"Operation '{op_id}' gates its link on body field '{link.when_body_field}', which its "
+                f"'body_schema' does not declare; the gate could never match."
+            )
+        if route_needs_id(link.route) and not block.id_path:
+            raise ImagesError(
+                f"Operation '{op_id}' links to route '{link.route}', whose path needs an item id, but declares "
+                f"no 'id_path'; no item could ever get a link."
+            )
 
 
 def _items(data: Any, block: ImagesBlock) -> list[Any]:
@@ -207,7 +232,13 @@ def _urls_for(item: Any, block: ImagesBlock) -> list[str]:
     return []
 
 
-def extract_images(operation: ManifestOperation, data: Any) -> dict[str, Any] | None:
+def extract_images(
+    operation: ManifestOperation,
+    data: Any,
+    *,
+    arguments: Mapping[str, Any] | None = None,
+    app_base_url: str | None = None,
+) -> dict[str, Any] | None:
     """The ``images`` envelope block for one successful upstream response.
 
     Returns ``None`` when the operation declares no ``images`` block, or when
@@ -218,6 +249,13 @@ def extract_images(operation: ManifestOperation, data: Any) -> dict[str, Any] | 
     set the user is choosing from, so dropping the pictureless entries would
     silently renumber it; the widget renders those cells as a placeholder, which
     is the truth.
+
+    ``arguments`` and ``app_base_url`` serve the per-item ``link`` only, and both
+    are optional: a caller that passes neither gets exactly the block this
+    function produced before links existed. The arguments are needed because the
+    kind of product a tool returns is not always visible in the response —
+    ``list_products`` answers for drafts or active products according to the
+    ``product_status`` it was *asked* for.
     """
     block = operation.images
     if block is None:
@@ -238,6 +276,21 @@ def extract_images(operation: ManifestOperation, data: Any) -> dict[str, Any] | 
         label = _first_str(item, block.label_path)
         if label is not None:
             entry["label"] = label[:_MAX_LABEL_CHARS]
+        if block.link is not None:
+            # Built per item and published as a whole URL rather than as a
+            # template the client fills in: the clients that render no widget
+            # (Claude Code, Cursor, MCP Inspector, Desktop over a remote
+            # connector) get something the user can open, and no route is ever
+            # assembled by a model or by JavaScript. ``None`` for anything that
+            # cannot be built honestly — the key is simply absent then.
+            link = build_link(
+                block.link,
+                identifier=identifier,
+                arguments=arguments,
+                base_url=app_base_url,
+            )
+            if link is not None:
+                entry["link"] = link
         rendered.append(entry)
 
     payload: dict[str, Any] = {

@@ -104,6 +104,10 @@ Module map (`src/autods_mcp_server/`):
 - `image_fetch.py` — the opt-in base64 path: fetch, downscale to 252 px with
   Pillow, re-encode. Best-effort per image, and never fails the tool call. Owns
   its own HTTP client (`create_image_client`), separate from the dispatcher's.
+- `product_links.py` — RD-92: the closed route table behind the per-item
+  `link` (which AutoDS web-app page a rendered product opens), and the gate
+  that reads the *request* body when the response cannot tell one product
+  type from another. The host per environment lives in `settings.app_base_url`.
 - `widgets/` — RD-92's MCP Apps. `__init__.py` is the registry (`ui://autods/…`
   URIs, the `text/html;profile=mcp-app` mime type, the `_meta.ui` blocks);
   `product_grid.html` / `product_card.html` are hand-written, self-contained
@@ -149,6 +153,10 @@ client:
   bracket notation, keep `per_item × max ≤ 20`, name a widget the registry serves, and
   its operation's `notes` must mention thumbnails (RD-92). Every one of those fails
   silently otherwise — see **Product images** below.
+- An `images.link` block must name a route `product_links` serves, set both halves
+  of its body gate or neither, gate on a field the operation's own `body_schema`
+  declares, and carry an `id_path` when its route needs an id (RD-92). Each of
+  those otherwise ships as a link that is never built, or one built wrong.
 - The six playbook lints (RD-100), below.
 
 ### Where text goes: the four tiers
@@ -371,6 +379,46 @@ the URLs are in the response either way") is tier 2, in each carrying
 operation's `notes` — and the boot lint above requires the mention, in the same
 spirit as the `ok` mention `business_errors` requires. `instructions` (tier 4)
 gets **one** line in `manifests/_server.json` and nothing more.
+
+**Each rendered product can link to its page in the web app, and only two
+things about that are free.** The `link` sub-block names a route; everything
+else is Python. `product_links._ROUTES` is closed and holds only the routes
+actually wired (today: `store_product` → `/products/{id}`, for
+`list_products` with `product_status: 2`), because the paths belong to
+`v2-frontend`'s `ui-platform-commons/routePaths` and an unconfirmed literal is
+a guess that reads like config. The host comes from `settings.app_base_url`,
+keyed on `MCP_ENV` (prod → `platform.autods.com`, everything else →
+`v2-staging.autods.com`) with `AUTODS_APP_BASE_URL` as an override — a deploy
+that says nothing about links must still link to its own environment, because a
+staging widget pointing into production resolves, loads, and shows someone
+else's catalogue.
+
+Three rules that each exist to prevent a link that *looks* like it works:
+
+- **The gate reads the request, not the response.** `list_products` answers for
+  drafts or active products according to `product_status` in the body, and the
+  payload carries nothing that distinguishes them — which is why
+  `extract_images` takes `arguments` at all. Only status 2 is linked; ended,
+  untracked, scheduled and pre-draft carry no link, since the app has no page
+  that lists one product of theirs.
+- **Anything missing means no link**: no id, no host, a gate that does not
+  match, a route the table does not serve. Never a URL with a hole in it. A
+  half-built link still opens, lands somewhere plausible, and tells the user
+  their product is gone.
+- **The link is built once, in Python, and published per item** — not as a
+  template the widget or the model fills in. The clients that render no widget
+  get an openable URL, and no route is ever assembled in JavaScript.
+
+**Opening that link is a chain, because nothing has measured whether a host
+allows it.** RD-82 captured `openLinks` in `hostCapabilities` and never called
+it; RD-97 called tools and messages and never a link. So `product_grid.html`
+tries `window.open` (which returns null, silently, when the sandbox omits
+`allow-popups`), then the host's `ui/open-link` if `openLinks` was advertised
+— treating an error *or no answer at all* as a fall-through, since the method
+name is a reading of the spec and RD-97 watched two advertised capabilities
+behave differently from their declaration — and finally prints the URL as
+selectable text. Keep all three: the first two are the ones that might not
+exist, and the third is what stops a blocked link from being a dead click.
 
 **The widgets are read-only by construction.** No `tools/call`, no `ui/message`,
 no `ui/update-model-context` — `test_widgets.py` asserts their absence from the

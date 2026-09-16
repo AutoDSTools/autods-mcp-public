@@ -857,6 +857,40 @@ against the released commit, which takes seconds.
 that the rendering path is unverified for this release — R15.1 passing proves the
 data is right and proves nothing about the picture.
 
+**R15.3 — the product link on an active listing.** Two halves again, same split.
+
+*R15.3a — the envelope (Claude).* `list_products` on P2's store with
+`product_status: 2` (active). Every `images.items` entry with an `id` must carry
+a `link`, and the host in that link must be **this** environment's — 
+`v2-staging.autods.com` on staging, `platform.autods.com` on prod. A production
+host in a staging answer is a finding, not a detail: the id resolves there, the
+page loads, and it is a different account's catalogue. Then run the same call
+with `product_status: 1` (draft): **no** item may carry a `link` at all. Any
+other status is the same — only active products are linked, because the app has
+no page that lists one draft, ended, untracked, scheduled or pre-draft product,
+and a link to a page without the product on it is worse than no link.
+
+*R15.3b — does it open (human, claude.ai web only).* Ask *"list the active
+products in my store"*, then **click a thumbnail**. Reconnect the connector first
+if this release changed a widget, for the same reason R15.2 says so.
+
+- A **new tab on the product's page** → pass. Say which it was.
+- A line under the grid reading **"This client would not open a new tab. The
+  product page is: …"** → also a working result, and the one this check exists
+  to find out: the host's sandbox refused the tab and the fallback did its job.
+  Quote the URL and say the link could not be opened. That decides whether the
+  remaining product types ship as anchors or as printed URLs.
+- **Nothing at all happens** → a finding, and the one real failure. The chain is
+  meant to end in printed text however the host behaves, so a dead click means
+  the fallback did not fire.
+- **A tab to the wrong environment** → a finding, and report it as R15.3a would:
+  quote the host.
+
+Nothing about opening a link from a widget has ever been measured — RD-82
+captured `openLinks` in `hostCapabilities` and never called it, RD-97 called
+tools and messages and never a link — so record the outcome in the report even
+when it passes. This check is the measurement.
+
 *Three things declared but never verified against a live host, worth a line in the
 report either way:* the scraper bucket
 `autods-scraper-images.s3-us-west-2.amazonaws.com` (51% of `list_products` images

@@ -67,6 +67,36 @@ class BusinessErrors(BaseModel):
     codes: dict[str, str] = Field(default_factory=dict)
 
 
+class LinkBlock(BaseModel):
+    """Where a rendered product links to in the AutoDS web app (RD-92).
+
+    A grid the user picks a product from is a dead end without this: they
+    choose by eye and then have to find the same product again by title. So
+    each item carries a ``link`` beside its image URLs, and the widget renders
+    it as an anchor.
+
+    ``route`` names a row of the **closed** route table in ``product_links``,
+    never a path. The paths belong to another repository's router and the host
+    belongs to the environment, so composing either from manifest text would
+    put half a URL in a file that cannot be linted; a name can be, and the boot
+    lint rejects one the table does not serve.
+
+    ``when_body_field`` / ``when_body_equals`` gate the link on a field of the
+    *request* body, which is needed because one tool can return more than one
+    kind of product: ``list_products`` returns drafts or active products
+    according to ``product_status``, and the response carries nothing that
+    tells them apart. Both must be set together, or neither — a gate with only
+    a field name would match every call, which is the opposite of what someone
+    writing one intends.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    route: str
+    when_body_field: str = ""
+    when_body_equals: int | None = None
+
+
 class ImagesBlock(BaseModel):
     """Where the product images live inside one operation's response (RD-92).
 
@@ -102,6 +132,10 @@ class ImagesBlock(BaseModel):
     * ``widget`` names the ``ui://`` widget this operation's result should
       render in, and must be one the widget registry serves. Omitted ⇒ the URLs
       are published in ``structuredContent`` and nothing is rendered.
+    * ``link`` gives each item a URL into the AutoDS web app, so a rendered
+      grid is something the user can act on rather than only look at. Omitted
+      ⇒ no item carries a link, which is also what happens when the gate does
+      not match or the item has no id.
     * ``base64`` decides whether the synthetic ``include_images`` parameter is
       offered at all, and what it defaults to. Three values because the
       surfaces genuinely need three: ``"opt_in"`` (offered, default off) is the
@@ -125,6 +159,7 @@ class ImagesBlock(BaseModel):
     id_path: str = ""
     widget: str | None = None
     base64: Literal["off", "opt_in", "default_on"] = "opt_in"
+    link: LinkBlock | None = None
 
 
 class ManifestParameter(BaseModel):

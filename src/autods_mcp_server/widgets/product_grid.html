@@ -15,6 +15,12 @@ widget that mutated anything from here would produce duplicate writes the
 moment the user retried. If an action is ever added to this file it goes
 through ui/message, never through tools/call.
 
+Each cell is a link to that product's page in the AutoDS web app when the
+server sent one (the `link` field of an item). That is still read-only: it
+navigates the user's browser, it does not call anything. Opening it is a
+three-step chain because no spike ever measured whether a host lets a widget
+leave the frame — see openProduct() below.
+
 Four protocol rules are load-bearing here, each of which failed silently in
 RD-82 with no error and no log line:
 
@@ -67,6 +73,15 @@ an empty box, and the transcript names the method that carried the data.
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   }
   .cell { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--cell); }
+  /* A linked cell is a link and has to look like one — the whole cell is the
+     target, so nothing but the cursor and the hover border says so. */
+  a.cell { display: block; color: inherit; text-decoration: none; cursor: pointer; }
+  a.cell:hover { border-color: var(--accent); }
+  a.cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Shown only when the host refused to open a tab: the URL, selectable, so a
+     blocked link degrades to something the user can still copy. */
+  #blocked { margin: 10px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
+  #blocked[hidden] { display: none; }
   .thumb {
     display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain;
     background: var(--cell); border: 0;
@@ -106,6 +121,7 @@ an empty box, and the transcript names the method that carried the data.
 <p id="note" hidden></p>
 <p id="wait">Loading products…</p>
 <div id="grid"></div>
+<p id="blocked" hidden></p>
 <pre id="diag" hidden></pre>
 
 <script>
@@ -115,6 +131,52 @@ an empty box, and the transcript names the method that carried the data.
   var PAYLOAD_KIND = "autods.images/1";
   var $ = function (id) { return document.getElementById(id); };
   var post = function (msg) { try { window.parent.postMessage(msg, "*"); } catch (_) {} };
+
+  // Opening a product page is the one thing in this document that leaves the
+  // frame, and nothing has ever measured whether a host allows it. RD-82
+  // captured `openLinks` among hostCapabilities and never called it; RD-97
+  // called tools and messages and never a link. So this is a chain, not a
+  // choice, and every step is observable:
+  //
+  //   1. window.open — returns null (no throw, no log) when the host's iframe
+  //      sandbox omits allow-popups, which is exactly the silent failure the
+  //      rest of this file is written against.
+  //   2. the host's own openLinks channel, if it advertised one. The method
+  //      name here is a reading of the spec, not a measurement, so an error
+  //      response — or no response at all — falls through rather than leaving a
+  //      picture that does nothing when clicked.
+  //   3. print the URL, selectable. A link the user can copy is a worse product
+  //      than a link that opens, and a far better one than neither.
+  var OPEN_LINK_METHOD = "ui/open-link";
+  var OPEN_LINK_TIMEOUT_MS = 1500;
+  var hostCapabilities = {};
+  var pendingOpens = {};
+  var nextRequestId = 2;
+
+  var showBlockedLink = function (url) {
+    var node = $("blocked");
+    node.textContent = "This client would not open a new tab. The product page is: " + url;
+    node.hidden = false;
+    reportSize();
+  };
+
+  var openProduct = function (url) {
+    var win = null;
+    try { win = window.open(url, "_blank", "noopener"); } catch (_) {}
+    if (win) return;
+    if (hostCapabilities && hostCapabilities.openLinks) {
+      var id = nextRequestId++;
+      pendingOpens[id] = url;
+      post({ jsonrpc: "2.0", id: id, method: OPEN_LINK_METHOD, params: { url: url } });
+      // A host that ignores an unknown method answers nothing at all, so the
+      // timeout is the only thing between that and a dead click.
+      setTimeout(function () {
+        if (pendingOpens[id]) { delete pendingOpens[id]; showBlockedLink(url); }
+      }, OPEN_LINK_TIMEOUT_MS);
+      return;
+    }
+    showBlockedLink(url);
+  };
 
   // The host sizes the frame from what the app reports and defaults to ~150px
   // otherwise, which reads as a blank region rather than as a failure. Measured
@@ -212,7 +274,23 @@ an empty box, and the transcript names the method that carried the data.
 
     var grid = $("grid");
     items.forEach(function (item) {
-      var cell = document.createElement("div");
+      // A real anchor even though the click is handled in JS: the href is what
+      // gives hover preview, copy-link and a modifier-click their meaning, and
+      // those are handled by the browser rather than by the chain below.
+      var cell;
+      if (item.link) {
+        cell = document.createElement("a");
+        cell.href = item.link;
+        cell.target = "_blank";
+        cell.rel = "noopener noreferrer";
+        cell.addEventListener("click", function (event) {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+          event.preventDefault();
+          openProduct(item.link);
+        });
+      } else {
+        cell = document.createElement("div");
+      }
       cell.className = "cell";
 
       var first = (item.images || [])[0];
@@ -274,12 +352,27 @@ an empty box, and the transcript names the method that carried the data.
     // coming. Restart the countdown.
     armDiagnostic();
 
+    // A reply to our own open-link request. An error means the host does not
+    // know that method, which is a fall-through and not a failure to report.
+    if (data.id !== undefined && pendingOpens[data.id]) {
+      var url = pendingOpens[data.id];
+      delete pendingOpens[data.id];
+      if (data.error) showBlockedLink(url);
+      return;
+    }
+
     var payload = findPayload(data, 0);
     if (payload) render(payload);
 
     var result = data.result;
     if (result && !initDone) {
       initDone = true;
+      // What the host says it can do. Only openLinks is read today, and it is
+      // read as a hint: RD-97 watched advertised capabilities behave two
+      // different ways — serverTools was advertised while tools/list answered
+      // "method not found", and updateModelContext is advertised and is a
+      // silent no-op. So this steers the chain; it never proves it worked.
+      hostCapabilities = result.hostCapabilities || {};
       // Only now: announcing initialized before the response lands makes
       // claude.ai ignore every later notification, sizing included.
       post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });

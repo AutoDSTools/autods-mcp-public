@@ -751,7 +751,18 @@ def _build_server(
                     # by manifest data. Same placement rule again — beside
                     # ``data``, never inside it — so an operation with no
                     # ``images`` block keeps a byte-identical envelope.
-                    images = extract_images(operation, payload.get("data"))
+                    # ``arguments`` ride along for the per-item web-app link:
+                    # which product page an item belongs on is not always in the
+                    # response (``list_products`` answers for the
+                    # ``product_status`` it was asked for), so the gate reads the
+                    # call. ``app_base_url`` follows the environment, so a
+                    # staging deploy cannot hand out a production link.
+                    images = extract_images(
+                        operation,
+                        payload.get("data"),
+                        arguments=arguments,
+                        app_base_url=settings.app_base_url,
+                    )
                     if images is not None:
                         payload[IMAGES_KEY] = images
                 # RD-100: the per-step nudge, on the one channel that puts it in

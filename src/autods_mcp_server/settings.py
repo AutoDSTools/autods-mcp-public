@@ -35,6 +35,19 @@ _BASE_URL_KEY_TO_ATTR: dict[str, str] = {
 
 # Origins shared by every non-local environment. Staging additionally
 # accepts dev/inspector clients; prod is the narrow set below.
+# The AutoDS web app a rendered product links back to (RD-92). Keyed by
+# environment rather than carried as a deploy variable, because the failure this
+# prevents is silent: a staging widget linking into production resolves, loads,
+# and shows someone else's catalogue — so the default must be right on a deploy
+# that says nothing about links at all. ``AUTODS_APP_BASE_URL`` overrides it for
+# a one-off host.
+_APP_BASE_URL_BY_ENV: dict[McpEnv, str] = {
+    McpEnv.local: "https://v2-staging.autods.com",
+    McpEnv.staging: "https://v2-staging.autods.com",
+    McpEnv.prod: "https://platform.autods.com",
+}
+
+
 _PROD_ORIGINS: tuple[str, ...] = (
     "https://claude.com",
     "https://claude.ai",
@@ -61,6 +74,11 @@ class Settings(BaseSettings):
         default="https://products-research.autods.com",
         validation_alias="PRODUCTS_RESEARCH_BASE_URL",
     )
+
+    # Web-app host for the product links a widget renders (RD-92). Unset ⇒
+    # derived from ``mcp_env`` via ``_APP_BASE_URL_BY_ENV``; this is an override,
+    # not a required variable.
+    autods_app_base_url: str | None = Field(default=None, validation_alias="AUTODS_APP_BASE_URL")
 
     cognito_user_pool_id: str = Field(validation_alias="COGNITO_USER_POOL_ID")
     cognito_region: str = Field(default="us-west-2", validation_alias="COGNITO_REGION")
@@ -223,6 +241,16 @@ class Settings(BaseSettings):
                 return [*_PROD_ORIGINS, *_STAGING_EXTRA_ORIGINS]
             case McpEnv.prod:
                 return list(_PROD_ORIGINS)
+
+    @computed_field
+    @property
+    def app_base_url(self) -> str:
+        """Base URL of the AutoDS web app a rendered product links to (RD-92).
+
+        No trailing slash, so ``product_links`` can concatenate a path onto it.
+        """
+        override = (self.autods_app_base_url or "").strip().rstrip("/")
+        return override or _APP_BASE_URL_BY_ENV[self.mcp_env]
 
     @computed_field
     @property

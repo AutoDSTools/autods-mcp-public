@@ -318,6 +318,135 @@ def test_an_operation_with_no_block_passes() -> None:
 
 
 # --------------------------------------------------------------------------
+# The per-item link (RD-92, addition 2026-09-16)
+# --------------------------------------------------------------------------
+
+
+def _linking_operation(link: dict[str, object], **overrides: object) -> ManifestOperation:
+    """A ``list_products``-shaped operation: a body-gated link needs a body schema."""
+    images: dict[str, object] = {
+        "item_path": "results",
+        "image_paths": ["main_picture_url.url"],
+        "id_path": "id",
+        "label_path": "title",
+        "link": link,
+    }
+    images.update(overrides)
+    return ManifestOperation(
+        operation_id="probe_op",
+        method="POST",
+        path="/probe",
+        notes=_NOTES,
+        base_url_key="autods_api",
+        annotations={"title": "Probe", "readOnlyHint": True},
+        body_schema={"type": "object", "properties": {"product_status": {"type": "integer"}}},
+        images=images,
+    )
+
+
+def test_a_link_to_a_route_nothing_serves_is_rejected() -> None:
+    """A route name is the only part of a link a lint can check, and it is the
+    part that would otherwise ship as a confident 404."""
+    with pytest.raises(ImagesError, match="product-link table does not serve"):
+        assert_images_usable(_linking_operation({"route": "wishlist_item"}))
+
+
+def test_half_a_link_gate_is_rejected() -> None:
+    """A gate with only a field name matches every call — the opposite of what
+    whoever wrote it meant, and invisible in review."""
+    with pytest.raises(ImagesError, match="half a link gate"):
+        assert_images_usable(_linking_operation({"route": "store_product", "when_body_field": "product_status"}))
+    with pytest.raises(ImagesError, match="half a link gate"):
+        assert_images_usable(_linking_operation({"route": "store_product", "when_body_equals": 2}))
+
+
+def test_a_gate_on_a_body_field_the_schema_never_declares_is_rejected() -> None:
+    """Same class as the phantom filter fields: the gate would simply never
+    match, and a link that never appears looks exactly like a link nobody
+    configured."""
+    with pytest.raises(ImagesError, match="body_schema' does not declare"):
+        assert_images_usable(
+            _linking_operation({"route": "store_product", "when_body_field": "status", "when_body_equals": 2})
+        )
+
+
+def test_a_link_whose_route_needs_an_id_is_rejected_without_an_id_path() -> None:
+    with pytest.raises(ImagesError, match="declares no 'id_path'"):
+        assert_images_usable(_linking_operation({"route": "store_product"}, id_path=""))
+
+
+def test_a_valid_link_block_passes() -> None:
+    assert_images_usable(
+        _linking_operation({"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2})
+    )
+
+
+def test_each_item_carries_its_own_product_page_link() -> None:
+    operation = _linking_operation(
+        {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2}
+    )
+    data = {
+        "results": [
+            {"id": 4242, "title": "Bed Sheets", "main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}},
+            {"id": 4243, "title": "Denim Vest", "main_picture_url": {"url": "https://i.ebayimg.com/y/s-l1600.jpg"}},
+        ]
+    }
+    block = extract_images(
+        operation,
+        data,
+        arguments={"store_ids": "7", "body": {"product_status": 2}},
+        app_base_url="https://v2-staging.autods.com",
+    )
+    assert block is not None
+    assert [item["link"] for item in block["items"]] == [
+        "https://v2-staging.autods.com/products/4242",
+        "https://v2-staging.autods.com/products/4243",
+    ]
+
+
+def test_a_call_outside_the_gate_carries_no_link_at_all() -> None:
+    """Drafts, ended, untracked, scheduled and pre-draft products render exactly
+    as they did before links existed: the key is absent, not empty."""
+    operation = _linking_operation(
+        {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2}
+    )
+    data = {"results": [{"id": 4242, "main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}}]}
+    block = extract_images(
+        operation,
+        data,
+        arguments={"store_ids": "7", "body": {"product_status": 1}},
+        app_base_url="https://v2-staging.autods.com",
+    )
+    assert block is not None
+    assert "link" not in block["items"][0]
+
+
+def test_an_item_with_no_id_carries_no_link() -> None:
+    operation = _linking_operation(
+        {"route": "store_product", "when_body_field": "product_status", "when_body_equals": 2}
+    )
+    data = {"results": [{"main_picture_url": {"url": "https://i.ebayimg.com/x/s-l1600.jpg"}}]}
+    block = extract_images(
+        operation,
+        data,
+        arguments={"body": {"product_status": 2}},
+        app_base_url="https://v2-staging.autods.com",
+    )
+    assert block is not None
+    assert "link" not in block["items"][0]
+    assert "id" not in block["items"][0]
+
+
+def test_an_operation_with_no_link_block_is_unaffected_by_the_arguments() -> None:
+    """The regression guard: passing the two new arguments to a block that does
+    not link must produce exactly the block it produced before."""
+    operation = _operation(item_path="results", image_paths=["images.*"], id_path="_id")
+    data = {"results": [{"_id": "a1", "images": ["https://cdn.shopify.com/x/one.jpg"]}]}
+    linked = extract_images(operation, data, arguments={"body": {"product_status": 2}}, app_base_url="https://app.test")
+    assert linked == extract_images(operation, data)
+
+
+# --------------------------------------------------------------------------
 # Every shipped block, against the payload its own upstream really returns
 # --------------------------------------------------------------------------
 #

@@ -255,6 +255,81 @@ async def test_an_operation_without_an_images_block_gets_an_untouched_envelope(
     assert [block.type for block in result.content] == ["text"]
 
 
+async def test_only_an_active_product_listing_carries_web_app_links(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-92's link addition, end to end and through the real manifest.
+
+    The same tool, the same upstream payload, two calls: the only difference is
+    the ``product_status`` in the request body, which is also the only place the
+    difference exists at all — the response carries nothing that tells a draft
+    from an active product. Status 2 links to the product page; status 1 (and
+    every other status) carries no link, because the app has no page listing one
+    draft and a link to a page without the product on it is worse than none.
+    """
+    upstream_payload = {
+        "results": [
+            {
+                "id": 4242,
+                "title": "Satin Silk Bed Sheets",
+                "main_picture_url": {"url": "https://i.ebayimg.com/images/g/abc/s-l1600.jpg"},
+            }
+        ]
+    }
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=upstream_payload)
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        active = await session.call_tool("list_products", {"store_ids": "7", "body": {"product_status": 2}})
+        draft = await session.call_tool("list_products", {"store_ids": "7", "body": {"product_status": 1}})
+
+    assert active.structured_content is not None
+    assert draft.structured_content is not None
+    # The host is the environment's: these settings are MCP_ENV=local, which
+    # points at staging. A production link from a non-production deploy resolves
+    # and loads, so nothing would ever report it.
+    assert active.structured_content["images"]["items"][0]["link"] == "https://v2-staging.autods.com/products/4242"
+    assert "link" not in draft.structured_content["images"]["items"][0]
+    # Everything else about the two blocks is the same — the link is additive.
+    assert active.structured_content["data"] == upstream_payload
+    assert draft.structured_content["data"] == upstream_payload
+
+
+async def test_the_grid_opens_a_product_link_without_assuming_the_host_allows_it(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """Neither RD-82 nor RD-97 ever opened a link from a widget, and an anchor a
+    sandbox drops fails the way everything else in this ticket fails: nothing
+    rendered, nothing thrown, a picture that ignores clicks.
+
+    So the asset must carry all three steps of the chain — the popup attempt,
+    the host's advertised ``openLinks`` channel, and the printed URL — plus the
+    ``noopener noreferrer`` every new tab needs. Nothing in CI renders HTML, so
+    this greps the served document, the same way the diagnostic test does.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        grid = (await session.read_resource("ui://autods/product-grid")).contents[0].text
+
+    assert grid is not None
+    assert 'window.open(url, "_blank", "noopener")' in grid
+    assert "hostCapabilities.openLinks" in grid
+    assert 'OPEN_LINK_METHOD = "ui/open-link"' in grid
+    assert "showBlockedLink" in grid
+    assert 'cell.rel = "noopener noreferrer"' in grid
+    assert 'cell.target = "_blank"' in grid
+    # A host that simply ignores an unknown method answers nothing at all, and
+    # without this the click is silently dead — which is the failure being
+    # measured, not one to reproduce.
+    assert "OPEN_LINK_TIMEOUT_MS" in grid
+
+
 async def test_widget_assets_obey_the_measured_protocol_order(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

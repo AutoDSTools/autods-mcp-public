@@ -180,10 +180,23 @@ def _client_fields(ctx: ServerRequestContext[Any, Any]) -> dict[str, Any]:
     "who connected" line nothing can be joined to would not answer the question
     it exists for, which is *which client made this call*.
 
-    ``client_info`` is optional in the spec and absent for a client that sent
-    none, so both of its fields can be ``None``. That is itself a fingerprint, so
-    they are logged as ``None`` rather than omitted. ``protocol_version`` is the
-    *negotiated* version off the context, not the one the client asked for.
+    **A ``None`` here is about the protocol version, not about the client**, and
+    on this server it is common. ``StreamableHTTPSessionManager`` runs
+    ``stateless=True``, and its router sends a request whose
+    ``mcp-protocol-version`` header is absent or names a 2025-era handshake
+    version down the legacy path, which builds the connection as
+    ``Connection.from_envelope(version, None, None)`` — ``client_params`` hard
+    coded to ``None``, whatever the client said at ``initialize``, because there
+    is no session to have remembered it from. Only 2026-07-28 repeats the client
+    identity on every request (in ``_meta``), which is why those lines are the
+    populated ones. So ``client_name`` names the client when it is there and
+    means "2025-era request" when it is not; it can never mean "this client sends
+    no ``clientInfo``". ``user_agent``, bound by ``RequestContextMiddleware``, is
+    the signal that is on every request either way.
+
+    ``protocol_version`` is likewise weaker than it looks on the legacy path:
+    absent the header it is ``DEFAULT_NEGOTIATED_VERSION`` (``2025-03-26``), a
+    fallback rather than anything negotiated.
     """
     params = ctx.session.client_params
     info = params.client_info if params is not None else None

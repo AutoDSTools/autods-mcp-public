@@ -974,13 +974,55 @@ RD-50 :: Logging cleanup ::
   **names only**, plus the keys of `experimental` and `extensions` — those two open maps
   are the only place a widget-capable client could announce itself, while the values are
   the client's business and would put an unbounded, unreviewed object on every line.
-  And a client that sends no `clientInfo` is logged as `None`, not omitted: absent fields
-  would make it indistinguishable from a line written before any of this existed.
+  And `user_agent` is bound by `RequestContextMiddleware`, not read from the handshake,
+  because it is the only client signal on **every** request — see the next entry for why
+  the MCP identity is not.
   `resource_read` is the **only** server-side evidence that a widget was ever rendered — a
   host that never reads `ui://autods/<name>` never showed the grid — so it is emitted for
   every read with a `kind` of `widget` / `playbook` / `unknown`, including the unknown-URI
   refusal. Emitting it only for widgets would make "no widget line" mean both "this client
   ignores our widgets" and "this client never touched `resources/` at all".
+- **A null `client_name` is a statement about the protocol version, not about the client**
+  (found on the first day of prod traffic, 2026-09-18). Six `tool_call` lines came back
+  with `client_name: null` and `protocol_version: "2025-03-26"`, which reads as an old
+  client sending no `clientInfo`. It is neither. `StreamableHTTPSessionManager` runs
+  `stateless=True`, and its router (`_handle_request`) sends a request whose
+  `mcp-protocol-version` header is absent or names a **2025-era handshake version**
+  (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`) down the legacy path, which
+  builds the connection as `Connection.from_envelope(version, None, None)` — client params
+  hard-coded to `None` regardless of what the client sent at `initialize`, because a
+  stateless server kept no session to remember it from. Only **2026-07-28** repeats the
+  client identity on every request, in `_meta`, which is why exactly those lines are
+  populated. And the `2025-03-26` is `DEFAULT_NEGOTIATED_VERSION`, the value used when the
+  header is **absent** — a fallback, not a negotiation, so it does not even mean the client
+  speaks that version. Hence `user_agent` on the context: it is the one client signal
+  present on every request whatever the protocol era. Two consequences worth keeping:
+  a null row can never be attributed to a client from the MCP fields alone, and — since
+  the `extensions` capability that declares `io.modelcontextprotocol/ui` is itself a
+  2026-07-28 feature — a null row is *probably* a client that predates MCP Apps entirely
+  and was never going to render a widget. Probably: that is an inference from the version,
+  not something the logs say.
+- **What the first day of prod traffic showed: four client identities, and claude.ai uses
+  two of them** (2026-09-18, 40 lines carrying the fields):
+
+  | `client_name` | version | protocol | capabilities | what it does |
+  |---|---|---|---|---|
+  | `Anthropic/ClaudeAI` | 1.0.0 | 2026-07-28 | `extensions`, `extensions:io.modelcontextprotocol/ui` | tool calls |
+  | `claude-ai` | 0.1.0 | 2026-07-28 | `extensions`, `extensions:io.modelcontextprotocol/ui` | widget reads, nothing else |
+  | `claude-code` | 2.1.276 | 2026-07-28 | `elicitation`, `roots` | tool calls |
+  | `null` | — | 2025-03-26 | — | tool calls (see above) |
+
+  **claude.ai fetches the widget under a different identity than it calls tools with**, so
+  `client_name` never matches across the two line types and is the wrong key to join on —
+  one user in that window made 16 tool calls as `Anthropic/ClaudeAI` and then read the grid
+  and the card as `claude-ai`. Join on the user instead: `resource_read` carries no
+  identity of its own, but it shares `request_id` with the access-log line, which has
+  `cognito_username` and `autods_user_id`.
+
+  `extensions:io.modelcontextprotocol/ui` is the field that separates a client that renders
+  the grid from one that does not — present on both claude.ai identities, absent on
+  `claude-code`. That is what the capability-keys decision above was for, and it is the
+  first thing to read on any new "no images" report.
 - **The image fetch has its own HTTP client, and that is not tidiness** (RD-92). It
   started as the dispatcher's — the image request is built from scratch with no
   `Authorization` header, so sharing looked free. It is not: httpx keeps a cookie jar

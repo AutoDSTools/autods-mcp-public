@@ -1,6 +1,6 @@
 """HTTP middlewares.
 
-- RequestContextMiddleware: binds request_id / path / method onto the
+- RequestContextMiddleware: binds request_id / path / method / user_agent onto the
   structlog context for the lifetime of the request and emits one
   structured access log line.
 - OriginAllowlistMiddleware: rejects foreign Origins on protected
@@ -60,8 +60,28 @@ def _host_from_header(host_header: str) -> str:
     return host_header.split(":", 1)[0]
 
 
+# A User-Agent is caller-controlled and unbounded, and this one goes on every
+# line of every request. Long ones are truncated rather than dropped: the head is
+# what names the client, and a line that says which client it was is worth more
+# than a byte-exact copy of a header nobody reads in full.
+_USER_AGENT_MAX_CHARS = 200
+
+
+def _user_agent(request: Request) -> str | None:
+    """The request's ``User-Agent``, truncated; ``None`` when it sent none.
+
+    ``None`` is kept as a value rather than omitted, because "this client sends
+    no User-Agent" is a fingerprint in its own right and has to stay different
+    from a line written before this field existed.
+    """
+    value = request.headers.get("user-agent")
+    if value is None:
+        return None
+    return value[:_USER_AGENT_MAX_CHARS]
+
+
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Bind request_id / path / method to structlog context and log access."""
+    """Bind request_id / path / method / user_agent to structlog context and log access."""
 
     def __init__(
         self,
@@ -82,6 +102,15 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             request_id=request_id,
             path=request.url.path,
             method=request.method,
+            # The only client signal that is on *every* request. The MCP client
+            # identity is not: the transport is stateless, so on a 2025-era
+            # protocol version the SDK hands the handler no ``client_params`` at
+            # all and ``client_name`` is ``None`` however the client identified
+            # itself at ``initialize`` (only 2026-07-28 repeats it per request,
+            # in ``_meta``). Bound here rather than logged by a handler so it
+            # reaches every line — ``request``, ``tool_call``, ``resource_read``
+            # — and so it survives the paths that never reach a handler at all.
+            user_agent=_user_agent(request),
         )
         # Correlate Sentry events with the access log (both keyed on request_id).
         set_request_id(request_id)

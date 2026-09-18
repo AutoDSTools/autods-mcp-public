@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from autods_mcp_server.logging import configure_logging
-from autods_mcp_server.middleware import RequestContextMiddleware
+from autods_mcp_server.middleware import _USER_AGENT_MAX_CHARS, RequestContextMiddleware
 from autods_mcp_server.settings import Settings
 
 
@@ -108,6 +108,105 @@ def test_request_log_carries_cognito_username(monkeypatch) -> None:
 
     record = json.loads(request_lines[0])
     assert record["cognito_username"] == "sub-abc-123"
+
+
+def test_user_agent_is_bound_for_every_line_of_the_request(monkeypatch) -> None:
+    """The only client signal present on every request.
+
+    The MCP client identity is not: the transport is stateless, so a request on
+    a 2025-era protocol version reaches the handlers with no ``client_params``
+    and logs ``client_name: null`` whatever the client called itself at
+    ``initialize``. Bound to the contextvars rather than passed to one logger
+    call, so it reaches `tool_call` and `resource_read` too — asserted here on a
+    second line emitted from inside the route, which is what those handlers are.
+    """
+    settings = Settings(
+        MCP_ENV="local",
+        COGNITO_USER_POOL_ID="staging_pool_id",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS=["public-client"],
+    )
+    configure_logging(settings)
+
+    buffer = io.StringIO()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(file=buffer),
+        cache_logger_on_first_use=False,
+    )
+
+    app = FastAPI()
+    app.add_middleware(RequestContextMiddleware)
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        structlog.get_logger("test").info("handler_line")
+        return {"status": "ok"}
+
+    with TestClient(app) as client:
+        response = client.get("/health", headers={"user-agent": "claude-ai/0.1.0"})
+    assert response.status_code == 200
+
+    records = [json.loads(line) for line in buffer.getvalue().strip().splitlines()]
+    by_event = {record["event"]: record for record in records}
+    assert by_event["request"]["user_agent"] == "claude-ai/0.1.0"
+    assert by_event["handler_line"]["user_agent"] == "claude-ai/0.1.0"
+
+
+def test_a_long_user_agent_is_truncated_not_dropped(monkeypatch) -> None:
+    """It is caller-controlled, unbounded, and on every line of every request.
+
+    Truncated rather than dropped, because the head is the part that names the
+    client — which is the whole point of the field.
+    """
+    settings = Settings(
+        MCP_ENV="local",
+        COGNITO_USER_POOL_ID="staging_pool_id",
+        COGNITO_DOMAIN="autods.auth.us-west-2.amazoncognito.com",
+        COGNITO_PUBLIC_CLIENT_ID="public-client",
+        ALLOWED_COGNITO_CLIENT_IDS=["public-client"],
+    )
+    configure_logging(settings)
+
+    buffer = io.StringIO()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(file=buffer),
+        cache_logger_on_first_use=False,
+    )
+
+    app = FastAPI()
+    app.add_middleware(RequestContextMiddleware)
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    with TestClient(app) as client:
+        client.get("/health", headers={"user-agent": "claude-ai/" + "x" * 5000})
+        client.get("/health", headers={"user-agent": ""})
+
+    records = [json.loads(line) for line in buffer.getvalue().strip().splitlines()]
+    long_line, empty_line = (record for record in records if record["event"] == "request")
+    assert len(long_line["user_agent"]) == _USER_AGENT_MAX_CHARS
+    assert long_line["user_agent"].startswith("claude-ai/")
+    # A header that is present but empty is not the same as one never sent, and
+    # neither is dropped.
+    assert empty_line["user_agent"] == ""
 
 
 def test_explicit_request_id_is_preserved(monkeypatch) -> None:

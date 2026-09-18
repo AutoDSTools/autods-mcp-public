@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
-from mcp import Client
+from mcp import Client, types
 from mcp.client.streamable_http import streamable_http_client
 
 from autods_mcp_server.auth.dependency import jwks_dependency
@@ -201,6 +201,7 @@ async def mcp_client_session(
     runtime: McpRuntime,
     *,
     token: str | None,
+    client_info: types.Implementation | None = None,
 ) -> AsyncIterator[Client]:
     """Drive the in-process app via the real Streamable HTTP MCP client.
 
@@ -218,6 +219,11 @@ async def mcp_client_session(
     ``cache=None`` disables the SDK's new client-side response cache so every
     call reaches the server, which is what these tests assert on (rate-limit
     accounting, per-call audit lines, upstream call counts).
+
+    ``client_info`` overrides the ``clientInfo`` of the handshake. Left unset the
+    SDK sends its own, which is what most tests want; the audit-line tests set it
+    so they can assert on a value this repo chose rather than on whatever the
+    installed SDK happens to call itself.
     """
     headers = {"Authorization": f"Bearer {token}"} if token else None
     http_client = httpx2.AsyncClient(
@@ -233,6 +239,7 @@ async def mcp_client_session(
             Client(
                 streamable_http_client("http://mcp.test/mcp", http_client=http_client),
                 cache=None,
+                client_info=client_info,
             ) as client,
         ):
             yield client

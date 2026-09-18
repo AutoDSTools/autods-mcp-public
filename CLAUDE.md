@@ -960,6 +960,27 @@ RD-50 :: Logging cleanup ::
   the fetch happens and "exactly one `tool_call` line per call" is worth keeping — and
   it carries `elapsed_ms`, which is the *only* record of how long the thumbnail pass
   took, since `tool_call`'s `latency_ms` stops at the upstream response.
+- **Which client called is on every audit line, and a widget read gets its own line.**
+  The handshake used to be discarded: `clientInfo` reached the session and nothing read
+  it, so the logs could not tell a claude.ai connector from the *same URL* registered by
+  hand in a client config file. That is not a detail — it is the difference between a user
+  who sees the product grid and a user who does not (see the registration matrix below),
+  and it meant every "I get no images" report had to be reproduced on someone's screen
+  before it could even be classified. `_client_fields` now puts `client_name`,
+  `client_version`, `protocol_version` and `client_capabilities` on `tool_call` and on the
+  new `resource_read`. Three things about it are deliberate. It is on **every line** rather
+  than logged once per connection, because no session id reaches the logs and a "who
+  connected" line nothing can be joined to answers nothing. `client_capabilities` holds
+  **names only**, plus the keys of `experimental` and `extensions` — those two open maps
+  are the only place a widget-capable client could announce itself, while the values are
+  the client's business and would put an unbounded, unreviewed object on every line.
+  And a client that sends no `clientInfo` is logged as `None`, not omitted: absent fields
+  would make it indistinguishable from a line written before any of this existed.
+  `resource_read` is the **only** server-side evidence that a widget was ever rendered — a
+  host that never reads `ui://autods/<name>` never showed the grid — so it is emitted for
+  every read with a `kind` of `widget` / `playbook` / `unknown`, including the unknown-URI
+  refusal. Emitting it only for widgets would make "no widget line" mean both "this client
+  ignores our widgets" and "this client never touched `resources/` at all".
 - **The image fetch has its own HTTP client, and that is not tidiness** (RD-92). It
   started as the dispatcher's — the image request is built from scratch with no
   `Authorization` header, so sharing looked free. It is not: httpx keeps a cookie jar
@@ -1444,22 +1465,36 @@ production incident; don't undo the guard without understanding why it's there.
   operation's `image_paths`, with prefix matching, so `variations.price` does not count as
   covering `variations.*.main_picture_url.url`. If you add a projection example to a tool
   that carries an images block, it must keep the pictures.
-- **The per-client widget matrix, re-measured on mcp 2.x** (2026-09-15, against staging
-  0.7.3; client versions were not recorded, so read the rows as "this client, that date").
-  Every row matched its 1.x reading, so the 2.x handshake changed nothing here:
+- **The widget matrix: client × registration path** (rows 1–2 re-measured on mcp 2.x
+  2026-09-15 against staging 0.7.3 and matching their 1.x reading, so the 2.x handshake
+  changed nothing there; rows 3–4 measured 2026-09-18 against prod. Client versions were
+  not recorded, so read every row as "this client, that date"):
 
-  | Client | Renders the widget? |
-  |---|---|
-  | claude.ai web (remote connector) | **yes**, and honours `visibility` |
-  | Claude Desktop (remote connector) | **no** — shows raw `structuredContent` |
-  | Claude Code | **no**, and ignores `visibility` |
+  | Client | How the server was registered | Renders the widget? |
+  |---|---|---|
+  | claude.ai web | claude.ai connector | **yes**, and honours `visibility` |
+  | Claude Desktop (chat) | claude.ai connector | **no** — shows raw `structuredContent` |
+  | Claude Code | claude.ai connector | **yes** |
+  | Claude Code | `mcpServers` entry in a client config file | **no** |
 
-  Desktop over a *remote* connector showing no grid is the expected answer, not a fault.
-  It is the most common false alarm this matrix exists to settle, because it looks exactly
-  like a broken widget to whoever reports it — so establish the transport before believing
-  any "Desktop shows no grid" report, and never grade it from what the assistant says about
-  which client it is running in. Hence also the hard requirement that the
-  text/`structuredContent` path stays correct on its own.
+  **The second column was missing from the first version of this table, and its absence
+  cost a day.** Read as a per-client matrix it says Claude Code does not render, which is
+  false: the same client renders or does not depending on how the *same URL* was
+  registered. Confirmed 2026-09-18 by an A/B inside one session that had both — the
+  account connector `AutoDS Prod` and a hand-added `{"type": "http", "url":
+  "https://mcp.autods.com/mcp"}` in `~/.claude.json` — where identical arguments drew a
+  grid through the first and no grid through the second. The payload was byte-equivalent
+  both times: a correct `images` block with `widget: "product-grid"`. So a report of "no
+  images" is not evidence about the server, the deploy, or the payload until the
+  registration path is known, and `client_name` on the audit line is what tells you.
+
+  The Desktop *chat* app over a connector showing no grid is likewise the expected answer,
+  not a fault. Both rows that read **no** are the false alarms this matrix exists to
+  settle, because each looks exactly like a broken widget to whoever reports it — so
+  establish client *and* registration path before believing any "shows no grid" report,
+  and never grade either from what the assistant says about which client it is running in.
+  Hence also the hard requirement that the text/`structuredContent` path stays correct on
+  its own.
 
   **Local stdio is deliberately not a row.** This server has no stdio transport — it is
   HTTP-only — so reaching it that way needs a hand-written `mcp-remote` bridge, which no

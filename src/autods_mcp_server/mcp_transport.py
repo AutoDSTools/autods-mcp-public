@@ -150,8 +150,54 @@ class McpRuntime:
     identity_resolver: CachedIdentityResolver
 
 
+def _client_capability_names(capabilities: types.ClientCapabilities) -> list[str]:
+    """The capability *names* a client declared at ``initialize``.
+
+    Names only, never the values: the point is to tell one client build from
+    another, and a capability's settings are the client's business and would put
+    an unbounded, unreviewed object on every audit line.
+
+    ``experimental`` and ``extensions`` are the two open-ended maps, and the only
+    place a client that renders MCP Apps could announce itself, so their keys are
+    kept as ``<map>:<key>``. That is the whole reason this field exists — nothing
+    in the closed capability set distinguishes a client that renders a widget
+    from one that shows the raw ``structuredContent`` instead.
+    """
+    names: list[str] = []
+    for name, value in capabilities.model_dump(exclude_none=True).items():
+        names.append(name)
+        if name in ("experimental", "extensions") and isinstance(value, dict):
+            names.extend(f"{name}:{key}" for key in value)
+    return sorted(names)
+
+
+def _client_fields(ctx: ServerRequestContext[Any, Any]) -> dict[str, Any]:
+    """Who is on the other end of this request, for the audit lines.
+
+    Read back from the ``initialize`` handshake the session already holds, so it
+    costs a property read and no protocol work. It rides every audit line rather
+    than being logged once per session because no session id reaches the logs: a
+    "who connected" line nothing can be joined to would not answer the question
+    it exists for, which is *which client made this call*.
+
+    ``client_info`` is optional in the spec and absent for a client that sent
+    none, so both of its fields can be ``None``. That is itself a fingerprint, so
+    they are logged as ``None`` rather than omitted. ``protocol_version`` is the
+    *negotiated* version off the context, not the one the client asked for.
+    """
+    params = ctx.session.client_params
+    info = params.client_info if params is not None else None
+    return {
+        "client_name": info.name if info is not None else None,
+        "client_version": info.version if info is not None else None,
+        "protocol_version": ctx.protocol_version,
+        "client_capabilities": _client_capability_names(params.capabilities) if params is not None else [],
+    }
+
+
 def _emit_audit(
     *,
+    client: dict[str, Any],
     tool_name: str,
     op_id: str,
     cognito_username: str,
@@ -176,8 +222,15 @@ def _emit_audit(
     where the model must judge the picture", and without this field there is no
     way to find out whether models set it for that or out of habit — neither the
     Mixpanel event (endpoint only) nor anything else records an argument.
+
+    ``client`` is ``_client_fields``: which client made the call. Until it was
+    added, the handshake was discarded and the logs could not tell a claude.ai
+    connector from the same URL registered by hand in a client config file —
+    which is the difference between a user who sees the product grid and a user
+    who does not, and therefore the first thing any "no images" report needs.
     """
     fields: dict[str, Any] = {
+        **client,
         "cognito_username": cognito_username,
         "autods_user_id": autods_user_id,
         "email": email,
@@ -520,11 +573,33 @@ def _build_server(
         return types.ListResourcesResult(resources=resources)
 
     async def on_read_resource(
-        _ctx: ServerRequestContext[Any, Any],
+        ctx: ServerRequestContext[Any, Any],
         params: types.ReadResourceRequestParams,
     ) -> types.ReadResourceResult:
         uri = str(params.uri)
         widget = widget_for_uri(uri)
+        name = uri.removeprefix(_PLAYBOOK_RESOURCE_SCHEME) if uri.startswith(_PLAYBOOK_RESOURCE_SCHEME) else ""
+        playbook = playbooks.get(name) if name else None
+        # The only server-side evidence that a client rendered a widget. A host
+        # that never reads ``ui://autods/<name>`` never showed the grid, and
+        # nothing else here can tell that apart from a host that read it and
+        # rendered nothing: ``tool_call`` says the payload was built, this says
+        # somebody asked for the document that displays it. Without it "does this
+        # client render the grid?" is only answerable by a person looking at a
+        # screen, which is how the question stayed open for as long as it did.
+        #
+        # Emitted for every read and not only for widgets, with ``kind`` saying
+        # which — a client that mirrors the playbook and ignores the widgets then
+        # reads as exactly that, rather than as silence indistinguishable from a
+        # client that never touched ``resources/`` at all. Emitted before the
+        # unknown-URI refusal below for the same reason: a client asking for a
+        # URI we do not serve is the most interesting line of the three.
+        _audit_logger.info(
+            "resource_read",
+            uri=uri,
+            kind="widget" if widget is not None else "playbook" if playbook is not None else "unknown",
+            **_client_fields(ctx),
+        )
         if widget is not None:
             return types.ReadResourceResult(
                 contents=[
@@ -536,8 +611,6 @@ def _build_server(
                     )
                 ]
             )
-        name = uri.removeprefix(_PLAYBOOK_RESOURCE_SCHEME) if uri.startswith(_PLAYBOOK_RESOURCE_SCHEME) else ""
-        playbook = playbooks.get(name) if name else None
         if playbook is None:
             raise ValueError(f"Unknown resource '{uri}'.")
         # ``mime_type`` is set explicitly: handing back a bare string would
@@ -561,6 +634,11 @@ def _build_server(
         # stops being true on every failed call. A registry lookup by name, with
         # no side effects.
         operation = registry.get(name)
+        # Resolved here for the same reason as ``operation``: ``emit`` reads it,
+        # and the lines emitted before any dispatch has run must carry the same
+        # client fields as the success line, or "which clients call this tool"
+        # answers itself only for the calls that got as far as the upstream.
+        client_fields = _client_fields(ctx)
         # Whether the F2 audit line for this call has already been emitted, so
         # the catch-all below doesn't emit a second one for the same call.
         audited = False
@@ -578,6 +656,7 @@ def _build_server(
                 return
             audited = True
             _emit_audit(
+                client=client_fields,
                 tool_name=name,
                 op_id=name,
                 cognito_username=user_context.sub,
@@ -828,7 +907,10 @@ def _build_server(
                     error_type=ERROR_INTERNAL,
                 )
             capture_tool_exception(exc, error_type=ERROR_INTERNAL, tool_name=name)
-            _audit_logger.exception("tool_call_unhandled_error", tool_name=name, op_id=name)
+            # Carries the client fields too: the ``emit`` above is skipped when
+            # there is no user context to attribute the call to, and that is
+            # exactly the case where knowing which client sent it is worth most.
+            _audit_logger.exception("tool_call_unhandled_error", tool_name=name, op_id=name, **client_fields)
             return error_result(ERROR_INTERNAL, f"An internal error occurred while running tool '{name}'.")
 
     # ``version`` feeds the ``serverInfo`` stamp mcp 2.x attaches to every

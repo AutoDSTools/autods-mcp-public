@@ -20,7 +20,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+import structlog
+from mcp import types
+from structlog.testing import capture_logs
 
+from autods_mcp_server import mcp_transport
 from autods_mcp_server.widgets import WIDGET_MIME_TYPE, WIDGETS
 from tests.mcp_server.conftest import mcp_client_session
 
@@ -121,6 +125,98 @@ async def test_an_unknown_resource_uri_is_refused(
     async with mcp_client_session(app, runtime, token=access_token) as session:
         with pytest.raises(Exception, match="Internal server error"):
             await session.read_resource("ui://autods/does-not-exist")
+
+
+async def test_every_resource_read_is_logged_with_its_kind(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token, monkeypatch
+) -> None:
+    """``resource_read`` is the only server-side evidence a widget was rendered.
+
+    A host that never reads ``ui://autods/product-grid`` never showed the grid,
+    and no other line here can tell that apart from a host that read it and drew
+    nothing. The ``kind`` field is what keeps the negative readable: a client
+    that mirrors the playbook and ignores the widgets has to look different from
+    a client that never touched ``resources/`` at all, or "no widget line" means
+    both things at once.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    with capture_logs() as logs:
+        monkeypatch.setattr(mcp_transport, "_audit_logger", structlog.get_logger("audit-test"))
+        async with mcp_client_session(app, runtime, token=access_token) as session:
+            await session.read_resource(WIDGETS[0].uri)
+            await session.read_resource(_PLAYBOOK_URI)
+            with pytest.raises(Exception, match="Internal server error"):
+                await session.read_resource("ui://autods/does-not-exist")
+
+    reads = [line for line in logs if line.get("event") == "resource_read"]
+    assert [(line["kind"], line["uri"]) for line in reads] == [
+        ("widget", WIDGETS[0].uri),
+        ("playbook", _PLAYBOOK_URI),
+        ("unknown", "ui://autods/does-not-exist"),
+    ]
+
+
+async def test_the_audit_lines_name_the_client_that_made_the_call(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token, monkeypatch
+) -> None:
+    """The same URL reached through a claude.ai connector and through a hand-made
+    entry in a client config file are two different clients, and only one of them
+    renders the grid. Until the handshake was recorded the logs could not tell
+    them apart, so every "I see no images" report had to be reproduced by hand.
+
+    Asserted on both line kinds: a tool call whose client is unknown cannot be
+    matched to the resource read that would say whether the widget was fetched.
+    """
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": []})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+    client_info = types.Implementation(name="test-host", version="9.9.9")
+
+    with capture_logs() as logs:
+        monkeypatch.setattr(mcp_transport, "_audit_logger", structlog.get_logger("audit-test"))
+        async with mcp_client_session(app, runtime, token=access_token, client_info=client_info) as session:
+            await session.read_resource(WIDGETS[0].uri)
+            await session.call_tool(
+                "search_products",
+                {"body": {"order_by": {"name": "created_at", "direction": "desc"}, "filters": []}},
+            )
+
+    lines = [line for line in logs if line.get("event") in ("tool_call", "resource_read")]
+    assert {line["event"] for line in lines} == {"tool_call", "resource_read"}
+    for line in lines:
+        assert line["client_name"] == "test-host"
+        assert line["client_version"] == "9.9.9"
+        assert line["protocol_version"]
+        # Names only — a capability's settings are the client's business and
+        # would put an unbounded object on every line.
+        assert all(isinstance(name, str) for name in line["client_capabilities"])
+
+
+async def test_a_client_that_sends_no_client_info_is_logged_as_that(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token, monkeypatch
+) -> None:
+    """``clientInfo`` is optional in the spec. Omitting the fields for a client
+    that sent none would make those calls indistinguishable from lines written
+    before this existed, so they are logged as ``None`` — which is itself a
+    fingerprint, and a narrow one."""
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    with capture_logs() as logs:
+        monkeypatch.setattr(mcp_transport, "_audit_logger", structlog.get_logger("audit-test"))
+        async with mcp_client_session(
+            app, runtime, token=access_token, client_info=types.Implementation(name="", version="")
+        ) as session:
+            await session.read_resource(WIDGETS[0].uri)
+
+    read = next(line for line in logs if line.get("event") == "resource_read")
+    assert read["client_name"] == ""
+    assert read["client_version"] == ""
 
 
 async def test_tool_meta_reaches_the_client(

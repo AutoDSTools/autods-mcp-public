@@ -668,11 +668,11 @@ this checklist and update whatever it touches **in the same commit**:
 |---|---|
 | adds/renames/removes a top-level module in `src/autods_mcp_server/` | the **Architecture → Module map** in this file |
 | adds a new env var (new `validation_alias` in `settings.py`) | the **Configuration** table *and* narrative in `README.md`, and `.env.example` |
-| adds or changes a user-facing feature (analytics, Sentry, a new transport behavior, …) | the relevant `README.md` section (narrative) *and* a **Conventions** bullet here if it carries an invariant a future editor must not break |
+| adds or changes a user-facing feature (analytics, Sentry, a new transport behavior, …) | the relevant `README.md` section (narrative) *and* a **Conventions** bullet here, under the matching subheading, if it carries an invariant a future editor must not break |
 | adds/changes a manifest tool, `base_url_key`, or a boot-time lint (D5) | the **Tools are data** section here *and* the **Manifests** section in `README.md` |
 | adds or removes a manifest **operation** | all three hand-maintained tool inventories — `tests/mcp_server/test_loader.py`, `tests/mcp_server/test_transport.py`, and `tests/e2e/test_staging_smoke.py` (opt-in, so nothing fails if you skip it) — see the `operations_count` gotcha. **C3** of `docs/release-checks.md` needs no edit: `tests/e2e/test_release_checks_c.py` derives that set from the manifests |
 | changes a command, workflow, or convention (lint/test/run, commit format, Python rules) | the corresponding section here |
-| fixes a bug or incident whose root cause was non-obvious, or adds a guard/workaround that looks removable but isn't | a **Gotchas & hard-won lessons** bullet here (and a **Troubleshooting** entry in `README.md` if an operator/client would hit the symptom) |
+| fixes a bug or incident whose root cause was non-obvious, or adds a guard/workaround that looks removable but isn't | a **Gotchas & hard-won lessons** bullet here, under the matching subheading (and a **Troubleshooting** entry in `README.md` if an operator/client would hit the symptom) |
 | adds a tool, changes what a client observably gets back, or fixes a bug that reached a released build | a check in `docs/release-checks.md` (the post-release agent-driven checklist) phrased as the symptom a *user* would see |
 | adds a tool that has to be polled, or changes the cadence / a completion state machine | `docs/polling-conventions.md` (the numbers live there **once**), plus the `notes` and playbook `body` that state them, plus the delivery test |
 | adds a fixture the checklist needs (a store, an entitlement, a supplier id) or a step that makes an agent stop and ask mid-run | a check in section `P` of `docs/release-checks.md`, or a rule that lets the run continue with a `skipped` |
@@ -695,6 +695,14 @@ states the rule to follow; a Gotcha explains the *failure mode* and why the guar
 exists, so the two complement each other — a load-bearing guard often deserves
 both. Write the bullet so it names the symptom, the root cause, and the
 consequence of undoing the guard.
+
+Both sections are grouped under `###` subheadings, purely so they can be read a
+part at a time. Put a new bullet under the subheading that already covers its
+surface rather than at the end of the section, and add a subheading only for a
+surface that has no home yet — a heading per bullet defeats the point. When the
+same lesson belongs in both sections, state the rule in **Conventions** and the
+failure mode in **Gotchas**, and have each point at the other; don't tell the
+whole story twice.
 
 ## Service Descriptor (`catalog-info.yaml`)
 
@@ -854,6 +862,13 @@ RD-50 :: Logging cleanup ::
 
 ## Conventions
 
+The rules a change must not break. The *failure mode* behind a rule — what went wrong
+and why the guard exists — is in **Gotchas & hard-won lessons** below; a load-bearing
+guard often has an entry in both. The subheadings are for navigation only; nothing
+reads them.
+
+### Errors, audit log and rate limits
+
 - **Error mapping** (`errors.py`): upstream `401 → unauthenticated`, `403 → forbidden`,
   other `4xx → upstream_client_error` (detail sanitized for leak markers), `5xx →
   upstream_error` (generic message to the client; full detail logged server-side only).
@@ -869,6 +884,8 @@ RD-50 :: Logging cleanup ::
   cadence — one flow draws 4 polls/min, ~12–14 calls end to end, so 60/min binds at
   ~10 concurrent flows and 1000/hour at ~70 flows — see `docs/polling-conventions.md`.
   Revisit only on a real `error_type=rate_limited` for a legitimate session.
+### Manifest text and the transport
+
 - **Manifest text is tiered by required reliability, not by convenience** (RD-90): tier 1
   `inputSchema` → tier 2 `description`/`notes` → tier 3 playbook → tier 4 `instructions`
   (see **Tools are data**). `instructions` is an index with a hard 6000-char boot lint
@@ -880,6 +897,8 @@ RD-50 :: Logging cleanup ::
   session state. This is also why the playbook hint has no "show it once" dedup: there
   is no session to remember in. A Redis "once per user per hour" gate is possible and
   is deliberately not worth it — if a hint needs deduping, it is too long.
+### Playbook hints (RD-100)
+
 - **A playbook hint rides beside `data`, never inside it** (RD-100) — the same rule as
   `business_error`, for the same reason: `data` is the upstream payload verbatim and
   `dispatch.py` stays a pure forwarder. The hint is emitted only on a successful call of
@@ -903,6 +922,8 @@ RD-50 :: Logging cleanup ::
   what prevents a duplicated write — so it can afford to name the verification tool and
   how to use it. Both are boot lints, not runtime truncation: half a sentence about a
   duplicated write is worse than a deploy that refuses to start.
+### Images, widgets and the base64 path (RD-92)
+
 - **An `images` block rides beside `data` too** (RD-92) — third member of the family
   after `business_error` and `playbook`, same rule for the same reason: `data` is the
   upstream payload verbatim and `dispatch.py` stays a pure forwarder. An operation with
@@ -946,6 +967,18 @@ RD-50 :: Logging cleanup ::
   by the first `Location:` header; a supplier CDN is entitled to redirect, not to choose
   what this process connects to. A miss is the long tail (~59 host families in RD-82's
   store-quote sample) and degrades to no thumbnail, exactly as the CSP already does.
+- **The image fetch has its own HTTP client, and both are closed by `mcp_lifespan`;
+  don't merge them back** (RD-92). Sharing the dispatcher's client looked free — the
+  image request is built from scratch with no `Authorization` header — and it leaks the
+  other way: httpx files every response's cookies into the *client's* jar, so a shared
+  client would collect one from every supplier CDN the server ever fetches (see the
+  cookie-jar gotcha below for the full account). `create_image_client` also sets
+  `follow_redirects=False` at the client level, because this path walks hops by hand to
+  re-check each origin and a client-level `True` would make forgetting the per-request
+  override silently unsafe.
+
+### What the audit line carries about a call
+
 - **`include_images` is on the audit line, and that is the only way to see it** (RD-92).
   The Mixpanel event carries the endpoint and nothing else, so without the `tool_call`
   field there is no way to answer "do models set this because they must judge a picture,
@@ -975,66 +1008,16 @@ RD-50 :: Logging cleanup ::
   are the only place a widget-capable client could announce itself, while the values are
   the client's business and would put an unbounded, unreviewed object on every line.
   And `user_agent` is bound by `RequestContextMiddleware`, not read from the handshake,
-  because it is the only client signal on **every** request — see the next entry for why
-  the MCP identity is not.
+  because it is the only client signal on **every** request — see the null-`client_name`
+  gotcha for why the MCP identity is not.
   `resource_read` is the **only** server-side evidence that a widget was ever rendered — a
   host that never reads `ui://autods/<name>` never showed the grid — so it is emitted for
   every read with a `kind` of `widget` / `playbook` / `unknown`, including the unknown-URI
   refusal. Emitting it only for widgets would make "no widget line" mean both "this client
   ignores our widgets" and "this client never touched `resources/` at all".
-- **A null `client_name` is a statement about the protocol version, not about the client**
-  (found on the first day of prod traffic, 2026-09-18). Six `tool_call` lines came back
-  with `client_name: null` and `protocol_version: "2025-03-26"`, which reads as an old
-  client sending no `clientInfo`. It is neither. `StreamableHTTPSessionManager` runs
-  `stateless=True`, and its router (`_handle_request`) sends a request whose
-  `mcp-protocol-version` header is absent or names a **2025-era handshake version**
-  (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`) down the legacy path, which
-  builds the connection as `Connection.from_envelope(version, None, None)` — client params
-  hard-coded to `None` regardless of what the client sent at `initialize`, because a
-  stateless server kept no session to remember it from. Only **2026-07-28** repeats the
-  client identity on every request, in `_meta`, which is why exactly those lines are
-  populated. And the `2025-03-26` is `DEFAULT_NEGOTIATED_VERSION`, the value used when the
-  header is **absent** — a fallback, not a negotiation, so it does not even mean the client
-  speaks that version. Hence `user_agent` on the context: it is the one client signal
-  present on every request whatever the protocol era. Two consequences worth keeping:
-  a null row can never be attributed to a client from the MCP fields alone, and — since
-  the `extensions` capability that declares `io.modelcontextprotocol/ui` is itself a
-  2026-07-28 feature — a null row is *probably* a client that predates MCP Apps entirely
-  and was never going to render a widget. Probably: that is an inference from the version,
-  not something the logs say.
-- **What the first day of prod traffic showed: four client identities, and claude.ai uses
-  two of them** (2026-09-18, 40 lines carrying the fields):
 
-  | `client_name` | version | protocol | capabilities | what it does |
-  |---|---|---|---|---|
-  | `Anthropic/ClaudeAI` | 1.0.0 | 2026-07-28 | `extensions`, `extensions:io.modelcontextprotocol/ui` | tool calls |
-  | `claude-ai` | 0.1.0 | 2026-07-28 | `extensions`, `extensions:io.modelcontextprotocol/ui` | widget reads, nothing else |
-  | `claude-code` | 2.1.276 | 2026-07-28 | `elicitation`, `roots` | tool calls |
-  | `null` | — | 2025-03-26 | — | tool calls (see above) |
+### Sentry and tracing
 
-  **claude.ai fetches the widget under a different identity than it calls tools with**, so
-  `client_name` never matches across the two line types and is the wrong key to join on —
-  one user in that window made 16 tool calls as `Anthropic/ClaudeAI` and then read the grid
-  and the card as `claude-ai`. Join on the user instead: `resource_read` carries no
-  identity of its own, but it shares `request_id` with the access-log line, which has
-  `cognito_username` and `autods_user_id`.
-
-  `extensions:io.modelcontextprotocol/ui` is the field that separates a client that renders
-  the grid from one that does not — present on both claude.ai identities, absent on
-  `claude-code`. That is what the capability-keys decision above was for, and it is the
-  first thing to read on any new "no images" report.
-- **The image fetch has its own HTTP client, and that is not tidiness** (RD-92). It
-  started as the dispatcher's — the image request is built from scratch with no
-  `Authorization` header, so sharing looked free. It is not: httpx keeps a cookie jar
-  **on the client** and files every response's `Set-Cookie` into it whatever the request
-  asked for, so one shared client collects a cookie from every supplier CDN the server
-  ever fetches and holds it for the life of the process. The jar is domain-scoped, so
-  nothing would ever have been *sent* to an AutoDS upstream — the cost is unbounded
-  state on the client the upstreams use, and a "no credentials of any kind" claim that
-  only held on the way out. `create_image_client` sets `follow_redirects=False` at the
-  client level too, because this path walks hops by hand to re-check each origin and a
-  client-level `True` would make forgetting the per-request override silently unsafe.
-  Both clients are closed by `mcp_lifespan`; don't merge them back.
 - **OpenTelemetry stays inert** (RD-99): mcp 2.x hard-depends on `opentelemetry-api`
   and instruments its request path, but with no `opentelemetry-sdk` installed the API
   hands back non-recording spans — nothing is collected or exported, and Sentry remains
@@ -1058,7 +1041,11 @@ RD-50 :: Logging cleanup ::
 ## Gotchas & hard-won lessons
 
 Non-obvious failure modes learned the hard way. Each cost real debugging time or a
-production incident; don't undo the guard without understanding why it's there.
+production incident; don't undo the guard without understanding why it's there. A few
+entries are measurements rather than failures — they are here because they are what
+settles a false alarm. The subheadings are for navigation only; nothing reads them.
+
+### Sentry and the transport
 
 - **Sentry integrations will hang the whole transport if they read the request body**
   (RD-71). The Starlette/FastAPI integrations' request-body extractor runs *before* the
@@ -1074,6 +1061,8 @@ production incident; don't undo the guard without understanding why it's there.
   unseen. Keep the regression test that inits Sentry against the real transport and
   bounds the drive with `anyio.fail_after(...)`, so a reintroduced hang fails CI loudly
   instead of just stalling it.
+### Auth, identity and analytics
+
 - **Cognito *access* tokens carry neither `email` nor custom attributes — only ID tokens
   do — and this server verifies the access token.** Resolve any extra identity by calling
   upstream with the caller's forwarded token (`get_current_user` / `/users/list/`), never
@@ -1102,6 +1091,8 @@ production incident; don't undo the guard without understanding why it's there.
   never block a request. `distinct_id` must be a *truthy* AutoDS user id: a blank/falsy id
   makes Mixpanel file the event anonymously under a throwaway `$device:` id, so skip the
   event on any falsy id (and never key on the Cognito `sub`).
+### Manifests, the registry and the upstream contract
+
 - **The integer-enum boot lint only inspects `body_schema`.** Enum-valued *query* params
   (e.g. `product_status`) are not type-checked, so a string-vs-int contract mismatch on a
   query enum ships silently with no test catching it — verify query-param enums against the
@@ -1169,7 +1160,8 @@ production incident; don't undo the guard without understanding why it's there.
   that ask for a resource. That is fine and intended here (RD-100 landed the capability;
   RD-92 adds URIs), but it means you cannot add a resource handler "just to try it" on a
   branch that ships. Relatedly, `ReadResourceResult` contents need an explicit
-  `mime_type`: a bare string advertises `text/plain` and the markdown is lost.
+  `mime_type` — see MCP Apps bug 3 under **The MCP Apps protocol** below for what a bare
+  string costs.
 - **A locally-handled operation must not inherit the manifest-level `base_url_key`**
   (RD-100). The registry resolves the manifest default onto every operation that doesn't
   set one; left unguarded, a `handler` operation would silently acquire an upstream and
@@ -1202,6 +1194,13 @@ production incident; don't undo the guard without understanding why it's there.
   `product_id`/`internal_id` stay distinct params. Verify enum value sets and example
   ranges against *live* upstream data — an enum narrower than the API silently rejects
   valid calls (e.g. a percentage field mistakenly documented as a 0–1 fraction).
+- **The dispatcher is a pure forwarder** — `dispatch._parse_response` returns
+  `response.json()` verbatim. You cannot trim or reshape a response via manifest text; that
+  needs an upstream change. Don't add per-operation response logic — it breaks "tools are
+  data".
+
+### Specific upstream endpoints
+
 - **`search_products` answers four different malformed calls badly, each in its own way —
   two 500s, a 400 and an empty 200 — and one of them is the call our own text used to ask
   for** (RD-107). Omitting `filters` entirely **500s** (`filters: []` is fine) — and the
@@ -1285,10 +1284,8 @@ production incident; don't undo the guard without understanding why it's there.
   may be a timed-out upstream — the `notes` and release-check P8 both say "no spendable
   balance established" instead. Same class of trap as the mis-cased `business_errors`
   path: nothing fails, the field is just quietly absent.
-- **The dispatcher is a pure forwarder** — `dispatch._parse_response` returns
-  `response.json()` verbatim. You cannot trim or reshape a response via manifest text; that
-  needs an upstream change. Don't add per-operation response logic — it breaks "tools are
-  data".
+### Scripts and log noise
+
 - **`uvicorn.access`, `httpx`, and `mcp` INFO lines duplicate our structured
   `request`/`tool_call` logs**, so `configure_logging` raises them to WARNING — guarded so
   `LOG_LEVEL=debug` still gets the firehose. Don't undo it; emit the audit line, not the
@@ -1315,6 +1312,8 @@ production incident; don't undo the guard without understanding why it's there.
   skips `localhost` entirely. `tests/test_mcp_call_script.py` pins all of it.
   The way to reach another environment is `MCP_TOKEN=$(uv run python
   scripts/mcp_token.py <alias>)`, never overriding the Cognito settings.
+### The mcp 2.x SDK port (RD-99)
+
 - **The server runs on mcp 2.x, and `uvx` ignores the pin entirely.** `uvx --with mcp
   python …` resolves whatever is newest regardless of `uv.lock` (and picks Python 3.13
   for a 3.12-only project) — always `uv run`. The 1.x → 2.x port landed in RD-99; the
@@ -1360,6 +1359,8 @@ production incident; don't undo the guard without understanding why it's there.
   you stuff into an MCP model is accepted at construction and then discarded. Same
   failure shape as before (no error, no data), different cause: relevant to the RD-82 /
   RD-97 widget probes, which rode extra fields.
+### The MCP Apps protocol
+
 - **Ten MCP Apps protocol bugs, every one of which failed with no error and no log
   line** (RD-82 bugs 1–6, RD-97 bugs 7–10). This list cost most of two spikes, and bug 1
   alone nearly produced the wrong recommendation. The first six live in the widget
@@ -1367,15 +1368,14 @@ production incident; don't undo the guard without understanding why it's there.
   `test_widgets.py` checks the assets for each construct rather than trusting review.
   1. **`_meta.ui.csp` must be on the `resources/read` response, not only the
      `resources/list` entry.** Declared only on the list, `hostCapabilities.sandbox`
-     returns `{}` and the default policy blocks every external image. (Also a
-     Conventions bullet — it is the one most likely to be "cleaned up".)
-  2. **A non-schema key stuffed into an MCP model evaporates.** Under 1.x the models
-     were `extra="allow"` without `populate_by_name`, so `types.Tool(meta=…)` created a
-     junk `"meta"` field the client never saw and the fix was `**{"_meta": …}`. mcp 2.x
-     inverted it: `populate_by_name=True` makes `meta=` populate the real field, and
-     `extra="allow"` is gone, so any *other* key is accepted at construction and then
-     discarded. Same failure shape, opposite cause. Anything attached to a descriptor
-     must go through a real field, and the test must assert it **arrived at a client**.
+     returns `{}` and the default policy blocks every external image. Stated as a rule,
+     with what it costs to undo it, in **Conventions → Images, widgets and the base64
+     path**; it is the one most likely to be "cleaned up".
+  2. **A non-schema key stuffed into an MCP model evaporates** — and which key, and why,
+     flipped between 1.x and 2.x. Anything attached to a descriptor must go through a
+     real field, and the test must assert it **arrived at a client**. Full account under
+     **The mcp 2.x SDK port** above ("Extra keys on an MCP model are dropped without a
+     word").
   3. **`read_resource` returning a bare `str` defaults the mime type to `text/plain`**
      and the host stops treating the document as an MCP App. Set `mime_type`
      explicitly — `text/html;profile=mcp-app` for a widget, `text/markdown` for a
@@ -1430,6 +1430,8 @@ production incident; don't undo the guard without understanding why it's there.
   HTML files. And if a host uses a channel the search does not reach, the widget prints
   which methods it *did* see instead of rendering an empty box — which turns the silent
   blank this whole ticket is about into a one-line bug report.
+### The image pipeline and empty grids
+
 - **`PIL.Image.DecompressionBombError` subclasses `Exception` directly, so the obvious
   except tuple misses it — and one 68-byte response then wipes out a whole batch**
   (RD-92). Not `OSError`, not `ValueError`. `_encode`'s handler originally listed
@@ -1507,6 +1509,52 @@ production incident; don't undo the guard without understanding why it's there.
   operation's `image_paths`, with prefix matching, so `variations.price` does not count as
   covering `variations.*.main_picture_url.url`. If you add a projection example to a tool
   that carries an images block, it must keep the pictures.
+### Which client is calling, and which ones render a widget
+
+The fields these three entries read are put on the audit line by the convention **What
+the audit line carries about a call** above.
+
+- **A null `client_name` is a statement about the protocol version, not about the client**
+  (found on the first day of prod traffic, 2026-09-18). Six `tool_call` lines came back
+  with `client_name: null` and `protocol_version: "2025-03-26"`, which reads as an old
+  client sending no `clientInfo`. It is neither. `StreamableHTTPSessionManager` runs
+  `stateless=True`, and its router (`_handle_request`) sends a request whose
+  `mcp-protocol-version` header is absent or names a **2025-era handshake version**
+  (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`) down the legacy path, which
+  builds the connection as `Connection.from_envelope(version, None, None)` — client params
+  hard-coded to `None` regardless of what the client sent at `initialize`, because a
+  stateless server kept no session to remember it from. Only **2026-07-28** repeats the
+  client identity on every request, in `_meta`, which is why exactly those lines are
+  populated. And the `2025-03-26` is `DEFAULT_NEGOTIATED_VERSION`, the value used when the
+  header is **absent** — a fallback, not a negotiation, so it does not even mean the client
+  speaks that version. Hence `user_agent` on the context: it is the one client signal
+  present on every request whatever the protocol era. Two consequences worth keeping:
+  a null row can never be attributed to a client from the MCP fields alone, and — since
+  the `extensions` capability that declares `io.modelcontextprotocol/ui` is itself a
+  2026-07-28 feature — a null row is *probably* a client that predates MCP Apps entirely
+  and was never going to render a widget. Probably: that is an inference from the version,
+  not something the logs say.
+- **What the first day of prod traffic showed: four client identities, and claude.ai uses
+  two of them** (2026-09-18, 40 lines carrying the fields):
+
+  | `client_name` | version | protocol | capabilities | what it does |
+  |---|---|---|---|---|
+  | `Anthropic/ClaudeAI` | 1.0.0 | 2026-07-28 | `extensions`, `extensions:io.modelcontextprotocol/ui` | tool calls |
+  | `claude-ai` | 0.1.0 | 2026-07-28 | `extensions`, `extensions:io.modelcontextprotocol/ui` | widget reads, nothing else |
+  | `claude-code` | 2.1.276 | 2026-07-28 | `elicitation`, `roots` | tool calls |
+  | `null` | — | 2025-03-26 | — | tool calls (see the entry above) |
+
+  **claude.ai fetches the widget under a different identity than it calls tools with**, so
+  `client_name` never matches across the two line types and is the wrong key to join on —
+  one user in that window made 16 tool calls as `Anthropic/ClaudeAI` and then read the grid
+  and the card as `claude-ai`. Join on the user instead: `resource_read` carries no
+  identity of its own, but it shares `request_id` with the access-log line, which has
+  `cognito_username` and `autods_user_id`.
+
+  `extensions:io.modelcontextprotocol/ui` is the field that separates a client that renders
+  the grid from one that does not — present on both claude.ai identities, absent on
+  `claude-code`. That is what the capability-keys decision in **Conventions** was for, and
+  it is the first thing to read on any new "no images" report.
 - **The widget matrix: client × registration path** (rows 1–2 re-measured on mcp 2.x
   2026-09-15 against staging 0.7.3 and matching their 1.x reading, so the 2.x handshake
   changed nothing there; rows 3–4 measured 2026-09-18 against prod. Client versions were
@@ -1545,6 +1593,8 @@ production incident; don't undo the guard without understanding why it's there.
   client to compare against, and a result measured through a bridge cannot tell a client
   problem from a bridge problem. The three rows above are how the server is actually
   reached.
+### The rendered widget: sizing, caches, captions, links
+
 - **The widget's own "nothing arrived" diagnostic was armed on a fixed timer, and
   fired on healthy calls** (RD-92, found on the first staging release). The box read
   "No product payload reached this widget" while sitting under a grid full of
@@ -1614,6 +1664,8 @@ production incident; don't undo the guard without understanding why it's there.
   untouched (it authorises the object, not the size), but a persisted conversation
   reopened later shows broken images regardless. Proxy-vs-accept-decay is undecided and
   has to be decided before a TikTok surface ships.
+### OAuth discovery metadata
+
 - **OAuth metadata URL fields are typed `str`, not `AnyUrl`/`HttpUrl`** — `AnyUrl` appends a
   trailing slash and breaks the byte-identity RFC 8414/9728 require between `issuer`/
   `resource` and the discovery URL. Don't "clean up" the types. Relatedly, the advertised

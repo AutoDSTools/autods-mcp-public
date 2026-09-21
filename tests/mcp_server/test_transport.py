@@ -60,12 +60,18 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 5 AutoDSApi ops + 6 ProductsResearch ops + 2 users ops
+    # 6 AutoDSApi ops + 6 ProductsResearch ops + 2 users ops
     # (get_current_user, get_user_subscription) + 1 locally-served op (get_playbook).
-    assert len(by_name) == 14
+    assert len(by_name) == 15
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
+    # RD-98: the single-product delete is advertised destructive, and the hint is
+    # what makes a client apply its own confirmation step. Both hints are set
+    # explicitly rather than leaning on the D5 minimum of one.
+    assert by_name["delete_product"].annotations.title == "Delete Product"
+    assert by_name["delete_product"].annotations.read_only_hint is False
+    assert by_name["delete_product"].annotations.destructive_hint is True
     # A ProductsResearch read endpoint is advertised read-only.
     assert by_name["get_winning_products"].annotations.read_only_hint is True
     # The RD-68 self-identity op is advertised read-only.

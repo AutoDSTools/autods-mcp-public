@@ -162,6 +162,31 @@ client:
   wrong, or one that hides every entry after it.
 - The six playbook lints (RD-100), below.
 
+### Destructive operations
+
+Two operations carry `destructiveHint: true`: `publish_drafts_to_marketplace`, which has
+carried it since the initial endpoint set (RD-54/RD-55) and is the destructive step
+RD-100's lint discussion is written around, and `delete_product` (RD-98). Neither is "the
+first" one — don't write that claim into a manifest, a commit message or this file.
+
+Three rules for the next one:
+
+- **Set both hints explicitly** — `readOnlyHint: false` *and* `destructiveHint: true`. D5
+  only requires a `title` plus *one* hint, so the minimum passes with the hint that
+  matters missing, and `destructiveHint` is what makes an MCP client apply its own
+  confirmation step before the call.
+- **`notes` say what cannot be undone, in the user's own terms** — not "this is
+  destructive", which tells the model nothing it cannot read off the hint.
+  `delete_product` spells out both meanings of `remove_from_marketplace`, because one of
+  them deletes a live listing from the user's storefront and nothing here puts it back.
+- **`notes` also say the agent must not call it unasked.** The host's prompt protects the
+  *user*; that sentence is what keeps an agent from reaching for the tool as a tidy-up
+  step the user never asked for.
+
+`ask_user` on a playbook step is a different lever and is *not* the way to add caution
+here — it marks a step whose **retry** is the risk, and hosts already gate a
+`destructiveHint` tool. See **Playbooks** below.
+
 ### Where text goes: the four tiers
 
 Manifest text reaches the model through four channels with very different cost and
@@ -892,6 +917,11 @@ reads them.
   because it rides the client's system prompt on every turn and sits in the cached prefix;
   moving a long enum table back into it is a regression even though nothing about the call
   breaks. Empty per-manifest `instructions` is legitimate — don't add a non-empty lint.
+- **A destructive operation sets both hints and says in `notes` what cannot be undone**
+  (RD-98). D5 accepts one hint, so the lint cannot catch a `destructiveHint` that was
+  simply left out — and without it no client asks the user anything. The rules, and the
+  two operations this applies to, are in **Tools are data → Destructive operations**;
+  there is no "first destructive tool" here to claim.
 - **Transport is stateless** (`stateless=True`) by design — production runs many
   replicas × workers, so no MCP session is pinned to a worker. Don't reintroduce
   session state. This is also why the playbook hint has no "show it once" dedup: there
@@ -1284,6 +1314,21 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   may be a timed-out upstream — the `notes` and release-check P8 both say "no spendable
   balance established" instead. Same class of trap as the mis-cased `business_errors`
   path: nothing fails, the field is just quietly absent.
+- **The single-product delete is synchronous except on one store type, and there the
+  product is still listed after the 200** (RD-98). `DELETE /products/{store_id}/product/
+  {product_id}/` starts no bulk job, so "call it and re-read the store" is the right
+  reading almost everywhere. But `product_manager._remove_product` skips
+  `mark_product_ended` — the call that actually moves the product to `ended` — when the
+  store is an **async** store *and* `remove_from_marketplace` is true, leaving the status
+  change to the Celery mutation `async_store_pipeline` queues. Async means
+  `StoreType.ebay_mip` (`dal/model/store.py`), plus three legacy types
+  (`ebay_non_api`, `facebook_shop`, `etsy_non_api`) that `StoreManager.is_async_store`
+  adds. So on an eBay MIP store the delete answers 200 with the product still in
+  `list_products` for a few seconds, which looks exactly like a delete that silently did
+  nothing — the failure this tool's release check exists to catch. Both the tool's `notes`
+  and W5 carry the exception; don't "simplify" either back to a flat "synchronous", and
+  don't read the delay as a bug. Note the two halves are separate: the *channel* listing
+  is removed synchronously via the sell account, it is the AutoDS-side status that lags.
 ### Scripts and log noise
 
 - **`uvicorn.access`, `httpx`, and `mcp` INFO lines duplicate our structured

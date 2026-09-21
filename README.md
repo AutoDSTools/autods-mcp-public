@@ -327,6 +327,26 @@ malformed manifest can't reach a client: (1) every operation must have an
 operation's `notes` must mention `ok`; (5) each operation declares exactly one
 of `handler` / `base_url_key`; (6) the six playbook lints (below).
 
+#### Destructive tools
+
+`annotations.destructiveHint` is what an MCP client reads to decide a tool needs
+the user's confirmation before it runs, so it is set — together with an explicit
+`readOnlyHint: false` — on every operation that changes something a user would
+not want changed by accident. Two operations carry it:
+
+- `publish_drafts_to_marketplace` — puts the store's drafts in front of buyers.
+- `delete_product` — removes one product from one store, and with
+  `remove_from_marketplace: true` deletes its live listing from the sell channel
+  (Shopify, eBay, …) as well. It cannot be undone from here: re-listing means
+  uploading the product again. `remove_from_marketplace` is **required and has
+  no default**, so the caller has to choose between "also take it off the
+  channel" and "untrack it and leave it selling"; a call that omits it is
+  refused with `invalid_arguments` before anything is sent.
+
+The hint is advice to the client, not an authorization mechanism — the upstream
+still applies the caller's own permissions, and `delete_product` needs the
+account's `Drafts` or `EndProducts` privilege group.
+
 #### Server instructions
 
 Each manifest may carry an `instructions` string. They are concatenated in
@@ -851,9 +871,17 @@ RUN_STAGING_E2E=1 \
 ```
 
 The app client in `E2E_COGNITO_CLIENT_ID` must have `USER_PASSWORD_AUTH`
-enabled. The write ops (`upload_products`, `publish_drafts_to_marketplace`)
-are skipped unless `E2E_INCLUDE_WRITES=1`, so a default run never mutates
-staging data. See `tests/e2e/conftest.py` for the full env-var contract.
+enabled. The write ops (`upload_products`, `publish_drafts_to_marketplace`,
+`delete_product`) are skipped unless `E2E_INCLUDE_WRITES=1`, so a default run
+never mutates staging data. See `tests/e2e/conftest.py` for the full env-var
+contract.
+
+`delete_product` may only remove a product **the run itself created**, so it is
+reachable only through the bulk job `upload_products` started: the write block
+polls that job and deletes what it reports. Without `E2E_UPLOAD_ASIN` the upload
+sends a placeholder supplier id that creates nothing, and the delete is reported
+as skipped rather than pointed at something pre-existing. Set
+`E2E_UPLOAD_ASIN=<a real supplier product id>` to exercise the whole path.
 
 **"Every registered tool" is a hand-maintained list, not a discovered one.** The
 op-name sets at the top of `tests/e2e/test_staging_smoke.py` are what

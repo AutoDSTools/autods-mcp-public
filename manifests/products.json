@@ -2,7 +2,7 @@
   "server_name": "autods-products",
   "domain": "products",
   "generated_at": "2026-02-11T18:38:32.375200+00:00",
-  "operations_count": 3,
+  "operations_count": 4,
   "top_typed_operations_count": 0,
   "instructions": "",
   "operations": [
@@ -477,6 +477,48 @@
         "required": [
           "product_status"
         ]
+      }
+    },
+    {
+      "operation_id": "delete_product",
+      "method": "DELETE",
+      "path": "/products/{store_id}/product/{product_id}/",
+      "summary": "Delete one product from a store, and optionally its live listing on the sell channel.",
+      "description": "",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id. This tool takes a single store, not the comma-separated `store_ids` the other product tools take."
+        },
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "The AutoDS product id: the 24-character hex `id` that list_products returns, not the marketplace item id."
+        },
+        {
+          "name": "remove_from_marketplace",
+          "in": "query",
+          "required": true,
+          "schema_type": "bool",
+          "description": "Required, and there is no default — decide it for this product and say which you chose. true also deletes the listing from the user's sell channel (Shopify, eBay, …), so buyers stop seeing it; this is what cleaning up an unwanted live listing means. false removes the product from AutoDS only and leaves the listing live on the channel, with nothing monitoring its price or stock any more. For a product that never reached the channel (a draft, a scheduled product) the flag changes nothing."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "is_top_typed_tool": false,
+      "notes": "Deletes ONE product from ONE store. It starts no bulk job, so there is nothing to poll. The response is {\"status\": \"Product <marketplace item id> was deleted successfully\"}. One exception to read the answer by: on an eBay MIP store, called with remove_from_marketplace true, the product's own status change is finished off in the background, so it can still come back in list_products for a few seconds after the 200 — re-read the store rather than reading the delay as a failed delete.\n\nIrreversible. The product stops being tracked, leaves the list_products results for its old status, and nothing in this server puts it back — re-listing it means uploading it again with upload_products and redoing whatever pricing and settings it carried. With remove_from_marketplace true the buyer-facing listing is deleted from the sell channel as well, which is the half the user cannot undo themselves.\n\nAn agent must not call this unless the user asked, in that turn, for this particular product to be removed. It needs the Drafts or EndProducts privilege group; without it the call answers `forbidden`, and get_user_subscription is what shows the caller's add-ons.\n\nRetrying after a failed or timed-out call is safe. A delete that already landed answers `upstream_client_error` the second time — the product is gone, or is already ended — rather than removing anything else. To establish whether the first call landed, read the store with list_products.",
+      "annotations": {
+        "title": "Delete Product",
+        "readOnlyHint": false,
+        "destructiveHint": true
       }
     }
   ],

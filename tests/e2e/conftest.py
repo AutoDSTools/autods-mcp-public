@@ -52,8 +52,12 @@ Optional:
 * ``E2E_STORE_IDS`` — comma-separated AutoDS store ids for the store-scoped ops;
   when unset those ops are skipped rather than failed.
 * ``E2E_INCLUDE_WRITES=1`` — also exercise the write ops (upload_products,
-  publish_drafts_to_marketplace). Off by default so the smoke run never mutates
-  staging data.
+  publish_drafts_to_marketplace, delete_product). Off by default so the smoke
+  run never mutates staging data.
+* ``E2E_UPLOAD_ASIN`` — a real supplier product id for the write block's
+  upload. Without it the upload sends a placeholder that creates nothing, so
+  ``delete_product`` — which may only remove a product this run created — is
+  skipped (RD-98).
 
 Env vars for the deployed release checks (section S) — all optional, and no
 credentials among them; section S is the *unauthenticated* surface:
@@ -121,6 +125,14 @@ _REQUIRED_VARS = (
     "E2E_COGNITO_DOMAIN",
 )
 
+# The supplier product id the write block uploads when ``E2E_UPLOAD_ASIN`` is
+# unset. It is deliberately not a real one: the write block's job is to prove
+# the call shape, and a run that has not been given a real id must not create a
+# product it would then have to clean up. The consequence is that RD-98's
+# ``delete_product`` has nothing this run created to delete and is skipped —
+# which the smoke test reports rather than papering over.
+_PLACEHOLDER_ASIN = "B0TEST0000"
+
 
 @dataclass(frozen=True)
 class StagingConfig:
@@ -133,6 +145,7 @@ class StagingConfig:
     region: str
     store_ids: str | None
     include_writes: bool
+    upload_asin: str
     autods_api_base_url: str | None = None
     products_research_base_url: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
@@ -157,6 +170,7 @@ def staging_config() -> StagingConfig:
         region=os.environ.get("E2E_COGNITO_REGION", "us-west-2"),
         store_ids=os.environ.get("E2E_STORE_IDS"),
         include_writes=os.environ.get("E2E_INCLUDE_WRITES") == "1",
+        upload_asin=os.environ.get("E2E_UPLOAD_ASIN", _PLACEHOLDER_ASIN),
         autods_api_base_url=os.environ.get("AUTODS_API_BASE_URL"),
         products_research_base_url=os.environ.get("PRODUCTS_RESEARCH_BASE_URL"),
     )

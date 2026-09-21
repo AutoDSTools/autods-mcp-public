@@ -20,13 +20,14 @@ in step are the tool counts in ``tests/mcp_server/test_loader.py`` and
 ``tests/mcp_server/test_transport.py``.
 """
 
+import asyncio
 from typing import Any
 
 from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (7 AutoDSApi ops + 6 ProductsResearch ops + 1 op
+# The full registered tool set (8 AutoDSApi ops + 6 ProductsResearch ops + 1 op
 # this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
@@ -36,6 +37,7 @@ AUTODS_OPS = {
     "get_bulk_action_items",
     "upload_products",
     "publish_drafts_to_marketplace",
+    "delete_product",
     "get_current_user",
     "get_user_subscription",
 }
@@ -52,7 +54,29 @@ LOCAL_OPS = {"get_playbook"}
 ALL_OPS = AUTODS_OPS | PRODUCTS_RESEARCH_OPS | LOCAL_OPS
 
 # Write ops: only exercised when E2E_INCLUDE_WRITES=1 (they mutate staging).
-WRITE_OPS = {"upload_products", "publish_drafts_to_marketplace"}
+WRITE_OPS = {"upload_products", "publish_drafts_to_marketplace", "delete_product"}
+
+# RD-98: ``delete_product`` may only remove a product this run created, so the
+# write block polls the bulk job ``upload_products`` started and deletes what it
+# reports. The cadence is the documented one (``docs/polling-conventions.md``:
+# first poll ~10 s, then every ~15 s), but the *ceiling* here is lower than the
+# ten attempts an agent is told to use: this suite is a shape check and must
+# stay runnable, and a job still unfinished after a minute leaves the delete
+# skipped rather than failed.
+_POLL_FIRST_DELAY_SECONDS = 10
+_POLL_INTERVAL_SECONDS = 15
+_POLL_ATTEMPTS = 4
+
+# Terminal bulk-action item statuses (``docs/polling-conventions.md``); 1 and 2
+# are the two that mean "keep polling".
+_TERMINAL_ITEM_STATUSES = frozenset({3, 4, 99})  # finished / canceled / error
+
+# The one terminal status that means the item *landed*. Only a ``3`` item's
+# ``autods_product_id`` names a product this run created: AutoDSApi records that
+# field on failed items too, so an item that errored because the asin was
+# already in the store carries the id of the **pre-existing** product. Deleting
+# by that id is the one thing this block may never do.
+_FINISHED_ITEM_STATUS = 3
 
 # Error-type prefixes that mean "the upstream answered with a business
 # response" — acceptable per the E3 contract. Any other error prefix
@@ -284,18 +308,59 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
 
         # --- Writes: only when explicitly enabled ---
         if staging_config.include_writes and store_ids:
-            _record(
+            upload = await call(
                 "upload_products",
-                await call(
-                    "upload_products",
-                    {
-                        "store_ids": store_ids,
-                        "body": {"region": 1, "status": 1, "buy_site_id": 1, "new_products": [{"asin": "B0TEST0000"}]},
+                {
+                    "store_ids": store_ids,
+                    "body": {
+                        "region": 1,
+                        "status": 1,
+                        "buy_site_id": 1,
+                        "new_products": [{"asin": staging_config.upload_asin}],
                     },
-                ),
-                failures,
-                frozenset(),
+                },
             )
+            _record("upload_products", upload, failures, frozenset())
+
+            # RD-98: the delete removes a product **this run created** and
+            # nothing else, so it is reachable only through the bulk job above.
+            # With the default placeholder asin nothing lands and the delete is
+            # skipped — set E2E_UPLOAD_ASIN to a real supplier product id to
+            # exercise it for real.
+            # It runs **before** the publish on purpose. The publish targets
+            # every draft in the store, including the one this block just
+            # created, so after it the product may be live on the sell channel —
+            # and deleting it with remove_from_marketplace False would leave
+            # that listing selling with nothing monitoring it, in someone's real
+            # staging store. Deleting first keeps the flag below honest.
+            # A single store, not the comma-separated list the other product
+            # tools take — so the configured value has to be one number.
+            first_store_id = store_ids.split(",")[0].strip()
+            created = await _created_product_ids(call, upload, store_ids, failures) if first_store_id.isdigit() else []
+            if created:
+                _record(
+                    "delete_product",
+                    await call(
+                        "delete_product",
+                        {
+                            "store_id": int(first_store_id),
+                            "product_id": created[0],
+                            # Still a draft — the publish below has not run yet,
+                            # so it never reached a sell channel and there is no
+                            # listing to remove there.
+                            "remove_from_marketplace": False,
+                        },
+                    ),
+                    failures,
+                    frozenset(),
+                )
+            else:
+                skipped.append(
+                    "delete_product (the upload created no product to delete)"
+                    if first_store_id.isdigit()
+                    else "delete_product (E2E_STORE_IDS does not start with a numeric store id)"
+                )
+
             _record(
                 "publish_drafts_to_marketplace",
                 await call("publish_drafts_to_marketplace", {"store_ids": store_ids, "body": {"product_status": 1}}),
@@ -310,6 +375,66 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         # coverage (missing store ids / product id / writes disabled).
         print(f"e2e smoke skipped ops (insufficient fixtures): {sorted(set(skipped))}")
     assert not failures, "ops failed the smoke contract:\n" + "\n".join(failures)
+
+
+async def _created_product_ids(
+    call: Any,
+    upload: types.CallToolResult,
+    store_ids: str,
+    failures: list[str],
+) -> list[str]:
+    """The ids ``upload_products`` actually created, by polling its bulk job.
+
+    Returns an empty list whenever nothing landed — the upload errored, it
+    reported no ``bulk_action.id``, no item reached ``_FINISHED_ITEM_STATUS``, or
+    the job was still running at the attempt ceiling. That is a *skip* for the
+    delete, never a failure: only a product this run created may be deleted, so
+    no product means nothing this suite is allowed to touch.
+    """
+    if upload.is_error:
+        return []
+    data = (upload.structured_content or {}).get("data")
+    bulk_action = data.get("bulk_action") if isinstance(data, dict) else None
+    bulk_action_id = bulk_action.get("id") if isinstance(bulk_action, dict) else None
+    if not isinstance(bulk_action_id, int):
+        return []
+
+    await asyncio.sleep(_POLL_FIRST_DELAY_SECONDS)
+    for attempt in range(_POLL_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        items = await call(
+            "get_bulk_action_items",
+            {"store_ids": store_ids, "bulk_action_id": bulk_action_id, "body": {"limit": 50}},
+        )
+        # A failed poll is a finding in its own right — the op is already
+        # recorded above from the read block, so only report a new failure.
+        if items.is_error:
+            failures.append(f"get_bulk_action_items (polling the RD-98 upload): {_error_prefix(items)}")
+            return []
+        payload = (items.structured_content or {}).get("data")
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            return []
+        # No items yet is "the job has not started", not "the job is over" — the
+        # documented rule ("no item left at 1 or 2") reads as terminal on an
+        # empty list, which would skip the delete on a job that was about to
+        # produce a product.
+        if not results:
+            continue
+        statuses = [item.get("status") for item in results if isinstance(item, dict)]
+        if any(status not in _TERMINAL_ITEM_STATUSES for status in statuses):
+            continue
+        # Finished items only — see ``_FINISHED_ITEM_STATUS``.
+        return [
+            product_id
+            for item in results
+            if isinstance(item, dict)
+            and item.get("status") == _FINISHED_ITEM_STATUS
+            and isinstance(product_id := item.get("autods_product_id"), str)
+            and product_id
+        ]
+    return []
 
 
 def _record(

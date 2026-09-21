@@ -971,6 +971,47 @@ publishing the wrong drafts is worse than not running the check.
 human-readable `message`. That path is only reachable when an upstream refuses inside
 a 200; if you can't trigger it, skip it.
 
+**W5 — `delete_product`, on what W1 created and on nothing else.** The symptom this
+guards: a user who asked the agent to remove a product is told it is gone, and finds
+it still in their store — or the opposite, a product they never mentioned removed
+along with its live listing. This check also leaves the store as it found it, which
+W1 and W3 on their own do not.
+
+The subject is one of the products **W1 created**, the same ids W3 targeted. If W2
+was inconclusive, or you cannot tell the new products from the ones P7 recorded, W5
+is `skipped (cannot identify a product this run created)`. Never reach for an
+existing product to make the check runnable: this call cannot be undone, and one
+run's convenience is another user's deleted listing.
+
+`{"store_id": <the P5 id as a NUMBER>, "product_id": "<one of those ids>",
+"remove_from_marketplace": <true if W3 published it and it is now live on the
+channel, false if it is still a draft>}`
+→ `{"status": "Product <marketplace item id> was deleted successfully"}`.
+
+Two arguments are easy to get wrong, and each one is refused rather than guessed:
+`store_id` is a **single** id here, not the comma-separated `store_ids` every other
+product tool takes; and `remove_from_marketplace` has **no default**, so omitting it
+comes back as `invalid_arguments` naming the field. Both refusals are the schema gate
+working — record them as such, not as a broken tool.
+
+**Then confirm it, because the status line is not the evidence.** Re-read the store
+with `list_products` at the status the product held. `ok: true` with the product
+still listed is the finding this check exists for. If `remove_from_marketplace` was
+`true`, say in the report that the channel listing was not verified — nothing here
+can see the user's Shopify or eBay account.
+
+One store type reads as that finding and is not it: on an **eBay MIP** store called
+with `remove_from_marketplace: true` the product's status change is finished off in
+the background, so it is still listed immediately after the 200. Re-read once more
+after ~30 s before recording anything, and say which store type the check ran
+against — on any other store type the product has left its old status by the time
+the call returns.
+
+Repeat the call on the same id only if you want to confirm the retry contract: the
+second attempt answers `upstream_client_error` (already ended, or not found) rather
+than removing anything else. That is what makes a retry after an ambiguous failure
+safe, and it is a nice-to-have rather than a required step.
+
 ---
 
 ## O — Observability (after the release, before you call it green)

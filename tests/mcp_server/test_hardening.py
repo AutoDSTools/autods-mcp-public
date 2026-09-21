@@ -307,3 +307,61 @@ async def test_valid_integer_enum_body_passes_validation(
 
     assert result.is_error is False
     assert len(upstream_calls) == 1
+
+
+# --- The single-product delete (RD-98) ---------------------------------------
+
+
+async def test_delete_product_without_remove_from_marketplace_is_refused_locally(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-98: the upstream has no default for ``remove_from_marketplace``.
+
+    The two values do different things to the user's storefront — ``true``
+    deletes the live listing, ``false`` leaves it selling with nothing watching
+    it — so the caller has to choose, and a call that omits the flag must be
+    refused rather than guessed at. mcp 2.x validates no arguments of its own
+    (``validate_input`` is gone), so ``_build_validators`` /
+    ``_validate_arguments`` are the only gate: this asserts the rejection at a
+    real client rather than assuming the SDK provides one.
+    """
+    upstream_calls: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request)
+        return httpx.Response(200, json={"status": "Product 1234 was deleted successfully"})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        omitted = await session.call_tool("delete_product", {"store_id": 42, "product_id": "6512ab34cd56ef7890123456"})
+        chosen = await session.call_tool(
+            "delete_product",
+            {"store_id": 42, "product_id": "6512ab34cd56ef7890123456", "remove_from_marketplace": True},
+        )
+        declined = await session.call_tool(
+            "delete_product",
+            {"store_id": 42, "product_id": "6512ab34cd56ef7890123456", "remove_from_marketplace": False},
+        )
+
+    assert omitted.is_error is True
+    assert omitted.content[0].text.startswith("invalid_arguments: ")
+    assert "remove_from_marketplace" in omitted.content[0].text
+    # The refused shape never reaches the upstream; the explicit ones do, with
+    # the flag as a query parameter and the single store id in the path.
+    assert chosen.is_error is False
+    assert declined.is_error is False
+    assert len(upstream_calls) == 2
+    request = upstream_calls[0]
+    assert request.method == "DELETE"
+    assert request.url.path == "/products/42/product/6512ab34cd56ef7890123456/"
+    assert request.url.params["remove_from_marketplace"] == "True"
+    # Both spellings are pinned because ``_build_request`` renders a query
+    # parameter with ``str()``, and this is the only boolean query parameter in
+    # any manifest — so nothing else covers that path. The upstream reads it
+    # with marshmallow ``fields.Bool``, which accepts "True"/"False"; ``false``
+    # is the value with the lasting consequence (a listing left live with
+    # nothing monitoring it), so a change to how booleans are rendered has to
+    # fail here rather than in someone's store.
+    assert upstream_calls[1].url.params["remove_from_marketplace"] == "False"

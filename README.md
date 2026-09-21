@@ -715,6 +715,44 @@ short page near the ceiling is not proof the catalog is exhausted. `condition`
 was removed outright: the search path never applied it, so the `"or"` it
 advertised silently returned nothing.
 
+### Sourcing requests (RD-93)
+
+A **sourcing request** — a "store quote" in the AutoDS API — asks a sourcing
+supplier to quote one of a store's products, and attaches the supplier's offer
+to that product once it arrives. Four read-only operations in
+`manifests/store_quotes.json` cover it:
+
+| Tool | Answers |
+|---|---|
+| `list_store_quotes` | the requests on one or more stores; filtered on `product_id` it is both the "already requested?" pre-check and the completion poll |
+| `get_store_quote` | one request in full, by its own id |
+| `get_store_quote_versions` | the supplier offers quoted for that request over time |
+| `list_store_quote_shipping_options` | the shipping choices for one request and one destination country |
+
+Four things about them differ from every other tool here, and each one is in the
+tool's own `notes` because getting it wrong is silent:
+
+- **The statuses are lowercase strings, not integers.** `new`, `in_progress`,
+  `ready`, `linked`, `cannot_be_sourced` — the one exception to the "enums are
+  integers" invariant in the server index, which now names it.
+- **A failed request has no failure status: the record is removed.** So a
+  request that was there on an earlier poll and is gone now has *failed*, and a
+  loop waiting for a final status waits for ever. That also makes an empty
+  `results` ambiguous on its own — before the write it means "no request yet",
+  after the write it means "submitted, then failed".
+- **`ready` is not the end.** The offer has arrived but is not attached to the
+  product until `linked`.
+- **The filter body has no `value_type`.** The product tools' filters carry one
+  and this one does not; the field names are a closed set, listed as a JSON
+  `enum` on `body.filters.items.name` because the upstream really does accept
+  exactly those.
+
+`get_store_quote_versions` and `list_store_quote_shipping_options` need a
+request that already has an offer (`ready` or `linked`). On one that does not,
+they answer an error rather than an empty result, so both say "check the status
+first". The cadence for the poll is the shared one — see **Polling conventions**
+above and `docs/polling-conventions.md`.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated

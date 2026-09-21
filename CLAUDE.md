@@ -235,8 +235,8 @@ is confirmed against the upstream mapping**, per the phantom-filter gotcha below
 The server-wide index lives in `manifests/_server.json` — a manifest with no operations,
 carrying only the tier-4 block. Everything else is per-domain, and an **empty**
 `instructions` is the normal case for a domain whose whole contract is tier 1/2
-(`users.json`, `stores.json`). There is deliberately no non-empty lint: requiring text per
-manifest would push filler into the most expensive channel.
+(`users.json`, `stores.json`, `store_quotes.json`). There is deliberately no non-empty
+lint: requiring text per manifest would push filler into the most expensive channel.
 
 ### Business errors inside a 200
 
@@ -506,7 +506,8 @@ conversation re-reading the same unfinished job.
 
 By tier: the numbers belong in the polling tool's `notes` (tier 2) and the playbook
 `body` (tier 3), with **one** clause in `instructions` (tier 4) and nothing in tier 1.
-`get_bulk_action_items` + `product_import` are the reference implementation; a new
+`get_bulk_action_items` + `product_import` are the reference implementation;
+`list_store_quotes` (RD-93) is the second polling tool and was written against them. A new
 polling tool should read like them, and
 `tests/mcp_server/test_polling_conventions.py` asserts the numbers arrive at a client
 on all three channels (and that no channel disagrees).
@@ -917,6 +918,16 @@ reads them.
   because it rides the client's system prompt on every turn and sits in the cached prefix;
   moving a long enum table back into it is a regression even though nothing about the call
   breaks. Empty per-manifest `instructions` is legitimate — don't add a non-empty lint.
+- **"Enums are integers" has exactly one exception, and the index names it** (RD-93). The
+  store-quote statuses (`new`, `in_progress`, `ready`, `linked`, `cannot_be_sourced`),
+  the `QuoteStatus` on a version, and `sourcing_supplier` are lowercase **strings** on
+  the wire — they are SQL enums, not the integer enums every other AutoDS surface uses.
+  A server-wide invariant with an unmarked exception is worse than no invariant, so
+  `_server.json` carries the exception clause and each tool's `notes` list the values.
+  The integer-enum boot lint is unaffected: it matches on *property name* in a
+  `body_schema`, and these values are filter operands, not a property called `status`.
+  Keep it that way — a body property literally named `status` in a store-quote manifest
+  would fail the lint for the wrong reason.
 - **A destructive operation sets both hints and says in `notes` what cannot be undone**
   (RD-98). D5 accepts one hint, so the lint cannot catch a `destructiveHint` that was
   simply left out — and without it no client asks the user anything. The rules, and the
@@ -1184,6 +1195,31 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   quote that was there is gone" (or never appeared) as failure; waiting for
   `cannot_be_sourced` waits forever. Any tool that documents that chain has to say so —
   and note `{"status": "ok"}` from the trigger is the task being *queued*, nothing more.
+  RD-93 landed the read side: `list_store_quotes` is where that reading lives, and its
+  `notes` also carry the consequence nobody expects — an empty `results` is **ambiguous**
+  on its own, meaning "never submitted" before the write and "submitted and rolled back"
+  after it. `tests/mcp_server/test_polling_conventions.py` pins both halves.
+- **Two of the store-quote reads answer an error, not an empty result, before the offer
+  arrives** (RD-93). `get_store_quote_versions` reads `store_quote.quote.item_id_on_site`
+  and `quote_id` is null until an offer is attached, so on `new` / `in_progress` it
+  raises and the caller gets an opaque `upstream_error`; `list_store_quote_shipping_options`
+  refuses anything outside `READY` / `LINKED` with a 400. Neither is expressible as a
+  schema guard — it depends on the record's state, not on the arguments — so both tools'
+  `notes` say "check the status first", and the staging e2e skips them unless the store's
+  first quote is already at `ready` or `linked`. `get_store_quote_versions` also filters
+  its results to `QuoteStatus.QUOTED`, so `quoting` and `cannot_be_quoted` never appear
+  in its answer however the enum is documented; don't promise a version history that
+  shows a failed quote attempt.
+- **The store-quote filter body has no `value_type`, and `exists` is a 500** (RD-93).
+  `AbstractFilterModel` (`helper/filtering/model.py`) is `{name, op, value, value_list}` —
+  the `value_type` every product-tool filter carries simply does not exist here, and is
+  dropped on arrival, so documenting it would be a phantom field in the other direction.
+  And `FilterOp.exists` has no SQL implementation: `_get_filter` raises
+  `NotImplementedError` for it, which reaches the caller as `upstream_error`. The `op`
+  enum in `store_quotes.json` deliberately lists the twelve that work and leaves `exists`
+  out — don't "complete" it from the upstream enum. The filter *names* are a genuinely
+  closed set (a pydantic enum upstream rejects anything else), which is why they ship as
+  a JSON `enum` rather than as prose.
 - **Registering `on_list_resources` is what declares the `resources` capability** —
   `Server.get_capabilities` derives the whole capability block from which handlers exist,
   so adding a resource handler changes the handshake for every client, not just the ones

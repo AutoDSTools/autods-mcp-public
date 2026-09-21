@@ -1,0 +1,269 @@
+{
+  "server_name": "autods-store-quotes",
+  "domain": "store_quotes",
+  "instructions": "",
+  "base_url_key": "autods_api",
+  "operations": [
+    {
+      "operation_id": "list_store_quotes",
+      "method": "POST",
+      "path": "/store_quotes/{store_ids}/list/",
+      "summary": "List the sourcing requests on the caller's stores, and poll one to completion.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_ids",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "AutoDS store IDs if more than one should be comma separated"
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "notes": "Read-only POST. Returns {results: [...]} — the sourcing requests recorded on the given stores. A sourcing request (a \"store quote\") asks a sourcing supplier to quote one of the store's products; when it finishes, the supplier's offer is attached to that product. `body` is required but may be `{}`, which lists the store's requests with the upstream defaults (20 per page, no particular order); a bodyless call is refused here before anything is sent, because the upstream answers that with a bare validation error the model cannot act on.\n\nThis one tool answers both questions the sourcing flow depends on. They are the same call, read at two different moments, and both filter on `product_id`.\n\nBEFORE a sourcing request is submitted — \"is there one already?\" A product can carry at most ONE sourcing request, so submitting a second one for the same product fails. A non-empty `results` means the request already exists: read its `status` instead of submitting again.\n\nAFTER one is submitted — this is the completion poll. `status` is a lowercase string, never a number. `new` and `in_progress` are not final: keep polling. `ready` means the supplier's offer arrived but is not attached to the product yet: keep polling. `linked` is the successful end state. `cannot_be_sourced` is final and means this product cannot be sourced this way.\n\nTHE FOURTH OUTCOME IS THAT THE REQUEST DISAPPEARS. A sourcing request that fails does not get a failure status — the whole record is removed. So failure shows up as the request NOT BEING THERE. A request you saw on an earlier poll and cannot find now has FAILED; it is not \"still working\", and a loop written as \"wait for a final status\" waits for ever. This is also what makes an empty `results` ambiguous on its own, and only the timing resolves it: read before the write, empty means no request exists yet and you may submit one; read after the write, empty means the request was submitted and then failed — report that, and do not resubmit without asking the user.\n\nA 2xx here means the read worked, never that the sourcing worked: `ok` is a transport-level signal only, and the status is the only evidence. The sourcing write's own `{\"status\": \"ok\"}` says the request was accepted for processing and nothing more.\n\nPolling cadence, because there is no push channel and every poll costs you a turn: wait ~10s after the write before the first poll, then poll every ~15s, and stop after 10 attempts — about ~2.5 min at that cadence. A slow request is normal inside that ceiling; polling faster returns the same unfinished answer and buys nothing. On reaching the ceiling with the request still at `new`, `in_progress` or `ready`, report what is unfinished and its last status — do not keep polling, and do not report the sourcing as done.\n\nReading a result: `id` is the `store_quote_id` the other three store-quote tools take. `sourcing_supplier` is a lowercase string — `honestfulphilment`, `aliexpress` or `alibaba_1688`. `product_id` is the AutoDS product this request is for and `sell_item_id` is that product's id on the sell channel. `price` is a {min, max} range over the supplier's variations, `default_country` is the country the shipping was quoted for, `quote_id` and `external_quote_id` identify the supplier's offer, `shipping_options_stats` summarises the shipping choices and names the chosen one, and `buy_item` carries the supplier's own item with its `variations`. The `shipping_options` list and `chosen_shipping_option_id` on this record are deprecated — read `shipping_options_stats`, or call list_store_quote_shipping_options for the full set.\n\nThis tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
+      "annotations": {
+        "title": "List Sourcing Requests",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "filters": {
+            "type": "array",
+            "description": "Filter conditions, combined per `condition`. Unlike the product tools, a store-quote filter has NO `value_type` field: the value is cast from the field it names.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "enum": [
+                    "id",
+                    "status",
+                    "title",
+                    "order_id",
+                    "price",
+                    "product_id",
+                    "sell_item_id",
+                    "store_id"
+                  ],
+                  "description": "The field to filter on. This list is the whole set the upstream accepts; anything else is rejected. `id` is the store quote's own integer id, `product_id` is the 24-character hex AutoDS product id the request is for, `sell_item_id` is that product's id on the sell channel, `title` is the product title, `store_id` narrows within the stores named in the path, `order_id` is the order a supplier-fulfilment request came from, and `price` is the quoted price on the attached offer (a request with no offer yet matches nothing)."
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "=",
+                    "<",
+                    "<=",
+                    ">",
+                    ">=",
+                    "in",
+                    "not_in",
+                    "like",
+                    "not_like",
+                    "starts_with",
+                    "ends_with",
+                    "between"
+                  ],
+                  "description": "`like` / `not_like` match anywhere in the value; `starts_with` / `ends_with` anchor it."
+                },
+                "value": {
+                  "description": "The operand. `status` takes a LOWERCASE STRING, not a number — one of `new`, `in_progress`, `ready`, `linked`, `cannot_be_sourced`. `in` and `not_in` take a JSON array. `between` takes a two-element array, or the two values as one comma-separated string."
+                },
+                "value_list": {
+                  "type": "array",
+                  "items": {},
+                  "description": "An alias for `value`, accepted for the array operands. Set one or the other, never both — sending both is rejected."
+                }
+              },
+              "required": [
+                "name",
+                "op"
+              ]
+            }
+          },
+          "condition": {
+            "type": "string",
+            "enum": [
+              "and",
+              "or"
+            ],
+            "default": "and",
+            "description": "How the filters are combined. Both are honoured here."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 20,
+            "description": "Keep it small. Each result carries the supplier's whole item, so a large page is a large payload; 1 is enough for the pre-check and for the completion poll."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "order_by": {
+            "type": "object",
+            "description": "Optional. Both fields are required when it is sent.",
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "id",
+                  "created_at"
+                ]
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "asc",
+                  "desc"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "direction"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "operation_id": "get_store_quote",
+      "method": "GET",
+      "path": "/store_quotes/{store_id}/store_quote/{store_quote_id}/",
+      "summary": "Read one sourcing request in full, by its own id.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the request belongs to. Not the comma-separated `store_ids` list_store_quotes takes."
+        },
+        {
+          "name": "store_quote_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "The sourcing request's own integer id: the `id` of a list_store_quotes result."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Read-only. Returns ONE sourcing request (store quote) in full, for one store: `status`, `sourcing_supplier`, `product_id`, `sell_item_id`, the `price` {min, max} range, `default_country`, `shipping_options_stats`, `quote_id` / `external_quote_id`, and the supplier's `buy_item` with its `variations`. Use it once you already hold a `store_quote_id`; list_store_quotes is how you find one.\n\n`status` is a lowercase string, never a number: `new`, `in_progress`, `ready`, `linked`, `cannot_be_sourced`. `sourcing_supplier` is `honestfulphilment`, `aliexpress` or `alibaba_1688`. A 2xx here means the read worked, not that the sourcing worked — read the status.\n\nThis is NOT the completion poll. Poll with list_store_quotes filtered on `product_id` instead: a sourcing request that fails is removed rather than marked failed, so a read by id cannot tell a request that failed from an id that was never right — both answer not-found. The cadence and the full state machine are on list_store_quotes.\n\nAsking for a request that belongs to another store answers not-found as well, which is deliberate: pass the store the request is actually on. This tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
+      "annotations": {
+        "title": "Get Sourcing Request",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "get_store_quote_versions",
+      "method": "GET",
+      "path": "/store_quotes/{store_id}/store_quote/{store_quote_id}/versions",
+      "summary": "List the earlier supplier offers quoted for one sourcing request.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the request belongs to."
+        },
+        {
+          "name": "store_quote_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "The sourcing request's own integer id: the `id` of a list_store_quotes result."
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "How many versions to return. Defaults to 10 upstream."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "How many versions to skip, for paging. Defaults to 0 upstream."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Read-only. A sourcing request can be quoted more than once over its life, and this returns those offers: {offset, total, items: [...]}, newest first, with `total` being how many exist so you can page with `limit` / `offset`.\n\nEach item is one quoted offer: `id`, `created_at`, `item_id_on_site` and `site_id` (the supplier's own item, and the supplier site as an INTEGER — e.g. 38 = alibaba_1688, 33 = autods_sourcing), `status`, `external_quote_id`, `min_price` / `max_price`, and the quoted `buy_item`. `status` is a lowercase string from a set of its own — `quoting`, `quoted`, `cannot_be_quoted` — and it is NOT the sourcing request's status; only completed offers (`quoted`) are listed here, so in practice every item carries the same value and this list says nothing about whether the request itself finished. Read that from list_store_quotes or get_store_quote. Note `external_quote_id` here keeps the supplier prefix (`alibaba_1688_992…`) that the sourcing request's own record strips, so compare the two by `quote_id` / `id` rather than by that string.\n\nCall this only once the request has reached `ready` or `linked`. A request with no offer attached yet (`new`, `in_progress`) has no version history to read and the call answers an `upstream_error` you cannot act on, rather than an empty list. Check the status first.\n\nThis tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
+      "annotations": {
+        "title": "Get Sourcing Request Versions",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "list_store_quote_shipping_options",
+      "method": "POST",
+      "path": "/store_quotes/{store_id}/store_quote/{store_quote_id}/shipping_options/list",
+      "summary": "List the shipping options quoted for one sourcing request, for one destination country.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the request belongs to."
+        },
+        {
+          "name": "store_quote_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "The sourcing request's own integer id: the `id` of a list_store_quotes result."
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "notes": "Read-only POST. Returns {shipping_options: [...]} — the ways the supplier can ship this sourcing request's item to one country. Each option is {id, price, title, delivery_time_min, delivery_time_max, is_chosen}, where the two delivery times are whole days.\n\n`is_chosen` is already set before anyone is asked: the flow picks the cheapest or otherwise preferred option when the offer arrives, so exactly one option normally carries `is_chosen: true` and that is the one in force. Present this as the current choice, not as a question, unless the user asked to change it.\n\nCall this only once the request has reached `ready` or `linked`. On a request that has no supplier offer yet (`new`, `in_progress`) or one that ended at `cannot_be_sourced`, the call is refused as `upstream_client_error` — that is the documented answer, not a fault; read the status with list_store_quotes first. A 2xx here means the read worked, not that the sourcing worked.\n\nThe options depend on the country, so the same request answers differently for different destinations. `default_country` on the sourcing request is the country it was quoted for, and is the sensible default to pass. This tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
+      "annotations": {
+        "title": "List Sourcing Shipping Options",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "country": {
+            "type": "string",
+            "description": "Destination country as a two-letter ISO code, e.g. \"US\", \"GB\", \"DE\". Case does not matter. An unknown code is refused. Pass the sourcing request's `default_country` unless the user named another destination."
+          },
+          "variant_id": {
+            "type": "string",
+            "description": "Optional. The supplier variation to quote shipping for — an `item_id_on_site` from the request's `buy_item.variations`. Omit to cover the whole item."
+          }
+        },
+        "required": [
+          "country"
+        ]
+      }
+    }
+  ]
+}

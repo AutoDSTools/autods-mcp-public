@@ -58,7 +58,8 @@ turn. Tier 1 is for forming *this* call and has nothing to say about cadence.
 
 The bulk-action chain is the one already in production, so it is the reference — a new
 polling tool should read like it. See `manifests/bulk_actions.json` (tier 2) and
-`manifests/playbooks/product_import.json` (tier 3).
+`manifests/playbooks/product_import.json` (tier 3). `list_store_quotes`
+(`manifests/store_quotes.json`, RD-93) is the second one and was written against it.
 
 `upload_products` returns `{status, bulk_action}` immediately; the created product's
 id only exists once the bulk-action item finishes.
@@ -80,7 +81,15 @@ id only exists once the bulk-action item finishes.
 
 ## Store quotes: `new → in_progress → ready → linked`
 
-For the sourcing-writes child (`create_1688_sourcing_request`). The async endpoint
+Read by `list_store_quotes` (RD-93), filtered on `product_id`. That one tool is both
+the "has this product been sourced already?" pre-check and the completion poll — the
+same call read before and after the write — which is also why the two readings of an
+empty `results` are part of its `notes`. It is the second polling tool after
+`get_bulk_action_items`, and it copies that one's phrasing rather than restating the
+numbers differently.
+
+The write side is the sourcing-writes child (`create_1688_sourcing_request`). The
+async endpoint
 `POST /store_quotes/{store_id}/product/{autods_product_id}/alibaba-1688-request-async`
 returns `{"status": "ok"}` **before any work happens** — it only confirms the Celery
 task was queued. Completion is observable solely as the store quote reaching
@@ -108,6 +117,21 @@ outcome.
 
 `TryAgainLaterError` is retried by the task itself (up to 10 times, with its own
 countdown), so a slow quote is normal within the ceiling.
+
+Two more reads hang off the same record and are **not** poll targets, because they
+answer an error rather than an empty result while the quote is still working
+(`AutoDSApi/bl/manager/quote_manager.py`):
+
+- `get_store_quote_versions` reads `store_quote.quote.item_id_on_site`, and
+  `quote_id` is null until an offer is attached — so on `new` / `in_progress` it
+  raises and the caller sees `upstream_error`. It also filters the versions to
+  `QuoteStatus.QUOTED`, so the other two `QuoteStatus` values never appear in its
+  answer however the enum is documented elsewhere.
+- `list_store_quote_shipping_options` refuses anything outside `READY` / `LINKED`
+  with a `QuoteValidationError` (400 → `upstream_client_error`).
+
+Both tools' `notes` say "check the status first" for that reason, and the staging
+e2e skips them unless the store's first quote is already at `ready` or `linked`.
 
 ## Scrapers: the three-state read
 

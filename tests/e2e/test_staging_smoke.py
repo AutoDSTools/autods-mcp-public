@@ -27,7 +27,7 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (8 AutoDSApi ops + 6 ProductsResearch ops + 1 op
+# The full registered tool set (12 AutoDSApi ops + 6 ProductsResearch ops + 1 op
 # this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
@@ -40,6 +40,10 @@ AUTODS_OPS = {
     "delete_product",
     "get_current_user",
     "get_user_subscription",
+    "list_store_quotes",
+    "get_store_quote",
+    "get_store_quote_versions",
+    "list_store_quote_shipping_options",
 }
 PRODUCTS_RESEARCH_OPS = {
     "search_products",
@@ -66,6 +70,13 @@ WRITE_OPS = {"upload_products", "publish_drafts_to_marketplace", "delete_product
 _POLL_FIRST_DELAY_SECONDS = 10
 _POLL_INTERVAL_SECONDS = 15
 _POLL_ATTEMPTS = 4
+
+# Store-quote statuses that have a supplier offer attached
+# (``docs/polling-conventions.md``). Only these two can answer
+# ``get_store_quote_versions`` and ``list_store_quote_shipping_options``; on
+# ``new`` / ``in_progress`` there is nothing to read yet, and the two tools say
+# so in their own notes.
+_QUOTED_STORE_QUOTE_STATUSES = frozenset({"ready", "linked"})
 
 # Terminal bulk-action item statuses (``docs/polling-conventions.md``); 1 and 2
 # are the two that mean "keep polling".
@@ -115,6 +126,43 @@ def _first_product_id(data: Any) -> str | None:
                 if isinstance(value, str) and value:
                     return value
     return None
+
+
+def _first_store_quote(data: Any) -> tuple[int, int, str, str] | None:
+    """A sourcing request to read, as ``(store_id, id, status, default_country)``.
+
+    ``store_id`` comes off the record and never off the configured list: the list
+    call spans every configured store, so the request that comes back need not be
+    on the first of them — and asking for one on a store it does not belong to
+    answers not-found, which would be recorded as a failure.
+
+    Prefers a request that already has a supplier offer (``ready`` / ``linked``),
+    the way release check P10 does. Only those two states can answer
+    ``get_store_quote_versions`` and ``list_store_quote_shipping_options``, so
+    taking the newest record blindly would skip both reads whenever the newest
+    request happens to be the one still running.
+
+    Returns ``None`` rather than raising on anything unexpected: an account with
+    no sourcing requests is the normal case on staging, and the three reads that
+    need one are skipped, not failed.
+    """
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return None
+    candidates = [
+        (
+            quote["store_id"],
+            quote["id"],
+            str(quote.get("status") or ""),
+            str(quote.get("default_country") or ""),
+        )
+        for quote in results
+        if isinstance(quote, dict) and isinstance(quote.get("id"), int) and isinstance(quote.get("store_id"), int)
+    ]
+    if not candidates:
+        return None
+    quoted = [candidate for candidate in candidates if candidate[2] in _QUOTED_STORE_QUOTE_STATUSES]
+    return quoted[0] if quoted else candidates[0]
 
 
 def _root_categories(result: types.CallToolResult) -> list[str]:
@@ -305,6 +353,64 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
             )
         else:
             skipped += ["list_products", "get_bulk_action_items"]
+
+        # --- AutoDSApi: sourcing requests (RD-93) ---
+        # ``list_store_quotes`` runs on any store: an account with no sourcing
+        # requests answers an empty ``results``, which is a pass. The other three
+        # need a request that exists, so they are skipped rather than faked —
+        # and two of them need one that has reached ``ready`` or ``linked``,
+        # because a request with no supplier offer yet has no shipping options
+        # and no version history to read. The page is asked for several records
+        # for that reason, matching release check P10: the newest request alone
+        # is often still running, while an older one on the same store can
+        # answer all three reads.
+        if store_ids:
+            quotes = await call("list_store_quotes", {"store_ids": store_ids, "body": {"limit": 5}})
+            _record("list_store_quotes", quotes, failures, frozenset())
+            quote = None if quotes.is_error else _first_store_quote((quotes.structured_content or {}).get("data"))
+        else:
+            skipped.append("list_store_quotes")
+            quote = None
+
+        if quote:
+            # The store the request is actually on — see ``_first_store_quote``.
+            quote_store_id, quote_id, quote_status, quote_country = quote
+            _record(
+                "get_store_quote",
+                await call("get_store_quote", {"store_id": quote_store_id, "store_quote_id": quote_id}),
+                failures,
+                frozenset(),
+            )
+            if quote_status in _QUOTED_STORE_QUOTE_STATUSES:
+                _record(
+                    "get_store_quote_versions",
+                    await call(
+                        "get_store_quote_versions",
+                        {"store_id": quote_store_id, "store_quote_id": quote_id, "limit": 1},
+                    ),
+                    failures,
+                    frozenset(),
+                )
+                _record(
+                    "list_store_quote_shipping_options",
+                    await call(
+                        "list_store_quote_shipping_options",
+                        {
+                            "store_id": quote_store_id,
+                            "store_quote_id": quote_id,
+                            "body": {"country": quote_country or "US"},
+                        },
+                    ),
+                    failures,
+                    frozenset(),
+                )
+            else:
+                skipped += [
+                    f"get_store_quote_versions (the request is at {quote_status!r}, not ready/linked)",
+                    f"list_store_quote_shipping_options (the request is at {quote_status!r}, not ready/linked)",
+                ]
+        else:
+            skipped += ["get_store_quote", "get_store_quote_versions", "list_store_quote_shipping_options"]
 
         # --- Writes: only when explicitly enabled ---
         if staging_config.include_writes and store_ids:

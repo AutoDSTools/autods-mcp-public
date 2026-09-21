@@ -596,6 +596,24 @@ runs and still grades the data.
 Claude Code — neither renders a widget, so "no grid appeared" there is the
 documented behaviour and not a finding.
 
+**P10 — A sourcing request to read.** `list_store_quotes` on the P2 stores with
+`{"store_ids": "<ids>", "body": {"limit": 5}}` → for the first result record `id`,
+`store_id`, `status` and `default_country`.
+*Fixture:* a `store_quote_id` for R16, the `store_id` it is on, plus its status,
+which decides how much of R16 can run.
+*Record `store_id` off the result, not off the P2 list:* the call spans every store
+in the path, so the request that comes back need not be on the first of them, and
+R16.2–R16.4 on the wrong store answer not-found.
+*If `results` is empty:* that is a **pass** for the call itself — the account simply
+has no sourcing requests — and R16.2 onwards are `skipped (account has no sourcing
+request)`. R16.1 still runs.
+*If the first result's `status` is `new` or `in_progress`:* R16.3 and R16.4 are
+`skipped (the request has no supplier offer yet)`. Look down the list first: any
+result at `ready` or `linked` will do, and is the one to record.
+*Why it matters:* the two reads that need an offer answer an error, not an empty
+result, on a request that has none — so running them against the wrong fixture files
+a documented refusal as a broken tool.
+
 ---
 
 ## R — Read paths (the operations users actually run)
@@ -918,6 +936,60 @@ once: if its scraper-bucket cells load, record it. That is what keeps the
 Content-Type mismatch a cosmetic ticket in another repository rather than a
 blocker here.
 
+**R16 — Sourcing requests: "has this already been sourced, and is it done yet?"**
+The symptom these guard: a user asks to source a product and the agent either
+submits a second request for one that already has one (which fails), or reports
+"sourcing finished" for a request that is still running — or, worse, sits polling a
+request that failed minutes ago and was removed. All four reads are safe in any
+environment.
+
+*R16.1 — the list, and the filter the whole flow rests on.* Re-use P10's response
+rather than calling again. → `data.results` is a list. Then take one result's
+`product_id` and repeat the call filtered on it:
+
+```
+{"store_ids": "<ids>", "body": {"limit": 1, "filters": [
+  {"name": "product_id", "value": "<that product id>", "op": "="}]}}
+```
+
+→ `ok: true` and exactly that one request comes back. This is the check that
+matters most in R16: `product_id` is how the pre-check and the completion poll are
+both written, and a filter name the upstream stopped accepting comes back as a
+validation error the agent cannot act on — so the agent silently loses the ability
+to tell "already sourced" from "not sourced yet". Note it as a finding if the filter
+is accepted but returns something other than that one request.
+
+Grade the descriptor too, not just the call: the `list_store_quotes` `inputSchema`
+must offer `product_id` among `body.filters.items.name`, and must **not** offer a
+`value_type` property — this filter system has none, and a model that copies the
+product tools' shape is sending a field that is thrown away.
+
+*R16.2 — one request in full.* `get_store_quote` `{"store_id": <the store id P10
+recorded, as a NUMBER>, "store_quote_id": <the P10 id>}` → the same record, with
+a `status` that is
+a **lowercase string** (`new`, `in_progress`, `ready`, `linked`,
+`cannot_be_sourced`) and a `sourcing_supplier` that is one of `honestfulphilment`,
+`aliexpress`, `alibaba_1688`. A numeric `status` here is a finding: every tool's
+notes tell the model to read these as strings, and the server-wide index carries
+them as the one exception to "enums are integers".
+`store_id` is a **single** id, like `delete_product` and unlike the list call — a
+comma-separated value is refused, which is the schema gate working.
+
+*R16.3 — the version history.* `get_store_quote_versions` `{"store_id": <…>,
+"store_quote_id": <…>, "limit": 2}` → `{offset, total, items: […]}`, newest first.
+`skipped` per P10 when the request has no offer yet. On such a request the call
+answers `upstream_error` rather than an empty list — if you hit that, record which
+status the request was at, and check the tool's notes still say "check the status
+first" rather than filing it as a fault.
+
+*R16.4 — the shipping options.* `list_store_quote_shipping_options` `{"store_id":
+<…>, "store_quote_id": <…>, "body": {"country": "<the P10 default_country>"}}` →
+`data.shipping_options` is a list of `{id, price, title, delivery_time_min,
+delivery_time_max, is_chosen}`, and **exactly one** entry has `is_chosen: true`. The
+choice is made for the user before they are asked, so zero chosen options means the
+agent will present a decision that was already taken — report it. `skipped` per P10
+when the request has no offer yet; an `upstream_client_error` on a request at
+`new`/`in_progress` is the documented refusal, not a fault.
 
 ---
 

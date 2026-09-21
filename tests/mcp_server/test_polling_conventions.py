@@ -59,6 +59,12 @@ SUPERSEDED_CEILINGS = ("~3 min", "3 minutes", "whichever comes first")
 NON_FINAL_STATUSES = ("1=created", "2=in_progress")
 FINAL_STATUSES = ("3=finished", "4=canceled", "99=error")
 
+# The store-quote state machine (RD-93). Strings on the wire, not integers —
+# the one place the server-wide "enums are integers" invariant does not hold —
+# and `ready` is the trap: the offer has arrived but the product is not attached
+# to it yet, so it reads like an end state and is not one.
+STORE_QUOTE_STATUSES = ("`new`", "`in_progress`", "`ready`", "`linked`", "`cannot_be_sourced`")
+
 
 def _tool_text(manifest_dir: Path, operation_id: str) -> str:
     """Everything one tool descriptor ships: description (summary + notes + the
@@ -99,6 +105,55 @@ def test_the_polling_tool_warns_that_a_successful_read_is_not_success(bundled_ma
 
     assert "autods_product_id" in text, "the id a finished item yields is what the next step needs"
     assert "no item is left at 1 or 2" in text
+
+
+# --- tier 2: the sourcing-request poll (RD-93) -------------------------------
+
+
+def test_the_sourcing_poll_carries_the_cadence_itself(bundled_manifest_dir: Path) -> None:
+    """``list_store_quotes`` is the second polling tool, and the same rule
+    applies: the cadence has to be on the descriptor the agent is holding when
+    it decides whether to call again, not only in the runbook."""
+    text = _tool_text(bundled_manifest_dir, "list_store_quotes")
+
+    for token in CADENCE_TOKENS:
+        assert token in text, f"list_store_quotes no longer states {token!r}"
+
+
+def test_the_sourcing_poll_names_every_state(bundled_manifest_dir: Path) -> None:
+    """All five, or the agent cannot tell "keep going" from "stop". ``ready`` is
+    the one that costs something when it is missing: it looks like an end state
+    and the flow is not finished until ``linked``."""
+    text = _tool_text(bundled_manifest_dir, "list_store_quotes")
+
+    for token in STORE_QUOTE_STATUSES:
+        assert token in text, f"list_store_quotes no longer names status {token}"
+
+
+def test_the_sourcing_poll_says_a_vanished_request_is_a_failure(bundled_manifest_dir: Path) -> None:
+    """The correction that matters most (RD-91, RD-93). A failed sourcing
+    request is *removed* rather than marked failed, so a loop that waits for a
+    final status waits for ever — and an empty ``results`` means different
+    things before and after the write. A poll specified only as "wait for a
+    terminal status" is a bug, and this is the assertion that keeps the two
+    readings in the text."""
+    text = _tool_text(bundled_manifest_dir, "list_store_quotes").lower()
+
+    assert "disappears" in text, "the fourth outcome is not named"
+    assert "still working" in text, 'the "gone means failed, not still working" reading is missing'
+    assert "ambiguous" in text, "an empty results reads two ways and the notes must say which is which"
+    assert "before the write" in text and "after the write" in text
+
+
+def test_the_sourcing_poll_warns_that_a_successful_read_is_not_success(bundled_manifest_dir: Path) -> None:
+    """The trigger answers ``{"status": "ok"}`` before any work happens and this
+    read answers 2xx whatever the request is doing, so ``ok`` is true on both
+    while nothing has been sourced. The warning belongs on the tool holding the
+    status."""
+    text = _tool_text(bundled_manifest_dir, "list_store_quotes").lower()
+
+    assert "transport-level" in text
+    assert "the status is the only evidence" in text
 
 
 # --- tier 3: the playbook runbook --------------------------------------------
@@ -206,3 +261,25 @@ async def test_the_cadence_reaches_a_real_client(
     for token in CADENCE_TOKENS:
         assert token in poller.description, f"the delivered tool descriptor lacks {token!r}"
         assert token in (instructions or ""), f"the delivered instructions lack {token!r}"
+
+
+async def test_the_sourcing_state_machine_reaches_a_real_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """The same acceptance test for the second polling tool (RD-93). The
+    cadence *and* the disappearing-request reading are checked on the wire: a
+    manifest field nothing reads is invisible rather than harmless, and this is
+    the one channel that proves the text left the server."""
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    poller = next(tool for tool in tools.tools if tool.name == "list_store_quotes")
+
+    for token in CADENCE_TOKENS:
+        assert token in poller.description, f"the delivered tool descriptor lacks {token!r}"
+    for token in STORE_QUOTE_STATUSES:
+        assert token in poller.description, f"the delivered tool descriptor lacks status {token}"
+    assert "disappears" in poller.description.lower()

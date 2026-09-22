@@ -332,9 +332,17 @@ of `handler` / `base_url_key`; (6) the six playbook lints (below).
 `annotations.destructiveHint` is what an MCP client reads to decide a tool needs
 the user's confirmation before it runs, so it is set — together with an explicit
 `readOnlyHint: false` — on every operation that changes something a user would
-not want changed by accident. Two operations carry it:
+not want changed by accident. Four operations carry it:
 
 - `publish_drafts_to_marketplace` — puts the store's drafts in front of buyers.
+- `create_1688_sourcing_request` and `request_manual_sourcing` — each spends one
+  auto-order credit the moment the request is accepted. The charge cannot be
+  refunded and the request cannot be cancelled, which is what makes them
+  destructive: the call creates rather than destroys, but the money is gone
+  either way and the annotation exists to drive client behaviour, not to satisfy
+  a taxonomy. The hint is not the whole warning, though — a client's prompt says
+  a tool is destructive and never what it costs, so both tools state the price
+  in the first paragraph of their own notes. See **Sourcing writes** below.
 - `delete_product` — removes one product from one store, and with
   `remove_from_marketplace: true` deletes its live listing from the sell channel
   (Shopify, eBay, …) as well. It cannot be undone from here: re-listing means
@@ -753,6 +761,57 @@ they answer an error rather than an empty result, so both say "check the status
 first". The cadence for the poll is the shared one — see **Polling conventions**
 above and `docs/polling-conventions.md`.
 
+### Sourcing writes (RD-94)
+
+The other half: submitting a sourcing request, pairing the product's variations
+with the supplier's, and choosing a carrier.
+
+| Tool | Does | Spends |
+|---|---|---|
+| `create_1688_sourcing_request` | submits a request against one 1688 offer **and** links the variations, in one call | **1 auto-order credit** |
+| `request_manual_sourcing` | submits a request to the `honestfulphilment` supplier, who work it by hand | **1 auto-order credit** |
+| `link_quoted_product` | re-pairs a product's variations with the offer already attached to its request | nothing |
+| `set_store_quote_shipping_option` | chooses which quoted shipping option the request ships by, per destination country | nothing |
+
+Five things about them that are not visible from the endpoint names:
+
+- **Two of them spend money, and both are annotated destructive.**
+  `create_1688_sourcing_request` and `request_manual_sourcing` route into the
+  same upstream path and charge the same non-refundable credit, so both carry
+  `destructiveHint: true` and a host applies its own confirmation step before
+  either runs. A host prompt does not say what a tool *costs*, so both also
+  state the price in the first paragraph of their notes. The other two spend
+  nothing, are re-runnable, and stay non-destructive on purpose — a hint on
+  every write teaches a user to click through it.
+- **The 1688 call is one step, not two.** It creates the request *and* links the
+  variations; `link_quoted_product` is for re-linking afterwards, not for
+  completing it.
+- **The answer is not the outcome.** `create_1688_sourcing_request` returns
+  `{"status": "ok"}` as soon as the request is accepted. Completion is only
+  observable by polling `list_store_quotes` on `product_id` — and a request that
+  fails is *deleted* rather than marked failed, so an empty result after the
+  write means it failed.
+- **Never retry it blind.** There is no idempotency key upstream, so a transport
+  failure leaves the caller unable to tell an accepted request from a rejected
+  one while the credit may already be spent. Read `list_store_quotes` filtered on
+  `product_id` first; a request there means the first call landed.
+- **The rest of a quote's life is not exposed.** Asking for a quote again,
+  re-requesting it with a note, and switching to a different quoted version are
+  all done in the AutoDS web app. `get_store_quote_versions` will show versions
+  nothing here can act on.
+
+Id shapes, which are the other easy mistake: `alibaba_1688_id` is the **bare**
+offer id (`992906129243`), while `variations_match[].item_id_on_site` is the
+supplier's *variation* id — the offer id, an underscore, then the supplier's own
+variation id (`992906129243_6280495563187`). `sku` / `variant_id_on_site`
+identify the AutoDS side, and one of the two is required on every entry once the
+list has more than one entry; the `body_schema` refuses the ambiguous form
+locally as `invalid_arguments` rather than letting a call that may be charged for
+reach the upstream. The rule counts *entries*, not the product's variations,
+because nothing in the request says how many variations the product has — so a
+single entry with neither id passes the schema, and on a product with several
+variations it links nothing, silently. The `notes` say so.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated
@@ -812,6 +871,20 @@ choice here:
 
 ## Troubleshooting
 
+- **"The sourcing request I submitted has vanished."** That is the failure
+  signal, not a lost record. A request that fails is deleted rather than marked
+  failed, and the error is reported on a channel this server cannot see — so a
+  request that was there on an earlier poll and is gone now has failed, and one
+  that never appears after a `{"status": "ok"}` write failed too. The credit was
+  still spent — unless the failure was a missing add-on or too few credits, which
+  fail before the charge and look exactly the same. Do not resubmit without asking
+  the user: the second attempt risks a second charge, and a submission against a
+  request that already exists is not refused.
+- **"The tool call failed — should I send it again?" on a sourcing request.**
+  No. There is no idempotency key upstream, so a transport-level failure carries
+  no answer at all and the request may have been accepted with the credit already
+  charged. Read `list_store_quotes` filtered on `product_id` first; a request
+  there means the first call landed.
 - **A product grid renders as a thin blank strip, or as a box saying "No product
   payload reached this widget".** Two different failures with the same look.
   A blank strip means the host never received a `ui/notifications/size-changed`
@@ -920,6 +993,21 @@ polls that job and deletes what it reports. Without `E2E_UPLOAD_ASIN` the upload
 sends a placeholder supplier id that creates nothing, and the delete is reported
 as skipped rather than pointed at something pre-existing. Set
 `E2E_UPLOAD_ASIN=<a real supplier product id>` to exercise the whole path.
+
+The **sourcing** writes have a gate of their own,
+`E2E_INCLUDE_SOURCING_WRITES=1`, and not because there are more of them:
+`create_1688_sourcing_request` and `request_manual_sourcing` each charge a real,
+non-refundable auto-order credit on the account and create a request nothing can
+cancel, so a run that only meant to exercise the upload path must not be able to
+spend one by accident. The flag is permission rather than a target — each of
+those two additionally needs its own product id
+(`E2E_SOURCING_PRODUCT_ID` + `E2E_SOURCING_1688_OFFER_ID` +
+`E2E_SOURCING_1688_VARIATION_ID`, and `E2E_MANUAL_SOURCING_PRODUCT_ID`; separate
+products, because one product carries at most one sourcing request) and is
+skipped without it. The two free writes run against a request that already has an
+offer: `set_store_quote_shipping_option` re-chooses the option already in force,
+and `link_quoted_product` needs `E2E_SOURCING_LINK_VARIATION_ID` because it
+rewrites a product's supplier configuration.
 
 **"Every registered tool" is a hand-maintained list, not a discovered one.** The
 op-name sets at the top of `tests/e2e/test_staging_smoke.py` are what

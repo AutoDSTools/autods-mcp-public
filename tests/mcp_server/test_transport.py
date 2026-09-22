@@ -60,9 +60,9 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 6 AutoDSApi ops + 4 store-quote ops + 6 ProductsResearch ops + 2 users ops
+    # 7 AutoDSApi ops + 7 store-quote ops + 6 ProductsResearch ops + 2 users ops
     # (get_current_user, get_user_subscription) + 1 locally-served op (get_playbook).
-    assert len(by_name) == 19
+    assert len(by_name) == 23
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
@@ -72,6 +72,27 @@ async def test_products_manifest_lists_annotated_tools(
     assert by_name["delete_product"].annotations.title == "Delete Product"
     assert by_name["delete_product"].annotations.read_only_hint is False
     assert by_name["delete_product"].annotations.destructive_hint is True
+    # RD-94: the sourcing write that spends a non-refundable auto-order credit
+    # carries the same pair. The credit is what makes it destructive — the call
+    # creates rather than destroys — and the hint is what buys both the host's
+    # confirmation prompt and the playbook lints that require a verification
+    # step.
+    #
+    # ``request_manual_sourcing`` carries it for the same reason and not for the
+    # one RD-94 originally gave: the ticket called it "a free request", and both
+    # it and the 1688 trigger route into the same upstream path, which charges
+    # the same non-refundable credit. The annotation follows the charge, so the
+    # two credit-spending writes are annotated alike. See CLAUDE.md, **Tools are
+    # data → Destructive operations**.
+    assert by_name["create_1688_sourcing_request"].annotations.title == "Create 1688 Sourcing Request"
+    for credit_spender in ("create_1688_sourcing_request", "request_manual_sourcing"):
+        assert by_name[credit_spender].annotations.read_only_hint is False
+        assert by_name[credit_spender].annotations.destructive_hint is True
+    # The two that spend nothing and can be re-run stay non-destructive; a hint
+    # on every write would train a user to click through the prompt.
+    for free_write in ("link_quoted_product", "set_store_quote_shipping_option"):
+        assert by_name[free_write].annotations.read_only_hint is False
+        assert by_name[free_write].annotations.destructive_hint is False
     # A ProductsResearch read endpoint is advertised read-only.
     assert by_name["get_winning_products"].annotations.read_only_hint is True
     # The RD-68 self-identity op is advertised read-only.

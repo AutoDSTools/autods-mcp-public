@@ -27,7 +27,7 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (12 AutoDSApi ops + 6 ProductsResearch ops + 1 op
+# The full registered tool set (16 AutoDSApi ops + 6 ProductsResearch ops + 1 op
 # this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
@@ -44,6 +44,10 @@ AUTODS_OPS = {
     "get_store_quote",
     "get_store_quote_versions",
     "list_store_quote_shipping_options",
+    "create_1688_sourcing_request",
+    "link_quoted_product",
+    "set_store_quote_shipping_option",
+    "request_manual_sourcing",
 }
 PRODUCTS_RESEARCH_OPS = {
     "search_products",
@@ -59,6 +63,21 @@ ALL_OPS = AUTODS_OPS | PRODUCTS_RESEARCH_OPS | LOCAL_OPS
 
 # Write ops: only exercised when E2E_INCLUDE_WRITES=1 (they mutate staging).
 WRITE_OPS = {"upload_products", "publish_drafts_to_marketplace", "delete_product"}
+
+# RD-94's sourcing writes, behind a **second** flag of their own
+# (``E2E_INCLUDE_SOURCING_WRITES=1``) rather than ``E2E_INCLUDE_WRITES``. The
+# two are not the same kind of write: everything under ``WRITE_OPS`` mutates
+# staging data this run can clean up, while ``create_1688_sourcing_request``
+# and ``request_manual_sourcing`` each spend a real, non-refundable auto-order
+# credit on the account and create a request nothing can cancel. A flag that
+# turned both on together would spend credits on every run that only meant to
+# exercise the upload path.
+SOURCING_WRITE_OPS = {
+    "create_1688_sourcing_request",
+    "request_manual_sourcing",
+    "link_quoted_product",
+    "set_store_quote_shipping_option",
+}
 
 # RD-98: ``delete_product`` may only remove a product this run created, so the
 # write block polls the bulk job ``upload_products`` started and deletes what it
@@ -128,8 +147,9 @@ def _first_product_id(data: Any) -> str | None:
     return None
 
 
-def _first_store_quote(data: Any) -> tuple[int, int, str, str] | None:
-    """A sourcing request to read, as ``(store_id, id, status, default_country)``.
+def _first_store_quote(data: Any) -> tuple[int, int, str, str, str] | None:
+    """A sourcing request to read, as ``(store_id, id, status, default_country,
+    product_id)``.
 
     ``store_id`` comes off the record and never off the configured list: the list
     call spans every configured store, so the request that comes back need not be
@@ -155,6 +175,7 @@ def _first_store_quote(data: Any) -> tuple[int, int, str, str] | None:
             quote["id"],
             str(quote.get("status") or ""),
             str(quote.get("default_country") or ""),
+            str(quote.get("product_id") or ""),
         )
         for quote in results
         if isinstance(quote, dict) and isinstance(quote.get("id"), int) and isinstance(quote.get("store_id"), int)
@@ -374,7 +395,7 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
 
         if quote:
             # The store the request is actually on — see ``_first_store_quote``.
-            quote_store_id, quote_id, quote_status, quote_country = quote
+            quote_store_id, quote_id, quote_status, quote_country, _quote_product_id = quote
             _record(
                 "get_store_quote",
                 await call("get_store_quote", {"store_id": quote_store_id, "store_quote_id": quote_id}),
@@ -476,11 +497,270 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         else:
             skipped += list(WRITE_OPS)
 
+        # --- Sourcing writes: a gate of their own (RD-94) ---
+        await _smoke_sourcing_writes(call, staging_config, store_ids, quote, failures, skipped)
+
     if skipped:
         # Surface what wasn't exercised so a "green" run can't masquerade as full
         # coverage (missing store ids / product id / writes disabled).
         print(f"e2e smoke skipped ops (insufficient fixtures): {sorted(set(skipped))}")
     assert not failures, "ops failed the smoke contract:\n" + "\n".join(failures)
+
+
+async def _smoke_sourcing_writes(
+    call: Any,
+    staging_config: Any,
+    store_ids: str | None,
+    quote: tuple[int, int, str, str, str] | None,
+    failures: list[str],
+    skipped: list[str],
+) -> None:
+    """RD-94's four sourcing writes, each behind the fixture it actually needs.
+
+    Two things make this block unlike the ``WRITE_OPS`` one above, and both are
+    why it has a flag of its own.
+
+    **Two of the four spend real money.** ``create_1688_sourcing_request`` and
+    ``request_manual_sourcing`` each charge a non-refundable auto-order credit
+    the moment the request is accepted, and the request cannot be cancelled
+    afterwards — so neither runs off ``E2E_INCLUDE_SOURCING_WRITES`` alone. Each
+    additionally needs the operator to *name the product* it may spend that
+    credit on, and the flag is only the permission to use it. A product can
+    carry at most one sourcing request, which is why the two take separate
+    product ids rather than sharing one: pointed at the same product, the second
+    call would create no request of its own. Both products must be in the first
+    store of ``E2E_STORE_IDS``, and each is skipped when it already has a
+    request (``_existing_sourcing_request``).
+
+    **The other two rewrite a product's supplier configuration**, which is free
+    but not harmless on a store someone else is using. ``link_quoted_product``
+    therefore runs only against a request and a supplier variation the operator
+    named (see ``_smoke_relink``), and
+    ``set_store_quote_shipping_option`` re-chooses the option the request
+    *already* carries — exercising the call shape while leaving the request as
+    it found it.
+
+    Everything unset is a ``skipped`` entry, never a failure: an account with no
+    sourcing fixtures is the normal case.
+    """
+    if not staging_config.include_sourcing_writes:
+        skipped += [f"{op} (E2E_INCLUDE_SOURCING_WRITES is not set)" for op in sorted(SOURCING_WRITE_OPS)]
+        return
+
+    first_store_id = (store_ids or "").split(",")[0].strip()
+    if not first_store_id.isdigit():
+        skipped += [f"{op} (E2E_STORE_IDS does not start with a numeric store id)" for op in sorted(SOURCING_WRITE_OPS)]
+        return
+    store_id = int(first_store_id)
+
+    # --- the credit spender: the 1688 request ---
+    if not (
+        staging_config.sourcing_product_id
+        and staging_config.sourcing_1688_offer_id
+        and staging_config.sourcing_1688_variation_id
+    ):
+        skipped.append(
+            "create_1688_sourcing_request (needs E2E_SOURCING_PRODUCT_ID, E2E_SOURCING_1688_OFFER_ID and "
+            "E2E_SOURCING_1688_VARIATION_ID; it spends a credit)"
+        )
+    elif reason := await _existing_sourcing_request(call, store_id, staging_config.sourcing_product_id):
+        skipped.append(f"create_1688_sourcing_request ({reason})")
+    else:
+        _record(
+            "create_1688_sourcing_request",
+            await call(
+                "create_1688_sourcing_request",
+                {
+                    "store_id": store_id,
+                    "product_id": staging_config.sourcing_product_id,
+                    "body": {
+                        "alibaba_1688_id": staging_config.sourcing_1688_offer_id,
+                        "add_to_unfulfilled_orders": False,
+                        "link": {
+                            "variations_match": [
+                                # One entry, so neither `sku` nor
+                                # `variant_id_on_site` is required — the
+                                # single-variation form the body schema allows.
+                                {"item_id_on_site": staging_config.sourcing_1688_variation_id}
+                            ]
+                        },
+                    },
+                },
+            ),
+            failures,
+            frozenset(),
+        )
+
+    # --- the other credit spender: manual sourcing ---
+    if not staging_config.manual_sourcing_product_id:
+        skipped.append("request_manual_sourcing (needs E2E_MANUAL_SOURCING_PRODUCT_ID; it spends a credit)")
+    elif reason := await _existing_sourcing_request(call, store_id, staging_config.manual_sourcing_product_id):
+        skipped.append(f"request_manual_sourcing ({reason})")
+    else:
+        _record(
+            "request_manual_sourcing",
+            await call(
+                "request_manual_sourcing",
+                {"store_id": store_id, "product_id": staging_config.manual_sourcing_product_id},
+            ),
+            failures,
+            frozenset(),
+        )
+
+    # --- the re-link: only on a request the operator named ---
+    await _smoke_relink(call, staging_config, store_ids, failures, skipped)
+
+    # --- the shipping option, on a request that already has an offer ---
+    if quote is None or quote[2] not in _QUOTED_STORE_QUOTE_STATUSES:
+        skipped.append("set_store_quote_shipping_option (no sourcing request at ready/linked to configure)")
+        return
+    quote_store_id, quote_id, _status, quote_country, _quote_product_id = quote
+
+    country = quote_country or "US"
+    options = await call(
+        "list_store_quote_shipping_options",
+        {"store_id": quote_store_id, "store_quote_id": quote_id, "body": {"country": country}},
+    )
+    chosen = None if options.is_error else _chosen_shipping_option_id(options)
+    if chosen is None:
+        skipped.append("set_store_quote_shipping_option (the request has no chosen shipping option to re-choose)")
+        return
+    _record(
+        "set_store_quote_shipping_option",
+        await call(
+            "set_store_quote_shipping_option",
+            {
+                "store_id": quote_store_id,
+                "store_quote_id": quote_id,
+                # The option already in force, so the request is left as it was
+                # found. The point of the check is the call shape, not a change.
+                "body": {"country": country, "shipping_option_id": chosen},
+            },
+        ),
+        failures,
+        frozenset(),
+    )
+
+
+async def _existing_sourcing_request(call: Any, store_id: int, product_id: str) -> str | None:
+    """Why a credit-spending sourcing write must not run on ``product_id``, or ``None``.
+
+    The pre-check the tools' own notes require. A second submission is not
+    refused: the 1688 trigger re-runs and re-links, and against a request from
+    another supplier its rollback deletes that paid-for request. The env vars
+    that name these products usually stay set between runs, so without this
+    every re-run would submit again. A read that fails is a skip too — no
+    answer is no proof the product is free.
+    """
+    found = await call(
+        "list_store_quotes",
+        {
+            "store_ids": str(store_id),
+            "body": {"limit": 1, "filters": [{"name": "product_id", "op": "=", "value": product_id}]},
+        },
+    )
+    if found.is_error:
+        return f"could not check {product_id} for an existing sourcing request"
+    data = (found.structured_content or {}).get("data")
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return f"could not check {product_id} for an existing sourcing request"
+    if results:
+        return f"{product_id} already has a sourcing request"
+    return None
+
+
+async def _smoke_relink(
+    call: Any,
+    staging_config: Any,
+    store_ids: str | None,
+    failures: list[str],
+    skipped: list[str],
+) -> None:
+    """``link_quoted_product`` against the one request the operator named.
+
+    Never against whichever request the read block happened to find first: the
+    call rewrites that product's supplier, and the upstream does not check that
+    the pairing belongs to the request's offer. So it needs both
+    ``E2E_SOURCING_LINK_STORE_QUOTE_ID`` and ``E2E_SOURCING_LINK_VARIATION_ID``,
+    and it runs only when the named variation is one of that request's own
+    supplier variations.
+    """
+    quote_id_text = staging_config.sourcing_link_store_quote_id
+    variation_id = staging_config.sourcing_link_variation_id
+    if not (quote_id_text and quote_id_text.isdigit() and variation_id):
+        skipped.append(
+            "link_quoted_product (needs E2E_SOURCING_LINK_STORE_QUOTE_ID and E2E_SOURCING_LINK_VARIATION_ID)"
+        )
+        return
+
+    found = await call(
+        "list_store_quotes",
+        {
+            "store_ids": store_ids,
+            "body": {"limit": 1, "filters": [{"name": "id", "op": "=", "value": int(quote_id_text)}]},
+        },
+    )
+    data = None if found.is_error else (found.structured_content or {}).get("data")
+    results = data.get("results") if isinstance(data, dict) else None
+    record = results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else None
+    if record is None or not isinstance(record.get("store_id"), int) or not record.get("product_id"):
+        skipped.append(f"link_quoted_product (request {quote_id_text} not found on E2E_STORE_IDS)")
+        return
+    if record.get("status") not in _QUOTED_STORE_QUOTE_STATUSES:
+        skipped.append(f"link_quoted_product (request {quote_id_text} is not at ready/linked)")
+        return
+    buy_item = record.get("buy_item") if isinstance(record.get("buy_item"), dict) else {}
+    offer_variations = {
+        variation.get("item_id_on_site")
+        for variation in buy_item.get("variations") or []
+        if isinstance(variation, dict)
+    }
+    if variation_id not in offer_variations:
+        skipped.append(f"link_quoted_product ({variation_id} is not a supplier variation of request {quote_id_text})")
+        return
+
+    _record(
+        "link_quoted_product",
+        await call(
+            "link_quoted_product",
+            {
+                "store_id": record["store_id"],
+                "product_id": str(record["product_id"]),
+                "body": {
+                    "store_quote_id": int(quote_id_text),
+                    "add_to_unfulfilled_orders": False,
+                    "variations_match": [{"item_id_on_site": variation_id}],
+                },
+            },
+        ),
+        failures,
+        frozenset(),
+    )
+
+
+def _chosen_shipping_option_id(result: types.CallToolResult) -> str | None:
+    """The `id` of the option already marked ``is_chosen``, as a string.
+
+    Returns ``None`` when no option is marked, which is a skip rather than a
+    failure — a request can reach ``ready`` with no shipping quoted for the
+    country asked for. There is deliberately no fallback to another option:
+    choosing one would change the request, and this check must leave it as it
+    found it.
+    """
+    data = (result.structured_content or {}).get("data")
+    options = data.get("shipping_options") if isinstance(data, dict) else None
+    if not isinstance(options, list):
+        return None
+    chosen = next(
+        (
+            option
+            for option in options
+            if isinstance(option, dict) and option.get("is_chosen") and option.get("id") is not None
+        ),
+        None,
+    )
+    return None if chosen is None else str(chosen["id"])
 
 
 async def _created_product_ids(

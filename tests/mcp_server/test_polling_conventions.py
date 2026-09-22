@@ -156,6 +156,94 @@ def test_the_sourcing_poll_warns_that_a_successful_read_is_not_success(bundled_m
     assert "the status is the only evidence" in text
 
 
+# --- tier 2: the sourcing write (RD-94) --------------------------------------
+
+
+def test_the_sourcing_write_says_its_answer_is_not_the_outcome(bundled_manifest_dir: Path) -> None:
+    """``create_1688_sourcing_request`` answers ``{"status": "ok"}`` before any
+    sourcing has happened, and nothing else ever reports the outcome. The tool
+    returning that answer is the one that has to say what it does not mean —
+    a warning reachable only from the *poll* arrives after the agent has already
+    decided the work is done."""
+    text = _tool_text(bundled_manifest_dir, "create_1688_sourcing_request")
+
+    assert "accepted for processing" in text
+    assert "transport-level" in text
+    for token in CADENCE_TOKENS:
+        assert token in text, f"create_1688_sourcing_request no longer states {token!r}"
+
+
+def test_the_sourcing_write_says_a_vanished_request_is_a_failure(bundled_manifest_dir: Path) -> None:
+    """The write is where an agent learns what it is waiting for, and the failure
+    mode has no status of its own: the record is removed. Stated only on the
+    poll, it arrives to an agent that has already written the loop."""
+    text = _tool_text(bundled_manifest_dir, "create_1688_sourcing_request").lower()
+
+    assert "removed" in text
+    assert "cannot_be_sourced" in text
+    assert "never appears" in text
+
+
+def test_the_sourcing_write_carries_the_poll_before_retry_recovery(bundled_manifest_dir: Path) -> None:
+    """The one that prevents a duplicated charge. There is no idempotency key
+    upstream, and a transport failure carries no answer at all — so "it failed,
+    try again" is exactly the wrong reflex, and the tool has to say which read
+    establishes whether the first attempt landed.
+
+    RD-110's ``on_failure`` block delivers the same thing on the failure path,
+    where it arrives at the moment of the decision. Both, deliberately: the
+    contract is tier 2 and the moment-of-failure nudge is tier 3."""
+    text = _tool_text(bundled_manifest_dir, "create_1688_sourcing_request").lower()
+
+    assert "do not submit it again" in text
+    assert "list_store_quotes" in text
+    assert "credit already charged" in text
+
+
+def test_both_credit_spending_writes_state_the_price(bundled_manifest_dir: Path) -> None:
+    """Both sourcing requests charge an auto-order credit the moment they are
+    accepted, and neither can be cancelled afterwards. ``request_manual_sourcing``
+    is the one that *reads* as free — it takes no body and submits in one call —
+    so the price has to be on its own descriptor rather than inferred from the
+    tool beside it. The destructive hint is the other half and is asserted in
+    ``test_transport``; a host prompt says "this tool is destructive", never what
+    it costs.
+
+    Checked on the first paragraph of ``notes`` only, not on the whole text: a
+    model reads the opening of a description far more reliably than its middle,
+    and a price that drifted down the notes would still pass a whole-text check."""
+    registry = build_registry(bundled_manifest_dir)
+    for operation_id in ("create_1688_sourcing_request", "request_manual_sourcing"):
+        text = registry.get(operation_id).notes.split("\n\n")[0].lower()
+
+        assert "1 auto-order credit" in text, f"{operation_id} no longer states the credit cost"
+        assert "not refundable" in text, f"{operation_id} no longer states the charge is not refundable"
+        assert "cannot be cancelled" in text, f"{operation_id} no longer states the request cannot be cancelled"
+
+
+def test_the_sourcing_writes_send_the_quote_lifecycle_to_the_web_app(bundled_manifest_dir: Path) -> None:
+    """Three endpoints manage a manual quote afterwards and none of them is
+    exposed here, so an agent that submits one and then looks for the tool to
+    re-request it finds none. ``get_store_quote_versions`` makes that worse by
+    showing versions nothing here can act on — hence the pointer at the web app
+    on the tools that create the situation."""
+    for operation_id in ("create_1688_sourcing_request", "request_manual_sourcing"):
+        text = _tool_text(bundled_manifest_dir, operation_id).lower()
+
+        assert "web app" in text, f"{operation_id} no longer says where the quote lifecycle is handled"
+
+
+def test_the_sourcing_write_offers_the_failure_exit(bundled_manifest_dir: Path) -> None:
+    """Sourcing needs an *active* product, so a chain that stops half way leaves
+    a live listing priced at supplier cost. The runbook (RD-110) owns the full
+    exit; the tool that creates the exposure still has to name it and point at
+    the tool that undoes it."""
+    for operation_id in ("create_1688_sourcing_request", "request_manual_sourcing"):
+        text = _tool_text(bundled_manifest_dir, operation_id)
+
+        assert "delete_product" in text, f"{operation_id} no longer names the cleanup tool"
+
+
 # --- tier 3: the playbook runbook --------------------------------------------
 
 
@@ -283,3 +371,30 @@ async def test_the_sourcing_state_machine_reaches_a_real_client(
     for token in STORE_QUOTE_STATUSES:
         assert token in poller.description, f"the delivered tool descriptor lacks status {token}"
     assert "disappears" in poller.description.lower()
+
+
+async def test_the_sourcing_write_contract_reaches_a_real_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-94. The three things that cost the user real money if they do not
+    arrive — the credit price, the cadence the agent waits on, and the
+    poll-before-retry rule that stops a second charge — checked on the wire
+    rather than through the loader. A manifest field nothing reads is invisible
+    rather than harmless."""
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    writer = next(tool for tool in tools.tools if tool.name == "create_1688_sourcing_request")
+    description = writer.description.lower()
+
+    assert "1 auto-order credit" in description
+    assert "do not submit it again" in description
+    for token in CADENCE_TOKENS:
+        assert token in writer.description, f"the delivered tool descriptor lacks {token!r}"
+    # The annotation is the half a host reads: without it no client asks the
+    # user anything before spending the credit.
+    assert writer.annotations.destructive_hint is True
+    assert writer.annotations.read_only_hint is False

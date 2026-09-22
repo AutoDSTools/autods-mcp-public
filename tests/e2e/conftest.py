@@ -58,6 +58,36 @@ Optional:
   upload. Without it the upload sends a placeholder that creates nothing, so
   ``delete_product`` — which may only remove a product this run created — is
   skipped (RD-98).
+* ``E2E_INCLUDE_SOURCING_WRITES=1`` — RD-94's four sourcing writes, behind a
+  **second** flag rather than ``E2E_INCLUDE_WRITES``. Two of them
+  (``create_1688_sourcing_request``, ``request_manual_sourcing``) charge a real,
+  non-refundable auto-order credit on the account and create a request nothing
+  can cancel, so a run that only means to exercise the upload path must not be
+  able to spend one by accident. The flag is permission, not a target: each of
+  those two additionally needs its own product id below, and without it the op
+  is skipped.
+* ``E2E_SOURCING_PRODUCT_ID`` / ``E2E_SOURCING_1688_OFFER_ID`` /
+  ``E2E_SOURCING_1688_VARIATION_ID`` — the AutoDS product to source, the bare
+  1688 offer id, and that offer's variation id
+  (``<offer>_<supplier variation>``). All three are needed to drive
+  ``create_1688_sourcing_request``, **which spends a credit**.
+* ``E2E_MANUAL_SOURCING_PRODUCT_ID`` — a *different* product for
+  ``request_manual_sourcing``, **which also spends a credit**. Separate from the
+  id above because a product carries at most one sourcing request, so pointing
+  both calls at one product would create no second request.
+
+  Both products must be in the **first** store of ``E2E_STORE_IDS`` — a product
+  in another store answers not-found, which is recorded as a failure. Each of
+  the two calls is skipped when its product already has a sourcing request, so
+  leaving these set between runs spends no second credit.
+* ``E2E_SOURCING_LINK_STORE_QUOTE_ID`` / ``E2E_SOURCING_LINK_VARIATION_ID`` —
+  the sourcing request ``link_quoted_product`` re-links, and the supplier
+  variation it re-links to. That call spends nothing but does rewrite a
+  product's supplier configuration, so it runs only against a request the
+  operator named, never the first one the read block found. The store and
+  product ids come off that request's own record, and the call is skipped
+  unless the variation is one of that request's supplier variations — the
+  upstream does not check the pairing itself.
 
 Env vars for the deployed release checks (section S) — all optional, and no
 credentials among them; section S is the *unauthenticated* surface:
@@ -146,6 +176,15 @@ class StagingConfig:
     store_ids: str | None
     include_writes: bool
     upload_asin: str
+    # RD-94: a gate of its own, because two of the ops behind it spend a real
+    # non-refundable credit — see the module docstring.
+    include_sourcing_writes: bool = False
+    sourcing_product_id: str | None = None
+    sourcing_1688_offer_id: str | None = None
+    sourcing_1688_variation_id: str | None = None
+    manual_sourcing_product_id: str | None = None
+    sourcing_link_variation_id: str | None = None
+    sourcing_link_store_quote_id: str | None = None
     autods_api_base_url: str | None = None
     products_research_base_url: str | None = None
     extra: dict[str, str] = field(default_factory=dict)
@@ -171,6 +210,13 @@ def staging_config() -> StagingConfig:
         store_ids=os.environ.get("E2E_STORE_IDS"),
         include_writes=os.environ.get("E2E_INCLUDE_WRITES") == "1",
         upload_asin=os.environ.get("E2E_UPLOAD_ASIN", _PLACEHOLDER_ASIN),
+        include_sourcing_writes=os.environ.get("E2E_INCLUDE_SOURCING_WRITES") == "1",
+        sourcing_product_id=os.environ.get("E2E_SOURCING_PRODUCT_ID"),
+        sourcing_1688_offer_id=os.environ.get("E2E_SOURCING_1688_OFFER_ID"),
+        sourcing_1688_variation_id=os.environ.get("E2E_SOURCING_1688_VARIATION_ID"),
+        manual_sourcing_product_id=os.environ.get("E2E_MANUAL_SOURCING_PRODUCT_ID"),
+        sourcing_link_variation_id=os.environ.get("E2E_SOURCING_LINK_VARIATION_ID"),
+        sourcing_link_store_quote_id=os.environ.get("E2E_SOURCING_LINK_STORE_QUOTE_ID"),
         autods_api_base_url=os.environ.get("AUTODS_API_BASE_URL"),
         products_research_base_url=os.environ.get("PRODUCTS_RESEARCH_BASE_URL"),
     )

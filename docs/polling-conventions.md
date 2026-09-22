@@ -88,12 +88,38 @@ empty `results` are part of its `notes`. It is the second polling tool after
 `get_bulk_action_items`, and it copies that one's phrasing rather than restating the
 numbers differently.
 
-The write side is the sourcing-writes child (`create_1688_sourcing_request`). The
-async endpoint
+The write side landed with RD-94 as `create_1688_sourcing_request`. The async
+endpoint
 `POST /store_quotes/{store_id}/product/{autods_product_id}/alibaba-1688-request-async`
 returns `{"status": "ok"}` **before any work happens** — it only confirms the Celery
 task was queued. Completion is observable solely as the store quote reaching
 `linked`.
+
+That write is also the one place where a *failed* call is more dangerous than a
+slow one. There is no idempotency key upstream, so a transport-level failure
+(`UpstreamRequestError`, no response body) leaves the agent unable to tell an
+accepted request from a rejected one, while the AO credit may already be spent.
+The rule, carried in the tool's `notes` and — once RD-110 lands the playbook —
+in its step's `on_failure`: **on any failure or timeout, read
+`list_store_quotes` filtered on `product_id` before retrying.** A returned quote
+means the request landed; continue the completion poll and never resubmit blind.
+A blind second attempt risks a second charge, and it is **not** refused: the
+trigger answers `{"status": "ok"}` whatever the state, and every check runs in
+the background. Against an existing 1688 quote the second attempt runs again
+without charging and may re-link the variations. Against an existing quote from
+any other supplier it fails, and the rollback then **deletes that existing quote**
+(`alibaba_1688_request` rolls back whatever quote the product has, not only one it
+created) — an upstream bug, recorded in the tool's `notes` until it is fixed. The
+same background checks are why a missing Order Processing add-on, a product with
+no variations or too few credits never surface as an error: each looks like a
+quote that never appeared.
+
+`request_manual_sourcing` (`POST /store_quotes/{store_id}/product/{product_id}/request`)
+is **not** an async trigger — it answers with the store quote itself — but it
+routes into the same `create_and_request_store_quote`, so it charges the same AO
+credit and creates the same one-request-per-product record. A Honestfulphilment
+quote is worked by people within about 48 h, which is two orders of magnitude
+past the ceiling above: it is reported as submitted, not polled to a ceiling.
 
 `StoreQuoteStatus` (`AutoDSApi/dal/model/quote.py`), string values:
 

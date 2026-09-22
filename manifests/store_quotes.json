@@ -24,7 +24,7 @@
       ],
       "has_json_body": true,
       "request_body_required": true,
-      "notes": "Read-only POST. Returns {results: [...]} — the sourcing requests recorded on the given stores. A sourcing request (a \"store quote\") asks a sourcing supplier to quote one of the store's products; when it finishes, the supplier's offer is attached to that product. `body` is required but may be `{}`, which lists the store's requests with the upstream defaults (20 per page, no particular order); a bodyless call is refused here before anything is sent, because the upstream answers that with a bare validation error the model cannot act on.\n\nThis one tool answers both questions the sourcing flow depends on. They are the same call, read at two different moments, and both filter on `product_id`.\n\nBEFORE a sourcing request is submitted — \"is there one already?\" A product can carry at most ONE sourcing request, so submitting a second one for the same product fails. A non-empty `results` means the request already exists: read its `status` instead of submitting again.\n\nAFTER one is submitted — this is the completion poll. `status` is a lowercase string, never a number. `new` and `in_progress` are not final: keep polling. `ready` means the supplier's offer arrived but is not attached to the product yet: keep polling. `linked` is the successful end state. `cannot_be_sourced` is final and means this product cannot be sourced this way.\n\nTHE FOURTH OUTCOME IS THAT THE REQUEST DISAPPEARS. A sourcing request that fails does not get a failure status — the whole record is removed. So failure shows up as the request NOT BEING THERE. A request you saw on an earlier poll and cannot find now has FAILED; it is not \"still working\", and a loop written as \"wait for a final status\" waits for ever. This is also what makes an empty `results` ambiguous on its own, and only the timing resolves it: read before the write, empty means no request exists yet and you may submit one; read after the write, empty means the request was submitted and then failed — report that, and do not resubmit without asking the user.\n\nA 2xx here means the read worked, never that the sourcing worked: `ok` is a transport-level signal only, and the status is the only evidence. The sourcing write's own `{\"status\": \"ok\"}` says the request was accepted for processing and nothing more.\n\nPolling cadence, because there is no push channel and every poll costs you a turn: wait ~10s after the write before the first poll, then poll every ~15s, and stop after 10 attempts — about ~2.5 min at that cadence. A slow request is normal inside that ceiling; polling faster returns the same unfinished answer and buys nothing. On reaching the ceiling with the request still at `new`, `in_progress` or `ready`, report what is unfinished and its last status — do not keep polling, and do not report the sourcing as done.\n\nReading a result: `id` is the `store_quote_id` the other three store-quote tools take. `sourcing_supplier` is a lowercase string — `honestfulphilment`, `aliexpress` or `alibaba_1688`. `product_id` is the AutoDS product this request is for and `sell_item_id` is that product's id on the sell channel. `price` is a {min, max} range over the supplier's variations, `default_country` is the country the shipping was quoted for, `quote_id` and `external_quote_id` identify the supplier's offer, `shipping_options_stats` summarises the shipping choices and names the chosen one, and `buy_item` carries the supplier's own item with its `variations`. The `shipping_options` list and `chosen_shipping_option_id` on this record are deprecated — read `shipping_options_stats`, or call list_store_quote_shipping_options for the full set.\n\nThis tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
+      "notes": "Read-only POST. Returns {results: [...]} — the sourcing requests recorded on the given stores. A sourcing request (a \"store quote\") asks a sourcing supplier to quote one of the store's products; when it finishes, the supplier's offer is attached to that product. `body` is required but may be `{}`, which lists the store's requests with the upstream defaults (20 per page, no particular order); a bodyless call is refused here before anything is sent, because the upstream answers that with a bare validation error the model cannot act on.\n\nThis one tool answers both questions the sourcing flow depends on. They are the same call, read at two different moments, and both filter on `product_id`.\n\nBEFORE a sourcing request is submitted — \"is there one already?\" A product can carry at most ONE sourcing request, so never submit a second one for the same product — it is not refused cleanly, and each sourcing write's own notes say what it does instead. A non-empty `results` means the request already exists: read its `status` instead of submitting again.\n\nAFTER one is submitted — this is the completion poll. `status` is a lowercase string, never a number. `new` and `in_progress` are not final: keep polling. `ready` means the supplier's offer arrived but is not attached to the product yet: keep polling. `linked` is the successful end state. `cannot_be_sourced` is final and means this product cannot be sourced this way.\n\nTHE FOURTH OUTCOME IS THAT THE REQUEST DISAPPEARS. A sourcing request that fails does not get a failure status — the whole record is removed. So failure shows up as the request NOT BEING THERE. A request you saw on an earlier poll and cannot find now has FAILED; it is not \"still working\", and a loop written as \"wait for a final status\" waits for ever. This is also what makes an empty `results` ambiguous on its own, and only the timing resolves it: read before the write, empty means no request exists yet and you may submit one; read after the write, empty means the request was submitted and then failed — report that, and do not resubmit without asking the user.\n\nA 2xx here means the read worked, never that the sourcing worked: `ok` is a transport-level signal only, and the status is the only evidence. The sourcing write's own `{\"status\": \"ok\"}` says the request was accepted for processing and nothing more.\n\nPolling cadence, because there is no push channel and every poll costs you a turn: wait ~10s after the write before the first poll, then poll every ~15s, and stop after 10 attempts — about ~2.5 min at that cadence. A slow request is normal inside that ceiling; polling faster returns the same unfinished answer and buys nothing. On reaching the ceiling with the request still at `new`, `in_progress` or `ready`, report what is unfinished and its last status — do not keep polling, and do not report the sourcing as done.\n\nReading a result: `id` is the `store_quote_id` the other three store-quote tools take. `sourcing_supplier` is a lowercase string — `honestfulphilment`, `aliexpress` or `alibaba_1688`. `product_id` is the AutoDS product this request is for and `sell_item_id` is that product's id on the sell channel. `price` is a {min, max} range over the supplier's variations, `default_country` is the country the shipping was quoted for, `quote_id` and `external_quote_id` identify the supplier's offer, `shipping_options_stats` summarises the shipping choices and names the chosen one, and `buy_item` carries the supplier's own item with its `variations`. The `shipping_options` list and `chosen_shipping_option_id` on this record are deprecated — read `shipping_options_stats`, or call list_store_quote_shipping_options for the full set.\n\nThis tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
       "annotations": {
         "title": "List Sourcing Requests",
         "readOnlyHint": true,
@@ -263,6 +263,221 @@
         "required": [
           "country"
         ]
+      }
+    },
+    {
+      "operation_id": "create_1688_sourcing_request",
+      "method": "POST",
+      "path": "/store_quotes/{store_id}/product/{product_id}/alibaba-1688-request-async",
+      "summary": "Submit a sourcing request for one product against one 1688 supplier offer, and link its variations.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the product is in. Not the comma-separated `store_ids` the list tools take."
+        },
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "The AutoDS product id: the 24-character hex `id` list_products returns, not the product's id on the sell channel."
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "notes": "Submits a sourcing request for ONE of the store's products against ONE 1688 supplier offer, and IT SPENDS MONEY: submitting charges 1 auto-order credit straight away. The charge is not refundable and the request cannot be cancelled once it is in.\n\nThe same call also links the product's variations to that offer's variations. It is a single call, not two — do not follow it with link_quoted_product. Call it only for a product the user asked to have sourced in that turn, never as a tidy-up step of your own, and say which product you are about to source before you call. get_user_subscription shows the caller's auto-order balance — but a missing credit entry there does not establish a zero balance, so it is a check, not a guarantee.\n\nBEFORE CALLING — nothing is checked when the call is made, so check it yourself. The call answers {\"status\": \"ok\"} whatever the state, and every check runs later, where you cannot see it: a missing Order Processing add-on, a product with no variations, or too few auto-order credits all show up only as a request that never appears. So confirm the add-on with get_user_subscription, and read list_store_quotes filtered on `product_id` first. A product can carry at most ONE sourcing request, and a non-empty `results` means it already has one: do NOT call this then. It is not refused. Against an existing 1688 request it charges nothing but runs again, and may re-link the variations with this call's pairings. Against an existing request from any other supplier it fails in the background and REMOVES that existing request, which the user already paid for.\n\nTHE ANSWER IS NOT THE OUTCOME. The response is {\"status\": \"ok\"} and it says only that the request was accepted for processing — no sourcing has happened yet, and `ok` is a transport-level signal. Watch it with list_store_quotes filtered on `product_id`: wait ~10s, then poll every ~15s, and stop after 10 attempts (~2.5 min). `linked` is the finished state. A request that fails is REMOVED rather than marked failed, so a request that never appears, or that was there on an earlier poll and is gone now, has failed — it never turns into `cannot_be_sourced`, and a loop waiting for a final status waits for ever.\n\nIF THIS CALL FAILS OR TIMES OUT, DO NOT SUBMIT IT AGAIN. A transport failure carries no answer at all, so the request may already have been accepted and the credit already charged. Read list_store_quotes filtered on `product_id` instead: a request there means the first call landed, so carry on with the poll. If there is none, ask the user before submitting a second time — a blind retry risks a second charge, and a retry that reaches a request the first call did create is not refused either (see BEFORE CALLING).\n\nIDS, IN THE SHAPES THAT ARE EASY TO SWAP. `alibaba_1688_id` is the BARE offer id, e.g. \"992906129243\". `link.variations_match[].item_id_on_site` is the supplier's VARIATION id — the offer id, an underscore, then the supplier's own variation id, e.g. \"992906129243_6280495563187\". `sku` and `variant_id_on_site` identify the AutoDS side of the pair. One of the two is required on every entry once the list has more than one entry. A single entry may omit both, but only on a product with one variation: on a product with several, an entry that names neither links nothing, and nothing reports it.\n\nA variation you leave out of `variations_match` keeps whatever supplier it had, which leaves the product sourced partly from the new supplier and partly from the old one — half of it automated and half of it not. Link every variation you mean to source.\n\nAFTERWARDS. A shipping option is chosen for the request when the offer arrives; list_store_quote_shipping_options shows the choice and set_store_quote_shipping_option changes it. Asking for the quote again, or switching to a different quoted offer, is not available here — both are done in the AutoDS web app.\n\nIF SOURCING CANNOT BE COMPLETED the product is left listed at supplier cost with no margin, because a draft cannot be sourced and the product had to be active. Say so plainly and offer the way out: delete_product removes it, or the user sets a real price in the web app.",
+      "annotations": {
+        "title": "Create 1688 Sourcing Request",
+        "readOnlyHint": false,
+        "destructiveHint": true
+      },
+      "body_schema": {
+        "type": "object",
+        "description": "The offer to source from, and which supplier variation each product variation is sourced from. All three fields are required.",
+        "properties": {
+          "alibaba_1688_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The supplier offer's BARE id, e.g. \"992906129243\". NOT a variation id: a variation id is this id, an underscore, and the supplier's own variation id, and it belongs in `link.variations_match[].item_id_on_site`."
+          },
+          "add_to_unfulfilled_orders": {
+            "type": "boolean",
+            "description": "Required, and there is no default — decide it for this product and say which you chose. true also re-points the product's orders that are still waiting to be fulfilled at the new supplier offer, so they are fulfilled from it. false leaves those orders pointing where they already point. For a product with no unfulfilled orders the flag changes nothing."
+          },
+          "link": {
+            "type": "object",
+            "description": "Which supplier variation each of the product's own variations is sourced from. It travels with the request because this one call creates the request AND links the variations.",
+            "properties": {
+              "variations_match": {
+                "type": "array",
+                "minItems": 1,
+                "description": "One entry per product variation being linked. A variation with no entry keeps its old supplier.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "item_id_on_site": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The SUPPLIER variation id: the offer id, an underscore, then the supplier's own variation id, e.g. \"992906129243_6280495563187\"."
+                    },
+                    "sku": {
+                      "type": "string",
+                      "description": "The AutoDS variation's SKU. Either this or `variant_id_on_site` identifies the AutoDS side of the pair."
+                    },
+                    "variant_id_on_site": {
+                      "type": "string",
+                      "description": "The AutoDS variation's id on the sell channel. The alternative to `sku`."
+                    }
+                  },
+                  "required": [
+                    "item_id_on_site"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "variations_match"
+            ],
+            "if": {
+              "properties": {
+                "variations_match": {
+                  "minItems": 2
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "variations_match": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "sku": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "sku"
+                        ]
+                      },
+                      {
+                        "properties": {
+                          "variant_id_on_site": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "variant_id_on_site"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "alibaba_1688_id",
+          "add_to_unfulfilled_orders",
+          "link"
+        ]
+      }
+    },
+    {
+      "operation_id": "set_store_quote_shipping_option",
+      "method": "PUT",
+      "path": "/store_quotes/{store_id}/store_quote/{store_quote_id}/shipping_options",
+      "summary": "Choose which quoted shipping option a sourcing request ships by, for one destination country.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the request belongs to."
+        },
+        {
+          "name": "store_quote_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "The sourcing request's own integer id: the `id` of a list_store_quotes result."
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "notes": "Sets which of the quoted shipping options this sourcing request ships by, for ONE destination country. It spends no credit and can be called again: a later call with a different `shipping_option_id` replaces the choice. The answer is the sourcing request as it now stands; `ok` is transport-level only.\n\nRead the options first with list_store_quote_shipping_options for the same country and pass one of their `id` values — it is a string, not a number. One of them already carries `is_chosen: true`, because a choice is made for the user when the offer arrives; only call this when the user wants a different one.\n\nThe choice is per country, so a store that ships to several countries needs one call per country. The request's `default_country` is the country it was quoted for.\n\nCall it only on a request that already has a supplier offer — `ready` or `linked`. On `new`, `in_progress` or `cannot_be_sourced` the call is refused as `upstream_client_error`; that is the documented answer, not a fault, so read the status with list_store_quotes first.\n\nOne part of this cannot be taken back by calling again: an order that has already started processing keeps the carrier it started with, and a later change here does not move it. This tool needs the account's Active Products or Orders privilege group; without it the call answers `forbidden`.",
+      "annotations": {
+        "title": "Set Sourcing Shipping Option",
+        "readOnlyHint": false,
+        "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "country": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2}$",
+            "description": "Destination country as a two-letter ISO code, e.g. \"US\", \"GB\", \"DE\". Case does not matter. An unknown code is refused. Use the same country the options were read for."
+          },
+          "shipping_option_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The `id` of one option from list_store_quote_shipping_options for this request and this country. A string, even though it looks numeric."
+          }
+        },
+        "required": [
+          "country",
+          "shipping_option_id"
+        ]
+      }
+    },
+    {
+      "operation_id": "request_manual_sourcing",
+      "method": "POST",
+      "path": "/store_quotes/{store_id}/product/{product_id}/request",
+      "summary": "Ask AutoDS to source one product by hand, when the automatic supplier path cannot be used.",
+      "description": "",
+      "tags": [
+        "store_quotes"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the product is in."
+        },
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "The AutoDS product id: the 24-character hex `id` list_products returns."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Submits a sourcing request for ONE of the store's products to the `honestfulphilment` sourcing supplier, who work it by hand, and IT SPENDS MONEY, exactly as create_1688_sourcing_request does: creating the request charges 1 auto-order credit straight away, the charge is not refundable, and the request cannot be cancelled — nothing in this server or in the web app gives the credit back.\n\nIt is the fallback when the automatic 1688 path cannot be used or was refused — no offer matches the product, the offer is out of stock, or it cannot be shipped to the destination. There is no body and no field for a note: the product is the whole request. Call it only for a product the user asked to have sourced in that turn, never as a fallback you reach for on your own after the automatic path failed: that is a decision to spend their money, and it is theirs to make.\n\nA product can carry at most ONE sourcing request, so read list_store_quotes filtered on `product_id` first, and do not call this when one exists. Calling anyway charges no second credit and creates no second request, but it does not refuse cleanly either: an existing manual request still at `new` or `in_progress` is sent to the supplier again, one that has finished comes back unchanged, and an existing 1688 request makes the call answer `upstream_client_error`. The account needs an active Order Processing add-on; without it the call answers `upstream_client_error`, which here means the add-on rather than a bad request.\n\nThe answer is the sourcing request record, carrying the `id` and `status` the other store-quote tools take. `ok` is transport-level only and says nothing about the sourcing. This one is worked on by people and can take up to 48 hours, which is far outside any polling loop: report it as submitted and let the user come back to it later, rather than polling to a ceiling. When they do come back, list_store_quotes filtered on `product_id` is where the status is — and the same rule holds there, that a request which has disappeared has failed.\n\nWhat happens next is NOT available through this server. Asking for the quote again, re-requesting it with a note, and switching to a different quoted version are all done in the AutoDS web app. get_store_quote_versions will show you versions you cannot act on from here.\n\nIf sourcing does not work out, the product is left listed at supplier cost with no margin: delete_product removes it, or the user sets a real price in the web app.",
+      "annotations": {
+        "title": "Request Manual Sourcing",
+        "readOnlyHint": false,
+        "destructiveHint": true
       }
     }
   ]

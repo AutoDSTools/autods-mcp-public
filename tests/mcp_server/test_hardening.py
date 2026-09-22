@@ -365,3 +365,192 @@ async def test_delete_product_without_remove_from_marketplace_is_refused_locally
     # nothing monitoring it), so a change to how booleans are rendered has to
     # fail here rather than in someone's store.
     assert upstream_calls[1].url.params["remove_from_marketplace"] == "False"
+
+
+# --- The sourcing writes (RD-94) ---------------------------------------------
+
+# The AutoDS product this run pretends to source, and the 1688 offer it is
+# sourced from. The variation id is the supplier's own: the offer id, an
+# underscore, then the supplier variation — the shape that is easy to confuse
+# with the bare offer id.
+_SOURCING_PRODUCT_ID = "6512ab34cd56ef7890123456"
+_OFFER_ID = "992906129243"
+_OFFER_VARIATION_ID = "992906129243_6280495563187"
+
+
+def _sourcing_body(variations_match: list[dict], **overrides) -> dict:
+    body = {
+        "alibaba_1688_id": _OFFER_ID,
+        "add_to_unfulfilled_orders": False,
+        "link": {"variations_match": variations_match},
+    }
+    body.update(overrides)
+    return body
+
+
+async def test_a_multi_variation_link_without_an_autods_id_is_refused_locally(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-94: the pairing rule the upstream enforces, enforced here first.
+
+    An entry of ``variations_match`` says which supplier variation one AutoDS
+    variation is sourced from, so with more than one entry each needs ``sku`` or
+    ``variant_id_on_site`` to say *which* AutoDS variation it means. A single
+    entry needs neither — there is only one variation for it to be about.
+
+    Reaching the upstream with the ambiguous form costs the whole call: this
+    operation spends a non-refundable auto-order credit, and a transport-level
+    failure carries no answer saying whether it was charged. So the schema is
+    where the shape is refused, and — since mcp 2.x validates no arguments of
+    its own — ``_build_validators`` / ``_validate_arguments`` are the only gate
+    there is. Asserted at a real client for that reason.
+
+    The rule is expressed as ``if``/``then`` rather than as a two-branch
+    ``anyOf`` over the whole object, and that is about the *message*, not the
+    logic — the two accept exactly the same bodies. ``anyOf`` fails at the
+    object that carries it, so the error names ``body/link`` and echoes the
+    whole link object back with no clue which entry is wrong; ``if``/``then``
+    fails inside the array and names ``variations_match/<index>``. An agent can
+    act on the second one, which is the whole point of refusing locally instead
+    of letting the upstream answer.
+    """
+    upstream_calls: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+    arguments = {"store_id": 42, "product_id": _SOURCING_PRODUCT_ID}
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        ambiguous = await session.call_tool(
+            "create_1688_sourcing_request",
+            {
+                **arguments,
+                "body": _sourcing_body(
+                    [
+                        {"item_id_on_site": _OFFER_VARIATION_ID, "sku": "a422542f"},
+                        {"item_id_on_site": "992906129243_6280495563188"},
+                    ]
+                ),
+            },
+        )
+        single = await session.call_tool(
+            "create_1688_sourcing_request",
+            {**arguments, "body": _sourcing_body([{"item_id_on_site": _OFFER_VARIATION_ID}])},
+        )
+        paired = await session.call_tool(
+            "create_1688_sourcing_request",
+            {
+                **arguments,
+                "body": _sourcing_body(
+                    [
+                        {"item_id_on_site": _OFFER_VARIATION_ID, "sku": "a422542f"},
+                        {"item_id_on_site": "992906129243_6280495563188", "variant_id_on_site": "48992958513322"},
+                    ]
+                ),
+            },
+        )
+
+    assert ambiguous.is_error is True
+    message = ambiguous.content[0].text
+    assert message.startswith("invalid_arguments: ")
+    # The entry, by index — not just "the body is wrong somewhere".
+    assert "body/link/variations_match/1" in message
+    # And only that entry rides back in the message — not the rest of the body,
+    # and not the sibling entry that was fine.
+    assert "alibaba_1688_id" not in message
+    assert "a422542f" not in message
+    # The two documented shapes go through; the ambiguous one never leaves.
+    assert single.is_error is False
+    assert paired.is_error is False
+    assert len(upstream_calls) == 2
+    assert upstream_calls[0].url.path == f"/store_quotes/42/product/{_SOURCING_PRODUCT_ID}/alibaba-1688-request-async"
+    assert json.loads(upstream_calls[0].content)["alibaba_1688_id"] == _OFFER_ID
+
+
+async def test_a_sourcing_request_without_the_unfulfilled_orders_choice_is_refused_locally(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """``add_to_unfulfilled_orders`` has no upstream default, and the two values
+    do different things to orders the buyer is already waiting on — so the call
+    that omits it is refused by name rather than guessed at, exactly as
+    ``delete_product``'s ``remove_from_marketplace`` is."""
+
+    def upstream(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("the refused body must not reach the upstream")
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        omitted = await session.call_tool(
+            "create_1688_sourcing_request",
+            {
+                "store_id": 42,
+                "product_id": _SOURCING_PRODUCT_ID,
+                "body": {
+                    "alibaba_1688_id": _OFFER_ID,
+                    "link": {"variations_match": [{"item_id_on_site": _OFFER_VARIATION_ID}]},
+                },
+            },
+        )
+
+    assert omitted.is_error is True
+    assert omitted.content[0].text.startswith("invalid_arguments: ")
+    assert "add_to_unfulfilled_orders" in omitted.content[0].text
+
+
+async def test_the_relink_enforces_the_same_pairing_rule(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """``link_quoted_product`` takes the same ``variations_match`` and the same
+    rule applies to it — the two schemas are written against one upstream model,
+    and a rule enforced on only one of them is the half an author forgets. It
+    carries the ``if``/``then`` form too, so its message names the entry rather
+    than the body."""
+    upstream_calls: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request)
+        return httpx.Response(200, json={"id": _SOURCING_PRODUCT_ID})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+    arguments = {"store_id": 42, "product_id": _SOURCING_PRODUCT_ID}
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        ambiguous = await session.call_tool(
+            "link_quoted_product",
+            {
+                **arguments,
+                "body": {
+                    "store_quote_id": 7,
+                    "add_to_unfulfilled_orders": False,
+                    "variations_match": [
+                        {"item_id_on_site": _OFFER_VARIATION_ID, "sku": "a422542f"},
+                        {"item_id_on_site": "992906129243_6280495563188"},
+                    ],
+                },
+            },
+        )
+        single = await session.call_tool(
+            "link_quoted_product",
+            {
+                **arguments,
+                "body": {
+                    "store_quote_id": 7,
+                    "add_to_unfulfilled_orders": False,
+                    "variations_match": [{"item_id_on_site": _OFFER_VARIATION_ID}],
+                },
+            },
+        )
+
+    assert ambiguous.is_error is True
+    assert ambiguous.content[0].text.startswith("invalid_arguments: ")
+    assert "body/variations_match/1" in ambiguous.content[0].text
+    assert single.is_error is False
+    assert len(upstream_calls) == 1
+    assert upstream_calls[0].url.path == f"/products/42/product/{_SOURCING_PRODUCT_ID}/link_quoted_product"

@@ -164,10 +164,51 @@ client:
 
 ### Destructive operations
 
-Two operations carry `destructiveHint: true`: `publish_drafts_to_marketplace`, which has
+Four operations carry `destructiveHint: true`: `publish_drafts_to_marketplace`, which has
 carried it since the initial endpoint set (RD-54/RD-55) and is the destructive step
-RD-100's lint discussion is written around, and `delete_product` (RD-98). Neither is "the
-first" one — don't write that claim into a manifest, a commit message or this file.
+RD-100's lint discussion is written around, `delete_product` (RD-98), and
+`create_1688_sourcing_request` + `request_manual_sourcing` (RD-94). None is "the first"
+one — don't write that claim into a manifest, a commit message or this file.
+
+The two sourcing requests are what widened the annotation here, and the reasoning is
+recorded so it is not re-litigated. The call **creates** rather than destroys, which is the
+counter-argument, and it loses: submitting the request charges one
+auto-order credit immediately, the charge cannot be refunded and the request cannot be
+cancelled, so it is irreversible in the way that matters to the user. The annotation is
+also what *buys* two things nothing else provides — the host's own confirmation prompt,
+which RD-100's `ask_user` discipline leans on rather than reinventing, and playbook lints
+4 and 5, which fire **only** on `destructiveHint: true` and are what force a non-final
+destructive step to declare `incomplete_alone` and a non-idempotent one to name a
+`verify_with`. Left at `false`, neither would protect the one call in the sourcing chain
+that spends non-refundable money — the exact step where a missing `verify_with` produces a
+double charge.
+
+The consequence for RD-110: a `create_1688_sourcing_request` step **must** carry
+`incomplete_alone` and an `on_failure` block naming `list_store_quotes` as `verify_with`,
+or the server will not boot — and the same now holds for any playbook step calling
+`request_manual_sourcing`.
+
+**`request_manual_sourcing` is annotated the same way, and RD-94's text says the
+opposite.** The ticket called it "a free request" and set `destructiveHint: false` on
+that basis. The upstream disagrees: `POST /store_quotes/{store_id}/product/{id}/request`
+and the 1688 async trigger both route into `quote_manager.create_and_request_store_quote`,
+whose own docstring reads "User is charged for 1 AO credit", and the charge is applied
+whenever the product has no existing quote and no orders. So the ticket's `false` rested
+on a fact that does not hold, and the reasoning above applies to this tool word for word —
+it ships `true`. **Don't "restore" it to match the ticket text; the ticket is what was
+corrected.**
+
+The annotation is not the whole guard either, because a host prompt says "this tool is
+destructive" and never what it costs. The *price* is in the first paragraph of both tools'
+`notes`, and `test_both_credit_spending_writes_state_the_price` pins it there.
+
+Two consequences to keep in view. Whether a credit is charged depends on the *product*
+(no existing quote, no orders), so a tool that sometimes charges is annotated as though it
+always does — the alternative is an annotation that is right on average and wrong when it
+matters. And `link_quoted_product` / `set_store_quote_shipping_option` deliberately stay
+`false`: they spend nothing and are re-runnable, and a hint on every write teaches a user
+to click through the prompt, which costs the hint its meaning on the two calls that need
+it.
 
 Three rules for the next one:
 
@@ -931,8 +972,35 @@ reads them.
 - **A destructive operation sets both hints and says in `notes` what cannot be undone**
   (RD-98). D5 accepts one hint, so the lint cannot catch a `destructiveHint` that was
   simply left out — and without it no client asks the user anything. The rules, and the
-  two operations this applies to, are in **Tools are data → Destructive operations**;
+  four operations this applies to, are in **Tools are data → Destructive operations**;
   there is no "first destructive tool" here to claim.
+- **A tool that spends money says the price on its own descriptor, and the hint does not
+  say it for you** (RD-94). `create_1688_sourcing_request` and `request_manual_sourcing`
+  each charge a non-refundable auto-order credit, and both carry `destructiveHint: true`
+  — but a host prompt says "this tool is destructive" and never what it costs, so the
+  `notes` are still the only place the user can learn the price before agreeing. The
+  price, the non-refundability and the fact that the request cannot be cancelled are in
+  the first paragraph of both, and `test_both_credit_spending_writes_state_the_price`
+  keeps them there. Don't move that sentence down the notes to make room: a model reads
+  the opening of a description far more reliably than its middle, and this is the one
+  sentence whose absence costs the user money.
+- **Set the hint from what the call does, not from what the ticket says it does**
+  (RD-94). RD-94 specified `destructiveHint: false` on `request_manual_sourcing` because
+  it believed the request was free; the upstream charges the same credit as the 1688
+  trigger through the same manager method. The annotation follows the charge. Two
+  readings worth keeping: an acceptance criterion resting on a fact the implementation
+  disproves is a finding, not a constraint — correct the ticket rather than the code;
+  and a tool that charges only *sometimes* (here, only when the product has no existing
+  quote and no orders) is annotated as though it always does, because an annotation that
+  is right on average is wrong exactly when it matters.
+- **A write with no idempotency key documents the read that establishes whether it
+  landed** (RD-94). "Retry on failure" is the reflex, and on `create_1688_sourcing_request`
+  it is how a user gets charged twice — a transport failure carries no response body at
+  all, so nothing in the error says whether the request was accepted. The rule the notes
+  carry, and which RD-110 will repeat as `on_failure` data: read `list_store_quotes`
+  filtered on `product_id` first, and treat a returned request as proof the write landed.
+  Keep both copies — tier 2 is the contract and tier 3 arrives at the moment of the
+  decision, which prose in `notes` cannot guarantee.
 - **Transport is stateless** (`stateless=True`) by design — production runs many
   replicas × workers, so no MCP session is pinned to a worker. Don't reintroduce
   session state. This is also why the playbook hint has no "show it once" dedup: there
@@ -1199,6 +1267,40 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   `notes` also carry the consequence nobody expects — an empty `results` is **ambiguous**
   on its own, meaning "never submitted" before the write and "submitted and rolled back"
   after it. `tests/mcp_server/test_polling_conventions.py` pins both halves.
+- **The async 1688 trigger checks nothing, and its rollback can delete a quote it did not
+  create** (RD-94, found in review). `alibaba-1688-request-async` only queues the task
+  and answers `{"status": "ok"}`. The add-on check, the variations check, the credit
+  check and the one-quote-per-product check all run inside the task, so none of them
+  can reach the caller as an error — each looks like a request that never appeared.
+  Worse, the task's `except` block rolls back `get_store_quote_by_item(product_id)`,
+  which is *whatever* quote the product has. So submitting against a product that
+  already has a quote from another supplier fails with "Quote for this product already
+  exists" and then **deletes that existing, paid-for quote**. Against an existing 1688
+  quote it is not refused either: it runs again without a charge and re-links. The
+  notes say both, and must keep saying them until AutoDSApi rolls back only a quote the
+  task created. Don't "restore" the notes to "a second submission is refused" — that
+  was the first version, and it was wrong. `request_manual_sourcing` is synchronous and
+  does not share this failure.
+- **One call creates the sourcing request *and* links the variations, and the endpoint
+  name says nothing about the second half** (RD-94). `alibaba-1688-request-async` queues
+  a task that calls `create_and_request_store_quote` and then queues
+  `link_quoted_product` with the `variations_match` the *request* body carried — so
+  `link_quoted_product` is a re-link tool, never the second step of the submission. An
+  agent told otherwise pairs the variations twice, and the second attempt lands on a
+  request whose status has moved. The notes on both tools say which is which, and it is
+  the least obvious thing about the whole flow.
+- **A variation left out of `variations_match` is not an error, it is a mixed-supplier
+  product** (RD-94). `item_id_by_sku` / `item_id_by_variant_id` are built from the entries
+  that are present and nothing complains about the rest; the variations with no entry keep
+  their old supplier, so the product ends up half automated and half not, answering 200
+  the whole way. The schema can only catch the *ambiguous* form — more than one entry with
+  neither `sku` nor `variant_id_on_site`, which `VariationsMatchModel`'s root validator
+  rejects upstream and the `body_schema`'s `if`/`then` rejects here first. It is `if`/`then`
+  and not an `anyOf` over the whole object on purpose: both accept the same bodies, but only
+  `if`/`then` makes the error name the entry (`variations_match/<index>`) instead of echoing
+  the whole `link` object back. Completeness is not
+  expressible as a schema rule at all, because nothing in the request says how many
+  variations the product has, so it lives in the `notes`.
 - **Two of the store-quote reads answer an error, not an empty result, before the offer
   arrives** (RD-93). `get_store_quote_versions` reads `store_quote.quote.item_id_on_site`
   and `quote_id` is null until an offer is attached, so on `new` / `in_progress` it

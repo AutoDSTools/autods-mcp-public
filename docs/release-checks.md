@@ -56,8 +56,15 @@ the run:
    it however they like ("the Shopify store", a store name, a URL). They do *not*
    need to know the id — P5 resolves the description against their store list.
    Staging only.
+3. **The sourcing checks W6–W9, separately** (RD-94) — they each spend one
+   non-refundable auto-order credit on the authorized account for a request nobody
+   can cancel, so consent to "writes" is not consent to these. Ask in the same
+   message, name the account and the charge, and ask for the fixtures P11 needs at
+   the same time: an active product with variations, a 1688 offer id and one of its
+   variation ids, plus a second product for W7. A "no" or a shrug is
+   `skipped (no explicit go-ahead for credit-spending checks)`.
 
-If the user already answered either of these in their request, don't re-ask it.
+If the user already answered any of these in their request, don't re-ask it.
 
 Then hand over **C1 — unconditionally, and for both environments.** It is not a
 question, so it is not part of the round: the run is supervised on a developer
@@ -581,6 +588,15 @@ established)` — **not** "zero credits". The entry is omitted both when the bal
 genuinely zero and when the balance source didn't answer inside the timeout, and the
 response cannot tell the two apart. Either way, treat a later insufficient-credits
 refusal as an account gap, not a release regression.
+*What it now gates* (RD-94): **W6** and **W7** each spend one of these credits, and
+neither charge can be refunded or cancelled. Both are `skipped (no spendable
+auto-order balance established)` when this check could not establish a balance, and
+both additionally need `orders_processor` active from P4. Without the Order
+Processing add-on, W7 answers `upstream_client_error`, which is the entitlement
+speaking and not a broken tool. W6 answers `{"status": "ok"}` anyway, because it
+checks nothing until later, and the request then never appears in W8. Establish both here, so a sourcing check is never
+started against an account that cannot pay for it. The *subject* those credits
+would be spent on is **P11**, at the end of this section.
 
 **P9 — A client that renders widgets.** The only fixture in P that is not an
 account property: R15.2 needs a **claude.ai web** session with this environment's
@@ -613,6 +629,27 @@ result at `ready` or `linked` will do, and is the one to record.
 *Why it matters:* the two reads that need an offer answer an error, not an empty
 result, on a request that has none — so running them against the wrong fixture files
 a documented refusal as a broken tool.
+
+**P11 — A product to source, and the offer to source it from** (only if W6 will
+run). W6 needs three things that no other check produces: an AutoDS product in the
+P5 store that is **active** and has **exactly one variation**, a 1688 offer id, and
+one of that offer's variation ids. One variation, because W6 sends a single
+`variations_match` entry with no AutoDS id: on a product with several variations
+that entry links nothing, and nothing reports it. The credits it would spend are P8's.
+*Fixture:* the product id, the bare offer id (e.g. `992906129243`), and the offer's
+variation id (`<offer>_<supplier variation>`, e.g. `992906129243_6280495563187`).
+*Where they come from:* the product from `list_products` with `product_status: 2` on
+the P5 store; the two 1688 ids from the human, since nothing in this server
+searches 1688 offers yet. **Ask for them in the opening round or not at all** — do
+not stop mid-run.
+*Check the product has no sourcing request already:* `list_store_quotes` filtered on
+`product_id`. A non-empty `results` means W6 must not run on it — it would not be
+refused, and against a request from another supplier it deletes that request — so
+pick another product or record `skipped (the product already has a sourcing
+request)`.
+*If any of the three is missing:* W6 is `skipped (no product/offer pair to source)`.
+W7 is independent and needs only a **second** such product, because one product
+carries at most one sourcing request.
 
 ---
 
@@ -1084,6 +1121,90 @@ second attempt answers `upstream_client_error` (already ended, or not found) rat
 than removing anything else. That is what makes a retry after an ambiguous failure
 safe, and it is a nice-to-have rather than a required step.
 
+### W6–W9 — the sourcing writes (RD-94): a second gate, because they spend money
+
+**Ask for these separately, in the opening round.** The rest of W mutates staging
+data this run can clean up. W6 and W7 each charge **one non-refundable auto-order
+credit** against the authorized account and create a request nobody can cancel —
+so "yes, you may run the write checks" is *not* consent to run these. Get it in so
+many words, naming the account and the credit, or mark W6–W9 `skipped (no explicit
+go-ahead for credit-spending checks)` and carry on. P4 (`orders_processor` active)
+and P8 (a spendable balance) must both have resolved as well.
+
+**W6 — `create_1688_sourcing_request`, on the P11 product.**
+`{"store_id": <the P5 id as a NUMBER>, "product_id": "<the P11 product>",
+"body": {"alibaba_1688_id": "<the bare offer id>", "add_to_unfulfilled_orders":
+false, "link": {"variations_match": [{"item_id_on_site": "<the offer variation
+id>"}]}}}`
+→ `{"status": "ok"}`, immediately. **That is the request being accepted, not done** —
+and it is also the moment the credit is spent.
+
+The symptom this guards: a user is told their product is sourced when nothing was
+sourced, or is charged twice for one request.
+
+Three shapes are easy to get wrong and each is refused rather than guessed:
+`alibaba_1688_id` is the **bare** offer id while `item_id_on_site` is the offer id,
+an underscore and the supplier's variation id; `add_to_unfulfilled_orders` has no
+default, so omitting it is `invalid_arguments` naming the field; and a
+`variations_match` with more than one entry needs `sku` or `variant_id_on_site` on
+each entry, refused locally otherwise. All three refusals are the schema gate
+working — record them as such.
+
+**W7 — `request_manual_sourcing`, on a second product.**
+`{"store_id": <the P5 id as a NUMBER>, "product_id": "<a second active product>"}` —
+no body. → the sourcing request record, with an `id` and a `status`.
+This one spends a credit too — it looks free (no body, one call, and the ticket that
+specified it said so), which is why it carries `destructiveHint: true` alongside the
+1688 trigger. Two things to check and report, because a host prompt announces that a
+tool is destructive and never what it costs: that your client actually asked you to
+confirm before the call ran, and that the price is stated in the tool's own `notes`
+as read back off the handshake.
+*Skip it* when only one product is available — one product carries one sourcing
+request, so W6 and W7 cannot share a subject.
+
+**W8 — Poll W6 to a conclusion, and read the fourth outcome correctly.**
+`list_store_quotes` with `{"store_ids": "<the P5 id>", "body": {"limit": 1,
+"filters": [{"name": "product_id", "op": "=", "value": "<the P11 product>"}]}}`, on
+the documented cadence — first poll ~10 s after W6, then every ~15 s, at most 10
+attempts (~2.5 min).
+
+Four outcomes, and three of them are a pass for the release:
+- `linked` — the flow completed.
+- still `new` / `in_progress` / `ready` at the ceiling → `inconclusive (still
+  <status> after N attempts / <elapsed>)`. A slow request is not a broken one.
+- `cannot_be_sourced` → the product cannot be sourced this way. An account answer,
+  not a regression.
+- **`results` comes back empty** → the request was accepted and then rolled back,
+  and the record was deleted. That is the documented failure mode with no failure
+  status, and the check passes if the *tool text* let you read it that way. Record
+  it as a failed sourcing request, never as "still working", and never resubmit.
+
+**Never call W6 again in the same run**, whatever W8 says. A second submission
+risks a second charge, and if the first one landed it is not refused either: it
+runs again against the request the first one created.
+
+**W9 — The two free sourcing writes, on a request that already has an offer.**
+Only runnable when W8 reached `ready`/`linked`, or when P10 found an older request
+in one of those states; otherwise `skipped (no sourcing request with an offer)`.
+- `list_store_quote_shipping_options` for the request's `default_country`, then
+  `set_store_quote_shipping_option` with the **`id` already carrying
+  `is_chosen: true`** — re-choosing what is in force exercises the call and leaves
+  the request as it was found. → the sourcing request record back.
+- `link_quoted_product` only if the human named **both** the sourcing request and
+  a supplier variation to re-link to; it rewrites a product's supplier
+  configuration, so it does not run on a guess, and never on whichever request
+  happens to come first. Before the call, read the request with `get_store_quote`
+  and confirm the variation is one of its `buy_item.variations[].item_id_on_site`
+  — the upstream does not check that the pairing belongs to the request's offer.
+  `{"store_id": <the request's own store id>, "product_id": "<the request's
+  product_id>", "body": {"store_quote_id": <the request id>,
+  "add_to_unfulfilled_orders": false, "variations_match": [{"item_id_on_site":
+  "<that variation>"}]}}`
+
+Both refuse a request without an offer (`new` / `in_progress`) as
+`upstream_client_error`. That is the documented answer, not a fault — record it as
+a pass for the check and as evidence the status guard works.
+
 ---
 
 ## O — Observability (after the release, before you call it green)
@@ -1318,6 +1439,12 @@ An unattended run ends with four things, in this order:
 
 When W ran, state the store it wrote to (id, name, site) and what it created. A
 write section that reports only `pass` leaves nobody able to clean up.
+
+When W6 or W7 ran, say so explicitly and **state how many auto-order credits the
+run spent** and on which products, whatever the outcome was. Neither charge can be
+refunded and neither request can be cancelled, so the account holder has to be able
+to read the cost off the report rather than off their balance. A W6 that ended at
+W8's empty-`results` outcome still spent one.
 
 **R15.2 is never "implied" by R15.1.** If the rendering half was not run by a
 person in claude.ai web, the report says so in item 4 — "the product grid was not

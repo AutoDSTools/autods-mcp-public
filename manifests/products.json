@@ -2,7 +2,7 @@
   "server_name": "autods-products",
   "domain": "products",
   "generated_at": "2026-02-11T18:38:32.375200+00:00",
-  "operations_count": 4,
+  "operations_count": 5,
   "top_typed_operations_count": 0,
   "instructions": "",
   "operations": [
@@ -519,6 +519,124 @@
         "title": "Delete Product",
         "readOnlyHint": false,
         "destructiveHint": true
+      }
+    },
+    {
+      "operation_id": "link_quoted_product",
+      "method": "POST",
+      "path": "/products/{store_id}/product/{product_id}/link_quoted_product",
+      "summary": "Re-link one product's variations to the supplier offer attached to its sourcing request.",
+      "description": "",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "store_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "int",
+          "description": "ONE AutoDS store id — the store the product is in. Not the comma-separated `store_ids` the list tools take."
+        },
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "The AutoDS product id: the 24-character hex `id` list_products returns."
+        }
+      ],
+      "has_json_body": true,
+      "request_body_required": true,
+      "is_top_typed_tool": false,
+      "notes": "Points one product's variations at the supplier offer attached to its sourcing request, which makes that offer the product's supplier. It spends no credit and can be called again with different pairings.\n\nIt is NOT needed after create_1688_sourcing_request — that one call creates the request and links the variations together. This tool is for re-linking afterwards: correcting which product variation maps to which supplier variation, or picking the pairings up again after the request was switched to a different quoted offer in the AutoDS web app.\n\nThe request must already have a supplier offer — status `ready` or `linked`. On `new` or `in_progress` the call is refused as `upstream_client_error` saying the request is in the wrong status; that is the documented answer, not a fault, so read the status with list_store_quotes first. A request on another store answers not-found. The account needs an active Order Processing add-on; without it the call answers `upstream_client_error`, which here means the add-on rather than a bad request.\n\n`store_quote_id` is the sourcing request's own integer id: the `id` of a list_store_quotes result. In `variations_match`, `item_id_on_site` is the SUPPLIER variation id — the offer id, an underscore, then the supplier's own variation id, e.g. \"992906129243_6280495563187\" — while `sku` and `variant_id_on_site` identify the AutoDS side of the pair. One of the two is required on every entry once the list has more than one entry. A single entry may omit both, but only on a product with one variation: on a product with several, an entry that names neither links nothing, and nothing reports it. A variation left out of the list keeps whatever supplier it had, so the product ends up sourced from two places at once, half of it automated and half of it not.\n\nThe answer is the product as it now stands, with its new supplier item; `ok` is transport-level only. `add_to_unfulfilled_orders: true` also re-points the product's orders that are still waiting to be fulfilled at the new supplier, and that part is finished off in the background, so it is not done when this call returns.",
+      "annotations": {
+        "title": "Link Quoted Product",
+        "readOnlyHint": false,
+        "destructiveHint": false
+      },
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "store_quote_id": {
+            "type": "integer",
+            "description": "The sourcing request's own integer id: the `id` of a list_store_quotes result."
+          },
+          "add_to_unfulfilled_orders": {
+            "type": "boolean",
+            "description": "Required, and there is no default — decide it for this product and say which you chose. true also re-points the product's orders that are still waiting to be fulfilled at the new supplier. false leaves those orders pointing where they already point. For a product with no unfulfilled orders the flag changes nothing."
+          },
+          "variations_match": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One entry per product variation being linked. A variation with no entry keeps its old supplier.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item_id_on_site": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The SUPPLIER variation id: the offer id, an underscore, then the supplier's own variation id, e.g. \"992906129243_6280495563187\"."
+                },
+                "sku": {
+                  "type": "string",
+                  "description": "The AutoDS variation's SKU. Either this or `variant_id_on_site` identifies the AutoDS side of the pair."
+                },
+                "variant_id_on_site": {
+                  "type": "string",
+                  "description": "The AutoDS variation's id on the sell channel. The alternative to `sku`."
+                }
+              },
+              "required": [
+                "item_id_on_site"
+              ]
+            }
+          }
+        },
+        "required": [
+          "store_quote_id",
+          "add_to_unfulfilled_orders",
+          "variations_match"
+        ],
+        "if": {
+          "properties": {
+            "variations_match": {
+              "minItems": 2
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "variations_match": {
+              "items": {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "sku": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "sku"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "variant_id_on_site": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "variant_id_on_site"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
     }
   ],

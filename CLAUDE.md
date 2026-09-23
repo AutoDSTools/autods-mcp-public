@@ -1260,7 +1260,8 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
 - **A failed async sourcing request has no error status — the record disappears**
   (RD-91). `alibaba_1688_request` rolls back by *deleting* the store quote and reports
   the error only over SSE, which this server cannot see. So a poller must treat "the
-  quote that was there is gone" (or never appeared) as failure; waiting for
+  quote that was there is gone" (or never appeared by the poll's ceiling — an empty
+  *early* poll only means the task has not created the record yet) as failure; waiting for
   `cannot_be_sourced` waits forever. Any tool that documents that chain has to say so —
   and note `{"status": "ok"}` from the trigger is the task being *queued*, nothing more.
   RD-93 landed the read side: `list_store_quotes` is where that reading lives, and its
@@ -1301,6 +1302,13 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   the whole `link` object back. Completeness is not
   expressible as a schema rule at all, because nothing in the request says how many
   variations the product has, so it lives in the `notes`.
+- **`linked` is set whatever the pairing matched, so it is not proof of a link.**
+  `link_product` sets `LINKED` unconditionally, and `_set_buy_items` skips a variation
+  whose `item_id_on_site` is not in the offer, leaving an active product on its old
+  supplier. A mistyped offer variation id therefore ends at `linked` with nothing
+  linked, 200 the whole way. The only evidence is the product itself: its variations'
+  `active_buy_item.item_id_on_site`, read with `list_products`. The 1688 tool's `notes`
+  and release check W8 both say so; don't let either grade `linked` alone as success.
 - **Two of the store-quote reads answer an error, not an empty result, before the offer
   arrives** (RD-93). `get_store_quote_versions` reads `store_quote.quote.item_id_on_site`
   and `quote_id` is null until an offer is attached, so on `new` / `in_progress` it

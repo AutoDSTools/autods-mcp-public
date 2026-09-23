@@ -875,7 +875,9 @@ choice here:
   signal, not a lost record. A request that fails is deleted rather than marked
   failed, and the error is reported on a channel this server cannot see — so a
   request that was there on an earlier poll and is gone now has failed, and one
-  that never appears after a `{"status": "ok"}` write failed too. The credit was
+  that never appears by the last poll (about 2.5 min) after a `{"status": "ok"}`
+  write failed too. An empty answer on the first poll or two is only too early:
+  the record is created after the request waits in a queue. The credit was
   still spent — unless the failure was a missing add-on or too few credits, which
   fail before the charge and look exactly the same. Do not resubmit without asking
   the user: the second attempt risks a second charge, and a submission against a

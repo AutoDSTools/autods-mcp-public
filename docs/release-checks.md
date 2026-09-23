@@ -61,8 +61,15 @@ the run:
    can cancel, so consent to "writes" is not consent to these. Ask in the same
    message, name the account and the charge, and ask for the fixtures P11 needs at
    the same time: an active product with variations, a 1688 offer id and one of its
-   variation ids, plus a second product for W7. A "no" or a shrug is
+   variation ids. A "no" or a shrug is
    `skipped (no explicit go-ahead for credit-spending checks)`.
+4. **W7, as its own question** — in the same message, and it only counts if the
+   answer to 3 is yes. W7 is not like W6:
+   it sends a real sourcing request to the outside sourcing supplier, whose people
+   work it by hand. That happens even on staging, on every run that includes W7. So a
+   yes to 3 is not a yes to W7. Ask whether W7 must be included in this run, say what
+   it does, and ask for the second product it needs. A "no" or a shrug is
+   `skipped (W7 not requested for this run)`.
 
 If the user already answered any of these in their request, don't re-ask it.
 
@@ -1131,13 +1138,20 @@ many words, naming the account and the credit, or mark W6–W9 `skipped (no expl
 go-ahead for credit-spending checks)` and carry on. P4 (`orders_processor` active)
 and P8 (a spendable balance) must both have resolved as well.
 
+The P8 balance is also the **baseline for the charge check** at the end of W8. Take it
+from P4 as late as possible, right before W6, so that nothing else in this run has
+moved it since.
+
 **W6 — `create_1688_sourcing_request`, on the P11 product.**
 `{"store_id": <the P5 id as a NUMBER>, "product_id": "<the P11 product>",
 "body": {"alibaba_1688_id": "<the bare offer id>", "add_to_unfulfilled_orders":
 false, "link": {"variations_match": [{"item_id_on_site": "<the offer variation
 id>"}]}}}`
-→ `{"status": "ok"}`, immediately. **That is the request being accepted, not done** —
-and it is also the moment the credit is spent.
+→ `{"status": "ok"}`, immediately. **That is the request being queued, not done.**
+The credit is not spent at this moment either. A background job spends it later, after
+it has checked the add-on and the product and before it creates the request record.
+So a job that stops before that point spends nothing. A job that fails *after* it
+spends nothing back: the record is deleted and the credit stays spent.
 
 The symptom this guards: a user is told their product is sourced when nothing was
 sourced, or is charged twice for one request.
@@ -1150,7 +1164,10 @@ default, so omitting it is `invalid_arguments` naming the field; and a
 each entry, refused locally otherwise. All three refusals are the schema gate
 working — record them as such.
 
-**W7 — `request_manual_sourcing`, on a second product.**
+**W7 — `request_manual_sourcing`, on a second product** (only if the human asked for
+W7 in the opening round, question 4; otherwise `skipped (W7 not requested for this
+run)`). Unlike W6, this request goes to the outside sourcing supplier, and people
+there work it by hand — from staging too. That is why it has its own question.
 `{"store_id": <the P5 id as a NUMBER>, "product_id": "<a second active product>"}` —
 no body. → the sourcing request record, with an `id` and a `status`.
 This one spends a credit too — it looks free (no body, one call, and the ticket that
@@ -1162,22 +1179,94 @@ as read back off the handshake.
 *Skip it* when only one product is available — one product carries one sourcing
 request, so W6 and W7 cannot share a subject.
 
-**W8 — Poll W6 to a conclusion, and read the fourth outcome correctly.**
+**W8 — Poll W6 to a conclusion, and read the end states correctly.**
 `list_store_quotes` with `{"store_ids": "<the P5 id>", "body": {"limit": 1,
 "filters": [{"name": "product_id", "op": "=", "value": "<the P11 product>"}]}}`, on
 the documented cadence — first poll ~10 s after W6, then every ~15 s, at most 10
 attempts (~2.5 min).
 
-Four outcomes, and three of them are a pass for the release:
-- `linked` — the flow completed.
-- still `new` / `in_progress` / `ready` at the ceiling → `inconclusive (still
-  <status> after N attempts / <elapsed>)`. A slow request is not a broken one.
+Five readings. `ready` at the ceiling is a fail and so is a `linked` the product does
+not confirm; the others are a pass or `inconclusive`:
+- `linked` — the request finished. **This is not yet proof that anything was
+  linked**, so confirm it on the product (below) before recording a pass.
+- still `new` / `in_progress` at the ceiling → `inconclusive (still <status> after N
+  attempts / <elapsed>)`. A slow request is not a broken one.
+- still `ready` at the ceiling → **fail** (see below). On this path `ready` is not a
+  slow request.
 - `cannot_be_sourced` → the product cannot be sourced this way. An account answer,
   not a regression.
-- **`results` comes back empty** → the request was accepted and then rolled back,
-  and the record was deleted. That is the documented failure mode with no failure
-  status, and the check passes if the *tool text* let you read it that way. Record
-  it as a failed sourcing request, never as "still working", and never resubmit.
+- **The request disappeared, or never appeared by the ceiling** → the request was
+  accepted and then rolled back, and the record was deleted. That is the documented
+  failure mode with no failure status, and the check passes if the *tool text* let
+  you read it that way. Record it as a failed sourcing request, never as "still
+  working", and never resubmit.
+
+**An empty `results` on an early poll is not yet a disappeared request.** The
+background job creates the record only after it has read the product, counted its
+orders and spent the credit, and it waits in a queue before it starts. So the first
+poll or two can simply come too early. Decide by timing:
+- a request you saw on an earlier poll and cannot find now → failed, stop polling;
+- empty on every poll up to the ceiling → failed, record it as
+  `failed (the request never appeared in N attempts / <elapsed>)`;
+- empty on an early poll and present on a later one → normal, keep polling.
+
+On staging a request that never appears is not, by itself, proof of a regression in
+this release: a staging background job can also be lost in the shared queue before
+any worker of this environment runs it. Report it as a failed sourcing request and
+say that the cause is not established.
+
+**Why `ready` at the ceiling is a fail.** On the 1688 path no person works the
+request: the background job attaches the offer itself, and then queues the link step
+at once. So `ready` means the offer arrived and the link step has not finished. After
+~2.5 min that means the link step failed, or its task was lost before any worker ran
+it. The link step reports its error only on a channel this server cannot see, and
+nothing sets a different status, so the request stays at `ready` for ever. (In the
+web app `ready` is a normal state, because a user links the product there by hand.
+Here the link was part of the W6 call, so it is not.)
+
+Before recording it, read the product exactly as in *Confirm `linked` on the product*
+below, and report what you found:
+- the variation still carries the old supplier's id → `failed (offer attached, link
+  did not happen; link step failed or its task was lost — cause not established)`;
+- the variation already carries the W6 offer variation id → the link landed and only
+  the status has not moved yet. Poll once more; if it is still `ready`, record
+  `failed (product linked, status left at ready)`.
+
+Do not re-run W6 to repair it. The human can link the product with
+`link_quoted_product` (W9), using the W6 pairing. On staging a lost task is a known
+cause, so say that the cause is not established rather than blaming the release.
+
+**Confirm `linked` on the product.** The upstream sets `linked` even when the
+variation pairing matched nothing. For example, if the offer variation id is not one
+of the offer's variations, the product keeps its old supplier and the request still
+reads `linked`. So read the product with `list_products` on the P5 store,
+`product_status: 2`, filtered on `id` (`op` `=`, `value_type` `object_id`), with a
+projection that keeps `variations.active_buy_item.item_id_on_site` and
+`main_picture_url`. The P11 product's one variation must now carry the W6 offer
+variation id (`<offer>_<supplier variation>`) as its `active_buy_item.item_id_on_site`.
+- It does → pass.
+- It still carries the old supplier's id → **fail**: `linked` reported a link that did
+  not happen. The symptom this guards is a user told their product is sourced when
+  nothing was sourced — the one W6 names.
+
+Do not use `get_product_by_id` for this: it reads the marketplace catalogue, not the
+products in a store.
+
+**Last, check the charge — once, after W6 and W7 are both done.** Read P4's call
+again (`get_user_subscription`) and take the `amount_of_credits` for `credit_type`
+`"1"`, exactly as P8 did. Compare it with the P8 baseline:
+- Expected: the balance fell by **at most one credit per request W6 and W7 sent**.
+  A request is charged only when its product had no orders, so a smaller drop can be
+  correct. A W6 that disappeared may or may not have been charged; both are
+  consistent.
+- Fell by more than that → **fail**: a request was charged twice. This is the
+  "charged twice" symptom W6 guards, and this is the only step that measures it.
+- The `"1"` entry is missing now, or was missing at P8 → `not verified (no auto-order
+  balance to compare)`. A missing entry is not a zero balance (P8).
+
+The test account can be used by other people at the same time, and anything they do
+moves the same balance. So a mismatch is a finding to look into, not proof on its
+own: report both numbers and the requests this run sent.
 
 **Never call W6 again in the same run**, whatever W8 says. A second submission
 risks a second charge, and if the first one landed it is not refused either: it
@@ -1443,8 +1532,10 @@ write section that reports only `pass` leaves nobody able to clean up.
 When W6 or W7 ran, say so explicitly and **state how many auto-order credits the
 run spent** and on which products, whatever the outcome was. Neither charge can be
 refunded and neither request can be cancelled, so the account holder has to be able
-to read the cost off the report rather than off their balance. A W6 that ended at
-W8's empty-`results` outcome still spent one.
+to read the cost off the report rather than off their balance. A W6 whose request
+disappeared may or may not have spent one; give the W8 balance comparison, which is
+the only thing that can tell. When W7 ran, also give the id of the request it sent to
+the sourcing supplier, since people there will work on it.
 
 **R15.2 is never "implied" by R15.1.** If the rendering half was not run by a
 person in claude.ai web, the report says so in item 4 — "the product grid was not

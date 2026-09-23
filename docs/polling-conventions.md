@@ -128,7 +128,7 @@ past the ceiling above: it is reported as submitted, not polled to a ceiling.
 | `new` | not final — keep polling |
 | `in_progress` | not final — keep polling |
 | `ready` | quoted, not yet linked — keep polling |
-| `linked` | final; the flow is complete |
+| `linked` | final; the request is finished (see below — this is not proof of a link) |
 | `cannot_be_sourced` | final; this product cannot be sourced this way |
 
 **The failure mode has no status.** If `tasks/quote_tasks.py:alibaba_1688_request`
@@ -136,8 +136,29 @@ raises, it calls `rollback_store_quote_on_error`, which **deletes** the store qu
 and reports the error only through an SSE event — a channel this server cannot see.
 So a failed request does not surface as `cannot_be_sourced`; it surfaces as the quote
 **not being there**. Any tool documenting this chain must say so: a quote that was
-present and is now absent, or one that never appears at all, is a failure and not
-"still working". This is the concrete reason the notes must say *check the status,
+present and is now absent, or one that has still not appeared when the poll reaches
+its ceiling, is a failure and not "still working".
+
+An empty result on an **early** poll is not that failure yet. The task creates the
+record only after it has read the product, counted its orders and charged the
+credit, and it waits in the queue before it starts, so the first poll can simply
+come too early. Only two readings are a failure: *seen, then gone*, and *never seen
+by the ceiling*. Treating the first empty poll as a failure reports a working request
+as a failed one — and invites a resubmit, which is the double-charge risk above.
+
+**`linked` does not prove the link.** `link_product` sets `LINKED` whatever the
+pairing matched (`AutoDSApi/bl/manager/quote_manager.py`). `_set_buy_items`
+(`AutoDSApi/bl/manager/product_manager.py`) skips a variation whose supplier variation
+id is not in the offer, and an active product keeps that variation on its old
+supplier. So a wrong `item_id_on_site` gives `linked` with nothing linked. The status
+says the request finished. Only the product says whether its variations now carry
+the offer's variation ids — read it with `list_products`, which is what release check
+W8 does.
+
+**The credit is charged before the record exists, and a rollback does not refund it.**
+`_charge_ao_credits` runs before `create_store_quote`, and `rollback_store_quote_on_error`
+only deletes the record. So a request that disappears may have cost a credit. Whether
+it did cannot be read from the store quote; only the auto-order balance shows it. This is the concrete reason the notes must say *check the status,
 don't assume success* — `{"status": "ok"}` on the trigger means nothing about the
 outcome.
 

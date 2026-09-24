@@ -16,12 +16,19 @@
       "parameters": [],
       "has_json_body": false,
       "request_body_required": false,
-      "notes": "Resolves the current user only (not other users). The response is a single-element list with the caller's user record. Consume only `id`, `name`, and `email`. All other fields (account status, onboarding/feature flags, store ids, timestamps, etc.) are internal service attributes — do not rely on, reason about, or surface them; they may change without notice.",
+      "notes": "Resolves the current user only (not other users). The response is a single-element list with the caller's user record. Consume only `id`, `name`, and `email`. All other fields (account status, onboarding/feature flags, store ids, timestamps, etc.) are internal service attributes — do not rely on, reason about, or surface them; they may change without notice. This server removes the record's credential fields before answering, and the `omitted` field beside `data` lists them.",
       "annotations": {
         "title": "Get Current User",
         "readOnlyHint": true,
         "destructiveHint": false
-      }
+      },
+      "omit": [
+        {
+          "path": "*.intercom_user_jwt",
+          "reason": "credential",
+          "detail": "A signed Intercom user token (HS256, carries user_id and email). Nothing in this server reads it; identity.py calls the dispatcher, which is not trimmed."
+        }
+      ]
     },
     {
       "operation_id": "get_user_subscription",

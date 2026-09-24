@@ -1,0 +1,140 @@
+{
+  "_comment": [
+    "One representative upstream payload per operation that declares an `omit` block (RD-146).",
+    "Shapes were captured from staging on 2026-09-24 and trimmed to a few items and to the",
+    "fields the block addresses, plus the fields that must survive it. They exist so that every",
+    "declared path is checked against the payload the upstream really returns: a path that",
+    "passes the boot lint and matches nothing removes nothing, and nobody notices.",
+    "Credential values are FAKE — never paste a real token into this file.",
+    "Adding an omit block to an operation means adding its sample here."
+  ],
+  "get_similar_products": {
+    "results": [
+      {
+        "_id": "6862c98dcc7b15769464e1fc",
+        "title": "Proart Display PA278QV 27\" WQHD Monitor",
+        "img_url": "https://cdn.shopify.com/s/files/1/0657/2841/3765/files/81CFn-NfutL._AC_SL1500.jpg?v=1751304256",
+        "images": [
+          "https://cdn.shopify.com/s/files/1/0657/2841/3765/files/81CFn-NfutL._AC_SL1500.jpg?v=1751304256",
+          "https://cdn.shopify.com/s/files/1/0657/2841/3765/files/81PLP-biSZL._AC_SL1500.jpg?v=1751304255"
+        ],
+        "description": "<p>27-inch WQHD monitor, 100% sRGB.</p>",
+        "variations": [
+          {
+            "id": "45371699429491",
+            "variation_details": [{"warehouse": "US", "in_stock": true, "in_stock_qty": 99, "price": 308.35}],
+            "shipping_array": [{"warehouse": "US", "value": [{"price": 2, "time": 11, "extras": {}}]}],
+            "attributes": {"Title": "Default Title"}
+          }
+        ],
+        "product_details": {"min_price": 308.35, "max_price": 308.35, "min_shipping_time": 8, "max_shipping_time": 11},
+        "site_name": "private_suppliers",
+        "supplier_name": "Maksym supplier Electronics Accessories & Supplies"
+      },
+      {
+        "_id": "683ecbd140efd2de9ff06004",
+        "title": "Apple 2024 MacBook Pro",
+        "img_url": "https://cdn.shopify.com/s/files/1/0657/2841/3765/files/2_a0eddaaf-27cb-4502-9070-7172857c6c57.jpg?v=1748870482",
+        "images": [
+          "https://cdn.shopify.com/s/files/1/0657/2841/3765/files/2_a0eddaaf-27cb-4502-9070-7172857c6c57.jpg?v=1748870482"
+        ],
+        "description": "",
+        "variations": [],
+        "product_details": {"min_price": 1999, "max_price": 1999, "min_shipping_time": 8, "max_shipping_time": 11},
+        "site_name": "private_suppliers",
+        "supplier_name": "Maksym supplier Electronics Accessories & Supplies"
+      }
+    ]
+  },
+  "get_store_quote": {
+    "id": 108,
+    "status": "linked",
+    "sourcing_supplier": "alibaba_1688",
+    "store_id": 5991,
+    "product_id": "6a6e0fcee0f244a5b983be6b",
+    "price": {"min": 0.53, "max": 0.67},
+    "buy_item": {"item_id_on_site": "1031118510015", "title": "Titanium steel cross pendant", "variations": []},
+    "shipping_options": [
+      {"id": "YUNTU_THPHR:2:US:00000000:00000100", "price": 6.12, "title": "Yunexpress Standard THPHR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true},
+      {"id": "YUNTU_THZXR:2:US:00000000:00000100", "price": 6.17, "title": "Yunexpress Battery THZXR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": false},
+      {"id": "YUNTU_THPHR:2:US:00000000:00000100", "price": 6.12, "title": "Yunexpress Standard THPHR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true},
+      {"id": "YUNTU_THZXR:2:US:00000000:00000100", "price": 6.17, "title": "Yunexpress Battery THZXR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": false}
+    ],
+    "default_country": "US",
+    "chosen_shipping_option_id": "YUNTU_THPHR:2:US:00000000:00000100",
+    "quote_id": 566,
+    "shipping_options_stats": {
+      "min_price": 6.12,
+      "max_price": 6.17,
+      "min_days": 10,
+      "max_days": 14,
+      "chosen_option_id": "YUNTU_THPHR:2:US:00000000:00000100",
+      "chosen_option_title": "Yunexpress Standard THPHR"
+    }
+  },
+  "list_store_quotes": {
+    "results": [
+      {
+        "id": 108,
+        "status": "linked",
+        "sourcing_supplier": "alibaba_1688",
+        "product_id": "6a6e0fcee0f244a5b983be6b",
+        "shipping_options": [
+          {"id": "YUNTU_THPHR:2:US:00000000:00000100", "price": 6.12, "title": "Yunexpress Standard THPHR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true},
+          {"id": "YUNTU_THPHR:2:US:00000000:00000100", "price": 6.12, "title": "Yunexpress Standard THPHR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true}
+        ],
+        "shipping_options_stats": {"min_price": 6.12, "max_price": 6.12, "min_days": 10, "max_days": 14, "chosen_option_id": "YUNTU_THPHR:2:US:00000000:00000100", "chosen_option_title": "Yunexpress Standard THPHR"}
+      },
+      {
+        "id": 109,
+        "status": "linked",
+        "sourcing_supplier": "alibaba_1688",
+        "product_id": "6a6e1ff1bfc22e62a7ec3213",
+        "shipping_options": [
+          {"id": "YUNTU_THZXR:2:US:00000201:00000300", "price": 10.51, "title": "Yunexpress Battery THZXR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true},
+          {"id": "YUNTU_THZXR:2:US:00000201:00000300", "price": 10.51, "title": "Yunexpress Battery THZXR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": false}
+        ],
+        "shipping_options_stats": {"min_price": 10.51, "max_price": 10.51, "min_days": 10, "max_days": 14, "chosen_option_id": "YUNTU_THZXR:2:US:00000201:00000300", "chosen_option_title": "Yunexpress Battery THZXR"}
+      }
+    ]
+  },
+  "get_current_user": [
+    {
+      "id": 22580,
+      "email": "release-checks@example.com",
+      "name": "Release Checks",
+      "status": 2,
+      "cognito_username": "00000000-0000-4000-8000-000000000000",
+      "intercom_user_jwt": "FAKE-INTERCOM-JWT.eyJ1c2VyX2lkIjoiMCJ9.not-a-signature",
+      "preferred_currency": null
+    }
+  ],
+  "list_stores_api": [
+    {
+      "total_listings_count": 0,
+      "store": {
+        "id": 895,
+        "name": "ebay_test_store",
+        "site": 1,
+        "store_type": 1,
+        "region": 1,
+        "default_currency": "USD",
+        "autods_store_token": "FAKE-STORE-TOKEN-0000-0000-000000000895",
+        "ebay_eias": "FAKE-EBAY-EIAS-895=="
+      }
+    },
+    {
+      "total_listings_count": 24,
+      "store": {
+        "id": 5991,
+        "name": "test shopify store",
+        "site": 3,
+        "store_type": null,
+        "region": null,
+        "default_currency": "USD",
+        "autods_store_token": "FAKE-STORE-TOKEN-0000-0000-000000005991",
+        "ebay_eias": null
+      }
+    }
+  ]
+}

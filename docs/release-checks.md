@@ -696,11 +696,18 @@ the run is graded against — so re-asking it in R would only repeat P.
 → `data` is a single-element list with a numeric `id`, `name`, `email` matching the
 authorized account. This is the identity analytics and logs are keyed on; if it fails
 here, tracking is silently dead everywhere (see O2).
+The record must **not** carry `intercom_user_jwt`, and an `omitted` field beside `data`
+must list `*.intercom_user_jwt` with reason `credential` (RD-146). A record that still
+holds the token is a failure, not a finding: it is a signed credential sent to the
+model.
 
 **R2 — `list_stores_api` `{}`.**
 → `data` is a list of stores; each entry nests the record under `store` with an
 integer `store.id`, a `store.name`, and a `store.site`. Use the `store_id` P2
 resolved for the rest of this section.
+No store may carry `store.autods_store_token` or `store.ebay_eias`, and `omitted`
+beside `data` lists both paths with reason `credential` (RD-146). Either field still
+present is a failure, for the same reason as in R1.
 
 **R3 — `list_products`** `{"store_ids": "<id>", "body": {"product_status": 2, "limit": 2,
 "projection": ["title", "variations.price", "total_sold_count"]}}`
@@ -731,9 +738,15 @@ caller lacks the Product Finding Hub add-on — expected per P4, not a fault, an
 retry. The same error on the P3 id (a normal catalog product) **is** a failure.
 
 **R8 — `get_similar_products`** `{"product_id": "<the P3 id>"}`
-→ `data.results` is a list. Expect a very large payload — this op has no projection
-and can exceed a client's response-token cap; note it if it does, that is the user
-experience.
+→ `data.results` is a list of product cards: every result has `_id`, `title`,
+`img_url` and `product_details`, and **none** has `images`, `variations` or
+`description` — the server removes those (RD-146), and `omitted` beside `data` lists
+the three paths with `see: "get_product_by_id"`. Note the answer's size in the report:
+it should stay in the tens of KB for any product (staging measured 19–41 KB). A
+result that still carries one of the three fields, or an answer in the hundreds of KB,
+is a failure — that is the size a client cuts or loses. The `images` block must still
+show one thumbnail per result, taken from each result's `img_url`; an empty cell for a
+result that has an `img_url` is a failure.
 
 **R9 — `get_recommended_products`** `{"product_id": "<the P3 id>", "limit": 1}`
 → `data.results` is a list and `data.totalResults` is present.
@@ -1036,6 +1049,12 @@ notes tell the model to read these as strings, and the server-wide index carries
 them as the one exception to "enums are integers".
 `store_id` is a **single** id, like `delete_product` and unlike the list call — a
 comma-separated value is refused, which is the schema gate working.
+Neither this record nor the R16.1 results may carry a `shipping_options` list, and
+`omitted` beside `data` names it with `see: "list_store_quote_shipping_options"`
+(RD-146): the upstream repeats every option in that list several times, and R16.4 is
+where the list is read. `shipping_options_stats` must still be there. A record that
+still carries the list means the removal stopped running; one that has lost
+`shipping_options_stats` too means the path now matches more than it should.
 
 *R16.3 — the version history.* `get_store_quote_versions` `{"store_id": <…>,
 "store_quote_id": <…>, "limit": 2}` → `{offset, total, items: […]}`, newest first.
@@ -1659,9 +1678,10 @@ If not, it does not belong here:
   earned no new check: R5 caught it exactly as written, so a second check would only
   restate what already worked.
 - **A finding whose fix hasn't landed.** It belongs in the report and the ticket
-  until then. `get_similar_products` answering with ~1.6 MB is a genuine defect, but
-  R8 already says to note an oversized payload; it earns an edit when the server
-  gains a projection or a cap — i.e. when what a client observably gets back changes.
+  until then. `get_similar_products` answering with ~1.6 MB was a genuine defect, and
+  for a long time R8 only said to note an oversized payload; it earned an edit when
+  the server started removing the heavy fields (RD-146) — i.e. when what a client
+  observably gets back changed.
 - **A run result.** Verdicts, store ids, draft ids, bulk-action numbers go in the
   report. This file is the *procedure*; pasting outcomes into it corrupts the next
   run's baseline.

@@ -19,12 +19,24 @@
       "has_json_body": false,
       "request_body_required": false,
       "is_top_typed_tool": true,
-      "notes": "Read-only. Returns every store connected to the authenticated user; takes no parameters. Start here whenever a task needs a store id: each store's integer `id` is what the `store_ids` path parameter of the store-scoped tools takes (comma-separate several). Reading a store record: `site` is the selling channel — 1=ebay, 2=amazon, 3=shopify, 4=facebook, 5=wix, 6=woocommerce, 7=etsy, 8=tiktok; `store_type` refines how it is connected — 1=ebay_api, 2=ebay_filexchange_api, 3=ebay_non_api, 4=facebook_marketplace, 5=facebook_shop, 6=ebay_mip, 7=etsy_api, 8=etsy_non_api; `region` is 1=us, 2=uk, 3=de, 4=fr, 5=it, 6=cn, 7=all_regions, 8=th, 9=es, 10=au, 11=ca, 12=pl, 13=ru, 14=be, 15=cz, 16=vn, 17=my, 18=sg, 19=ph, 20=id, 21=br, 22=ie; `default_currency` is an ISO code string (\"USD\", \"GBP\", …), not an enum.",
+      "notes": "Read-only. Returns every store connected to the authenticated user; takes no parameters. Start here whenever a task needs a store id: each store's integer `id` is what the `store_ids` path parameter of the store-scoped tools takes (comma-separate several). Reading a store record: `site` is the selling channel — 1=ebay, 2=amazon, 3=shopify, 4=facebook, 5=wix, 6=woocommerce, 7=etsy, 8=tiktok; `store_type` refines how it is connected — 1=ebay_api, 2=ebay_filexchange_api, 3=ebay_non_api, 4=facebook_marketplace, 5=facebook_shop, 6=ebay_mip, 7=etsy_api, 8=etsy_non_api; `region` is 1=us, 2=uk, 3=de, 4=fr, 5=it, 6=cn, 7=all_regions, 8=th, 9=es, 10=au, 11=ca, 12=pl, 13=ru, 14=be, 15=cz, 16=vn, 17=my, 18=sg, 19=ph, 20=id, 21=br, 22=ie; `default_currency` is an ISO code string (\"USD\", \"GBP\", …), not an enum. This server removes each store's credentials (its tokens) before answering, and the `omitted` field beside `data` lists them; no tool takes them as input.",
       "annotations": {
         "title": "List Stores",
         "readOnlyHint": true,
         "destructiveHint": false
-      }
+      },
+      "omit": [
+        {
+          "path": "*.store.autods_store_token",
+          "reason": "credential",
+          "detail": "The store's AutoDS token. No tool takes it as input."
+        },
+        {
+          "path": "*.store.ebay_eias",
+          "reason": "credential",
+          "detail": "The eBay account identifier the store was authorised with. No tool takes it as input."
+        }
+      ]
     }
   ]
 }

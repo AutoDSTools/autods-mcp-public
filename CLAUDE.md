@@ -85,8 +85,8 @@ Module map (`src/autods_mcp_server/`):
   and returns a `{ operation_id, status, ok, data }` envelope.
 - `mcp_transport.py` — builds the runtime and mounts the **stateless** Streamable HTTP
   transport behind the auth dependency; the `call_tool` handler applies rate limiting,
-  emits the audit log, branches to the local-handler seam (RD-100), and attaches the
-  playbook hints and the RD-92 `images` block. Also serves both kinds of resource
+  emits the audit log, branches to the local-handler seam (RD-100), attaches the
+  playbook hints and the RD-92 `images` block, and removes the RD-146 `omit` paths. Also serves both kinds of resource
   (`resources/list`+`read`): the playbook mirror and the `ui://` widgets.
 - `errors.py` — MCP tool error construction + upstream error mapping.
 - `business_errors.py` — detects a business rejection reported *inside* an HTTP
@@ -98,6 +98,9 @@ Module map (`src/autods_mcp_server/`):
   `payload_paths` (per-operation config is the manifest `images` block), runs
   its boot lint, and renders the `images` envelope field + the honest-truncation
   note.
+- `omit.py` — RD-146: removes the manifest `omit` paths from a response (after
+  `business_errors` and `images` have read it), renders the `omitted` envelope field,
+  and runs the block's boot lint.
 - `image_rewrites.py` — the CDN thumbnail-URL rewrite table as config data, one
   row per host family (rewrite rules + the CSP origins the widget sandbox
   needs). Measured in RD-82; pinned by `tests/mcp_server/test_image_rewrites.py`.
@@ -168,6 +171,12 @@ client:
   operation carries no `fixed_query` (RD-95). The first would let one value quietly
   override the other and hand the model back a choice the constant exists to take
   away; the second is config nothing ever sends.
+- Every `omit` entry (RD-146) must have a well-formed path (dotted, `*` wildcard, no
+  empty segment, not ending in `*`, declared once), a non-empty `detail`, and a `see`
+  naming another served operation exactly when its `reason` is `available_from_tool`;
+  a locally-handled operation carries no `omit`; and the operation's `notes` must
+  mention `omitted`. A malformed path matches nothing and removes nothing, and a
+  block the notes never mention hides data the model was never told is missing.
 
 ### Destructive operations
 
@@ -313,6 +322,73 @@ boot lint above enforces that, and that `paths` is non-empty.
 This covers a rejection inside a **2xx** only. A business rejection that arrives as a
 non-2xx is not deliverable to the model at all (see the Gotcha below), so don't describe
 one in `notes` as something the caller will be able to read.
+
+### Removing fields from a response: the `omit` block (RD-146)
+
+**The policy.** `data` is the upstream payload as it was sent, **minus the fields an
+operation's `omit` block names — and nothing else changes inside it.** Everything else
+the server adds still goes *beside* `data` (`business_error`, `images`, `playbook`, and
+now `omitted`). The dispatcher is still a pure forwarder: `dispatch.py` returns the
+upstream JSON verbatim, and the removal is a transport step. That split is deliberate —
+`identity.py` resolves the caller through the dispatcher and must see the whole record.
+
+Until RD-146 there was no exception at all, and two kinds of answer made that untenable:
+answers too big for a client to hold (`get_similar_products` returns a full product
+document per result — 267 KB for one page on staging, mostly scraped image galleries),
+and answers that carry credentials the model never needs (`intercom_user_jwt` on
+`get_current_user`, the store tokens on `list_stores_api`). Neither upstream has a
+parameter that asks for less, and waiting for one left the failure in place.
+
+```json
+"omit": [
+  {
+    "path": "results.*.description",
+    "reason": "available_from_tool",
+    "see": "get_product_by_id",
+    "detail": "Supplier HTML, 10-30 KB per page of results on staging (RD-146)."
+  }
+]
+```
+
+The limits are the rule, not decoration — each one closes a way this turns into
+per-operation response logic:
+
+- **Remove named fields only; never "keep only these".** A keep-list silently drops
+  every field the upstream adds later. A remove-list can drop only what someone chose.
+- **Only these four reasons:** `duplicate`, `internal_detail`, `available_from_tool`
+  (with `see` naming the tool that returns it), `credential`. "The answer is big" is not
+  a reason on its own: say which of the four the field is. `detail` carries the
+  evidence — which answers showed it — for the reviewer.
+- **Remove after reading.** `apply_omit` runs after `detect_business_errors` and
+  `extract_images`, so an error code or a picture is always detected on the full
+  payload. No shipped tool depends on the order today (`get_similar_products` draws
+  its grid from `img_url`, which it keeps), so
+  `test_the_removal_runs_after_images_have_read_the_full_payload` pins it on a probe
+  tool whose `images` block reads the field its `omit` block removes.
+- **Say so.** The paths that matched go in `omitted` beside `data`, as
+  `{path, reason, see?}`, and the tool's `notes` must say what is removed and where to
+  get it (the boot lint checks for the word `omitted`). An operation without the
+  block, and an answer where no path matched, keep a byte-identical envelope.
+- **Prove each path on a recorded answer.** `tests/mcp_server/test_omit.py` runs every
+  shipped block against `tests/mcp_server/data/omit_payload_samples.json` and fails on
+  a path that matches nothing; for a `credential` it also checks the value appears
+  nowhere in the result. A path taken from one answer is a guess — RD-146 asks for
+  several real answers before a path is relied on. Credential values in the samples
+  are fake, and must stay fake.
+- **A credential path that removes nothing is reported at runtime.** The samples only
+  prove the shape seen when they were recorded. If the upstream changes shape later
+  (a list wrapped in `{results: [...]}`, a renamed key), a `credential` path matches
+  nothing and the token reaches the client. So on a non-empty answer the transport
+  writes an `omit_credential_unmatched` warning line and sends a Sentry event, both
+  naming only the paths — never the payload, which is what holds the token. The
+  answer still goes out. A size path that matches nothing is not reported: the
+  answer is only bigger.
+- **An upstream parameter still comes first.** Where one can do the job
+  (`projection` on `list_products`), use it and do not add `omit`.
+
+What the five shipped blocks remove, and why, is in the `README.md` table under
+**Removing fields from a response**. `get_1688_product_details` (RD-95) is the obvious
+next candidate and is deliberately not in the list yet — see its gotcha.
 
 ### Product images: the `images` block, the widgets, the base64 opt-in (RD-92)
 
@@ -773,6 +849,7 @@ this checklist and update whatever it touches **in the same commit**:
 | adds a tool that has to be polled, or changes the cadence / a completion state machine | `docs/polling-conventions.md` (the numbers live there **once**), plus the `notes` and playbook `body` that state them, plus the delivery test |
 | adds a fixture the checklist needs (a store, an entitlement, a supplier id) or a step that makes an agent stop and ask mid-run | a check in section `P` of `docs/release-checks.md`, or a rule that lets the run continue with a `skipped` |
 | adds a `ui://` widget, an `images` block, or a CDN host family | the **Product images** section here; a widget also needs a fixture row in `tests/mcp_server/data/cdn_rewrite_sample.tsv` if it brought a host family, and a check in `docs/release-checks.md` — a widget is the one surface whose failure is *invisible* to every test we can run in CI (nothing here renders HTML in a host's sandbox) |
+| adds or changes an `omit` block | a recorded answer in `tests/mcp_server/data/omit_payload_samples.json` (fake values for a credential), the tool's `notes`, the table under **Removing fields from a response** in `README.md`, and the tool's check in `docs/release-checks.md` |
 | adds an upstream, a stateful dependency, a deployed process or an exposed API surface — or changes deployment / ownership metadata | `catalog-info.yaml`, per the trigger list in **Service Descriptor** below (most changes are *not* triggers — read the list, don't guess) |
 
 Rule of thumb: if you added an invariant a reviewer would flag if broken (a
@@ -1069,7 +1146,8 @@ reads them.
 
 - **An `images` block rides beside `data` too** (RD-92) — third member of the family
   after `business_error` and `playbook`, same rule for the same reason: `data` is the
-  upstream payload verbatim and `dispatch.py` stays a pure forwarder. An operation with
+  upstream payload verbatim (minus any `omit` paths, RD-146, which are removed *after*
+  the block is built) and `dispatch.py` stays a pure forwarder. An operation with
   no `images` block gets an envelope byte-identical to pre-RD-92, which
   `test_widgets.py` pins alongside `test_success_result_shape_matches_the_1x_wire_format`.
 - **The widget CSP is declared twice, on the `resources/list` entry *and* on the
@@ -1236,6 +1314,23 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   event on any falsy id (and never key on the Cognito `sub`).
 ### Manifests, the registry and the upstream contract
 
+- **`omit` runs in the transport, after the readers, and moving it breaks things that
+  still pass review** (RD-146). Three ways it goes wrong, each silent:
+  - Move `apply_omit` above `extract_images`, and any tool whose `images` block reads a
+    field its `omit` block removes renders a grid of empty cells. No shipped tool does
+    that today — `get_similar_products` used to read the `results.*.images` gallery and
+    now reads `img_url` — so nothing in the bundled manifests would notice.
+    `test_the_removal_runs_after_images_have_read_the_full_payload` pins the order on a
+    probe tool for that reason.
+  - Move the removal into `dispatch.py`, and every caller of the dispatcher gets
+    trimmed data too — including `identity.py` (RD-68), which reads the caller's id,
+    name and email from `get_current_user` through the dispatcher, not through a tool
+    call. Today's `omit` paths do not touch those fields, so nothing fails until one
+    does.
+  - Remove a `credential` path's sample, or paste a real token into it to "make the
+    test realistic", and the one test that proves the value never reaches a client
+    either proves nothing or commits a live secret. The samples hold fake values.
+  The rule itself is in **Tools are data → Removing fields from a response**.
 - **The integer-enum boot lint only inspects `body_schema`.** Enum-valued *query* params
   (e.g. `product_status`) are not type-checked, so a string-vs-int contract mismatch on a
   query enum ships silently with no test catching it — verify query-param enums against the
@@ -1425,10 +1520,14 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   on `delete_product` that is the difference between removing a live listing and
   leaving it selling. `dispatch._to_wire` renders every path, query and header value;
   don't go back to a bare `str(value)` there.
-- **The dispatcher is a pure forwarder** — `dispatch._parse_response` returns
-  `response.json()` verbatim. You cannot trim or reshape a response via manifest text; that
-  needs an upstream change. Don't add per-operation response logic — it breaks "tools are
-  data".
+- **The dispatcher is a pure forwarder; the only change to `data` is an `omit` block**
+  (RD-146). `dispatch._parse_response` returns `response.json()` verbatim, and the
+  transport's one edit inside `data` is removing the paths a manifest names, after
+  `business_errors` and `images` have read the full payload. Nothing reshapes, renames,
+  reorders or filters items — that still needs an upstream change. Don't add
+  per-operation response logic, and don't grow `omit` into it: no keep-list form, no
+  per-value conditions, no reasons outside the four. The rules and the reasons they
+  exist are in **Removing fields from a response** under **Tools are data**.
 
 ### Specific upstream endpoints
 
@@ -1550,10 +1649,13 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   measured on staging: 20 variations, ~150 KB of it per-variation `shipping` and
   `shipping_by_region`). `full_json=false` would cut it to ~5 KB and drops `variations`
   entirely, which are the whole point of the call, and no query parameter trims the
-  shipping lists. The dispatcher is a pure forwarder, so the notes tell the agent to
-  shortlist from the search and read one offer at a time. A real fix is an upstream
-  option to leave the per-variation shipping out; until then, report an oversized
-  answer rather than "fix" it here.
+  shipping lists. So the notes tell the agent to shortlist from the search and read one
+  offer at a time. An `omit` block (RD-146) could remove `variations.*.shipping_by_region`
+  (an exact copy of `shipping` in the one recorded offer), but it was left out of RD-146
+  on purpose: the tool was not on staging when the scope was decided, and "an exact
+  copy" rests on one offer with one destination region. Add it only after checking
+  several offers, including one quoted for more than one region. The real fix is still
+  an upstream option to leave the per-variation shipping out.
 ### Scripts and log noise
 
 - **`uvicorn.access`, `httpx`, and `mcp` INFO lines duplicate our structured

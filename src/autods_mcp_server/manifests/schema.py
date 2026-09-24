@@ -167,6 +167,37 @@ class ImagesBlock(BaseModel):
     links: list[LinkBlock] = Field(default_factory=list)
 
 
+OmitReason = Literal["duplicate", "internal_detail", "available_from_tool", "credential"]
+
+
+class OmitEntry(BaseModel):
+    """One field the transport removes from an operation's response (RD-146).
+
+    Some upstream answers are too big for an MCP client to hold, and a few
+    carry credentials the model never needs. No query parameter trims either,
+    so an operation can name fields to **remove**, as data. Never a list of
+    fields to keep: a keep-list would silently drop every field the upstream
+    adds later, while a remove-list can only drop what someone chose to drop.
+
+    ``path`` is a dotted path into the upstream ``data`` in the ``payload_paths``
+    notation (``results.*.description``). Its last segment is the key removed
+    from every dict the rest of the path addresses, so it cannot be ``*``.
+
+    ``reason`` is the closed set of reasons a field may be removed for, and
+    ``detail`` is the evidence in words, for the reviewer: which answers showed
+    the field was a duplicate, what the credential is. ``see`` names the tool
+    that returns the removed data, and is required exactly when ``reason`` is
+    ``available_from_tool`` — the boot lint checks that the tool is served.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    reason: OmitReason
+    detail: str = ""
+    see: str = ""
+
+
 class ManifestParameter(BaseModel):
     """A single path/query/header parameter of an operation."""
 
@@ -221,6 +252,10 @@ class ManifestOperation(BaseModel):
     # operation has no image surface: no ``images`` envelope field, no
     # ``_meta.ui`` on the descriptor, and no ``include_images`` parameter.
     images: ImagesBlock | None = None
+    # RD-146: response fields the transport removes, after ``business_errors``
+    # and ``images`` have read the full payload. Empty — the common case —
+    # means the upstream payload reaches the client exactly as it was sent.
+    omit: list[OmitEntry] = Field(default_factory=list)
     # Whether the operation is side-effect-free is advertised to clients via
     # ``annotations.read_only_hint`` (the MCP-canonical signal), so the
     # generator's separate ``safe`` flag is intentionally not modelled here —

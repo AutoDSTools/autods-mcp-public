@@ -103,9 +103,11 @@ from autods_mcp_server.manifests.playbooks import (
     render_success_hint,
 )
 from autods_mcp_server.manifests.schema import ManifestOperation
+from autods_mcp_server.omit import OMITTED_KEY, apply_omit, unmatched_credential_paths
 from autods_mcp_server.ratelimit import RateLimiter, build_rate_limiter
 from autods_mcp_server.redis_client import create_redis
 from autods_mcp_server.sentry import (
+    capture_omit_unmatched,
     capture_tool_error,
     capture_tool_exception,
     set_tool_context,
@@ -857,6 +859,26 @@ def _build_server(
                     )
                     if images is not None:
                         payload[IMAGES_KEY] = images
+                    # RD-146: the one step that edits ``data``, and it has to run
+                    # here — after both readers above have seen the full
+                    # payload, so a removed field can never hide an error code
+                    # or a picture. What was removed is published beside
+                    # ``data``; an operation with no ``omit`` block, or one whose
+                    # paths match nothing in this answer, keeps a byte-identical
+                    # envelope.
+                    trimmed, omitted = apply_omit(operation, payload.get("data"))
+                    if omitted is not None:
+                        payload["data"] = trimmed
+                        payload[OMITTED_KEY] = omitted
+                    # A credential path that removed nothing means the upstream
+                    # changed shape and the token is in this answer. The answer
+                    # still goes out — refusing it would break the tool over a
+                    # field no tool reads — but someone has to hear about it.
+                    # Paths only: the payload is what may hold the token.
+                    unmatched = unmatched_credential_paths(operation, payload.get("data"), omitted)
+                    if unmatched:
+                        _audit_logger.warning("omit_credential_unmatched", tool_name=name, op_id=name, paths=unmatched)
+                        capture_omit_unmatched(tool_name=name, paths=unmatched)
                 # RD-100: the per-step nudge, on the one channel that puts it in
                 # front of the model at the moment it has just finished step N.
                 # Same placement rule as ``business_error`` — beside ``data``,
@@ -977,6 +999,10 @@ def build_runtime(
             instead of ``*`` wildcard notation, exceeds the 20-image ceiling,
             names a widget nothing serves, or leaves its operation's ``notes``
             silent about thumbnails (RD-92) — likewise fatal at boot.
+        OmitError: if an ``omit`` block declares a malformed path, a path with
+            no reason given, a ``see`` that names no other served tool, or leaves
+            its operation's ``notes`` silent about the ``omitted`` field
+            (RD-146) — likewise fatal at boot.
         InstructionsTooLargeError: if the concatenated manifest ``instructions``
             exceed the size budget (RD-90) — likewise fatal at boot.
         OperationHandlerError: if an operation names both a local handler and an

@@ -245,3 +245,22 @@ def capture_tool_error(
         scope.set_tag("mcp.tool", tool_name)
         scope.set_context("upstream", _upstream_context(upstream_url, upstream_status, detail))
         sentry_sdk.capture_message(message, level="error")
+
+
+def capture_omit_unmatched(*, tool_name: str, paths: list[str]) -> None:
+    """Report ``credential`` omit paths that matched nothing in an answer (RD-146).
+
+    The upstream's shape has changed and the credential was probably forwarded
+    to the client. Only the paths travel — never the payload, which is the very
+    thing that may hold the token.
+    """
+    if not sentry_sdk.is_initialized():
+        return
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("error_type", "omit_credential_unmatched")
+        scope.set_tag("mcp.tool", tool_name)
+        scope.set_context("omit", {"unmatched_paths": paths})
+        sentry_sdk.capture_message(
+            f"omit_credential_unmatched: credential path(s) {paths} matched nothing for tool '{tool_name}'",
+            level="error",
+        )

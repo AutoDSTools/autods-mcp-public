@@ -291,7 +291,7 @@
       "path": "/products/{product_id}/similar",
       "summary": "Get products similar to the given product.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
+      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results.\n\nEach result is a product card, not the full document: this server removes `description`, `variations` and the `images` gallery from every result, and the `omitted` field beside `data` lists what was removed. The upstream sends the full document for every result, and one page measured over 250 KB — mostly scraped image galleries. What stays is enough to choose from: `_id`, `title`, `img_url` (the main image), `product_details` (min/max price and shipping), the supplier, the categories and the `url`. For one product's description, variations or full gallery, call `get_product_by_id` with its `_id`.\n\nProduct images: the first 20 results' main images also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The full-size main image stays in `data` as `img_url`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -311,10 +311,30 @@
         "readOnlyHint": true,
         "destructiveHint": false
       },
+      "omit": [
+        {
+          "path": "results.*.images",
+          "reason": "available_from_tool",
+          "see": "get_product_by_id",
+          "detail": "The full gallery. Scraped products carry up to several hundred URLs here: on staging (RD-146) this one field was 123 KB of a 267 KB answer. `img_url` (the main image) stays, and the `images` envelope block reads it."
+        },
+        {
+          "path": "results.*.variations",
+          "reason": "available_from_tool",
+          "see": "get_product_by_id",
+          "detail": "Per-variation stock, price and shipping_array. `product_details` keeps the min/max price and shipping for the card."
+        },
+        {
+          "path": "results.*.description",
+          "reason": "available_from_tool",
+          "see": "get_product_by_id",
+          "detail": "Supplier HTML, 10-30 KB per page of results on staging (RD-146)."
+        }
+      ],
       "images": {
         "item_path": "results",
         "image_paths": [
-          "images.*"
+          "img_url"
         ],
         "per_item": 1,
         "max": 20,

@@ -338,7 +338,9 @@ malformed manifest can't reach a client: (1) every operation must have an
 operation's `notes` must mention `ok`; (5) each operation declares exactly one
 of `handler` / `base_url_key`; (6) the six playbook lints (below); (7) a
 `fixed_query` key must not also be a declared parameter, and a locally-handled
-operation carries no `fixed_query`.
+operation carries no `fixed_query`; (8) every `omit` path (below) is well formed,
+gives its reason, names a served tool in `see` when the data is available there,
+and its operation's `notes` mention the `omitted` field.
 
 #### Destructive tools
 
@@ -447,6 +449,56 @@ This applies to a rejection inside an HTTP 200 only. A refusal the upstream
 reports with a non-2xx status is mapped to a generic typed error whose detail is
 logged server-side and never echoed to the caller, so it can't be surfaced as a
 recovery hint this way.
+
+#### Removing fields from a response (RD-146)
+
+`data` is the upstream payload as it was sent, with one exception: an operation
+can name fields the server **removes** before answering. It is for two cases
+only — an answer too big for a client to hold, and a credential the model must
+never see — and only where no upstream parameter can ask for less (`projection`
+on `list_products` is the preferred tool when it exists).
+
+```json
+"omit": [
+  {
+    "path": "results.*.description",
+    "reason": "available_from_tool",
+    "see": "get_product_by_id",
+    "detail": "Supplier HTML, 10-30 KB per page of results on staging."
+  }
+]
+```
+
+- `path` uses the `business_errors` notation, relative to `data`; its last
+  segment is the key removed from every dict the rest addresses, so it cannot be
+  `*`. There is deliberately no "keep only these fields" form: it would silently
+  drop every field the upstream adds later.
+- `reason` is one of `duplicate`, `internal_detail`, `available_from_tool` or
+  `credential`. `detail` is the evidence, for the reviewer. `see` names the tool
+  that returns the removed data, and is required with `available_from_tool`.
+- Removal runs **after** `business_errors` and `images` have read the full
+  payload, so an error code or a picture can never be trimmed away first. The
+  dispatcher itself still forwards verbatim, which is why self-identity
+  (RD-68) is unaffected.
+- The paths that matched are listed in an `omitted` field beside `data`, as
+  `{path, reason, see?}`. An operation without the block — or an answer where no
+  path matched — gets an untouched envelope.
+
+Five tools use it today:
+
+| Tool | Removed | Why |
+|---|---|---|
+| `get_similar_products` | `results.*.images`, `.variations`, `.description` | each result is a full product document; one page measured 267 KB on staging, mostly image galleries. `get_product_by_id` returns them |
+| `get_store_quote`, `list_store_quotes` | `shipping_options` | the upstream repeats every option several times; `list_store_quote_shipping_options` returns each once |
+| `get_current_user` | `*.intercom_user_jwt` | credential |
+| `list_stores_api` | `*.store.autods_store_token`, `*.store.ebay_eias` | credentials |
+
+Every shipped path is tested against a recorded upstream answer
+(`tests/mcp_server/data/omit_payload_samples.json`), and the suite fails on a
+path that matches nothing. At runtime, a `credential` path that removes nothing
+from a non-empty answer means the upstream changed shape and the token went
+out: the server logs an `omit_credential_unmatched` warning and sends a Sentry
+event naming the paths (never the payload).
 
 #### Playbooks (RD-100)
 
@@ -771,6 +823,11 @@ tool's own `notes` because getting it wrong is silent:
   `enum` on `body.filters.items.name` because the upstream really does accept
   exactly those.
 
+`list_store_quotes` and `get_store_quote` answer without the record's
+`shipping_options` list (see **Removing fields from a response**): the upstream
+repeats every option in it several times, and `list_store_quote_shipping_options`
+is where the list is read.
+
 `get_store_quote_versions` and `list_store_quote_shipping_options` need a
 request that already has an offer (`ready` or `linked`). On one that does not,
 they answer an error rather than an empty result, so both say "check the status
@@ -888,7 +945,8 @@ the same item; the user picking from the grid never needs it.
    returns a structured `{ operation_id, status, ok, data }` envelope — plus a
    `business_error` sibling when the operation declares one and the payload
    matches, and a `playbook` sibling when the tool is a non-final step of a
-   chain. An operation that declares a `handler` instead of a `base_url_key`
+   chain. Before answering, the transport also removes the operation's `omit` paths from `data`
+   and lists what it removed in an `omitted` sibling (RD-146). An operation that declares a `handler` instead of a `base_url_key`
    skips step 3 entirely: it is answered locally, after the same rate limiting,
    validation, analytics and audit, and returns the same envelope shape.
 

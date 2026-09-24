@@ -30,6 +30,7 @@ from autods_mcp_server.manifests.playbooks import (
     render_description_tail,
 )
 from autods_mcp_server.manifests.schema import ManifestOperation, SchemaType
+from autods_mcp_server.omit import assert_omit_usable
 from autods_mcp_server.widgets import tool_meta
 
 # autods-mcp ``schema_type`` -> Python type used for the generated pydantic field.
@@ -372,10 +373,12 @@ def _assert_fixed_query_usable(operation: ManifestOperation) -> None:
 def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry | None = None) -> list[types.Tool]:
     """Lint, then convert every operation to an MCP tool descriptor."""
     assert_valid_annotations(operations)
+    served = {operation.operation_id for operation in operations}
     for operation in operations:
         _assert_integer_enum_fields(operation)
         _assert_business_errors_usable(operation)
         _assert_handler_or_upstream(operation, playbooks)
         _assert_fixed_query_usable(operation)  # RD-95
         assert_images_usable(operation)  # RD-92
+        assert_omit_usable(operation, served)  # RD-146
     return [to_tool(operation, playbooks) for operation in operations]

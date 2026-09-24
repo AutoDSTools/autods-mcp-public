@@ -19,9 +19,10 @@ from autods_mcp_server.dispatch import (
     UnknownOperationError,
     UpstreamRequestError,
 )
-from autods_mcp_server.manifests import ManifestRegistry
+from autods_mcp_server.manifests import ManifestRegistry, build_registry
 from autods_mcp_server.manifests.schema import Manifest
 from autods_mcp_server.settings import Settings
+from autods_mcp_server.tools import to_tool
 
 
 @pytest.fixture
@@ -137,6 +138,57 @@ async def test_routes_to_different_upstreams_by_base_url_key(mcp_settings, user)
     await dispatcher.dispatch("on_products_research", {}, user)
 
     assert seen == ["https://autods-api.test", "https://products-research.test"]
+
+
+async def test_supplier_scans_route_to_the_gateway_suppliers_route(mcp_settings, bundled_manifest_dir, user) -> None:
+    """RD-95: both scan tools reach ScrapersAPI through the gateway's
+    ``/suppliers`` route — the base path is kept, not replaced, since the gateway
+    is what swaps the caller's token for the one the service accepts — and each
+    call carries its operation's constants beside the caller's own arguments."""
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, json={})
+
+    registry = build_registry(bundled_manifest_dir)
+    dispatcher = _dispatcher(registry, _settings(mcp_settings), handler)
+
+    await dispatcher.dispatch(
+        "search_1688_offers_by_image", {"img_url": "https://cdn.test/a.jpg", "full_scrape": True}, user
+    )
+    await dispatcher.dispatch("get_1688_product_details", {"asins": "1048927055094", "full_scrape": False}, user)
+
+    offers, product = seen
+    assert f"{offers.scheme}://{offers.host}{offers.path}" == "https://gw.test/suppliers/offers/scan"
+    assert dict(offers.params) == {
+        "store": "offers_1688",
+        "region": "ALL",
+        "warehouse": "CN",
+        "img_url": "https://cdn.test/a.jpg",
+        "full_scrape": "true",
+    }
+    assert f"{product.scheme}://{product.host}{product.path}" == "https://gw.test/suppliers/products/scan"
+    assert dict(product.params) == {
+        "store": "alibaba_1688",
+        "region": "ALL",
+        "warehouse": "CN",
+        "full_json": "true",
+        "include_oos_variations": "false",
+        "asins": "1048927055094",
+        "full_scrape": "false",
+    }
+
+
+def test_fixed_query_is_never_offered_to_the_model(bundled_manifest_dir) -> None:
+    """The constants exist so the model cannot choose them. A tool schema that
+    listed them would give that choice straight back."""
+    registry = build_registry(bundled_manifest_dir)
+    for operation_id in ("search_1688_offers_by_image", "get_1688_product_details"):
+        operation = registry.get(operation_id)
+        properties = to_tool(operation).input_schema["properties"]
+        assert operation.fixed_query
+        assert not operation.fixed_query.keys() & properties.keys()
 
 
 async def test_unknown_operation_raises(mcp_settings, user) -> None:

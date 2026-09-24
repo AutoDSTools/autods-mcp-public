@@ -83,5 +83,40 @@
         }
       }
     ]
+  },
+  "search_1688_offers_by_image": {
+    "data": [
+      {
+        "id": "1048927055094",
+        "title": "Mobile phone stand logo cross-border desktop live broadcast tablet bedside stand adjustable folding multifunctional support frame",
+        "img_url": "https://cbu01.alicdn.com/O1CN01YOBlGs24KtKgOQMCf_!!2219064657373-0-cib.jpg",
+        "all_images": ["https://cbu01.alicdn.com/O1CN01YOBlGs24KtKgOQMCf_!!2219064657373-0-cib.jpg"],
+        "similarity_score": 52.38,
+        "price": 0.22
+      }
+    ],
+    "scraper_error": null,
+    "no_info": [],
+    "not_in_db": []
+  },
+  "get_1688_product_details": {
+    "data": {
+      "1048927055094": {
+        "id": "1048927055094",
+        "title": "Mobile phone stand logo cross-border desktop live broadcast tablet bed head stand lift folding multifunctional support frame",
+        "all_images": ["https://cbu01.alicdn.com/img/ibank/O1CN01D8TkHm24KtKfhWaft_!!2219064657373-0-cib.jpg"],
+        "variations": [
+          {
+            "id": "1048927055094_6245469138442",
+            "sku": "6245469138442",
+            "image_url": "https://cbu01.alicdn.com/img/ibank/O1CN01b3u0im24KtKg3ijUW_!!2219064657373-0-cib.jpg",
+            "attributes": {"Color": "Desktop Stand 758【Purple】"}
+          }
+        ],
+        "error": null
+      }
+    },
+    "no_info": [],
+    "not_in_db": []
   }
 }

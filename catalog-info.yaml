@@ -109,13 +109,17 @@ spec:
     # --- internal AutoDS services, reached with the caller's own token ---
     - autods-platform-rest
     - products-research-rest
+    - scrapers-api-rest
     # --- external ---
     - autods-mcp-public-mixpanel-api
 
   dependsOn:
-    # The two upstreams every forwarded tool call reaches.
+    # The upstreams a forwarded tool call reaches. The supplier scans reach
+    # scrapers-api through the API gateway rather than directly; the gateway is
+    # not modelled as a hop here, the same as for products-research-api.
     - component:default/autods-api
     - component:default/products-research-api
+    - component:default/scrapers-api
     # Shared platform infrastructure, declared once in AutoDSTools/backstage
     # (catalog/shared-infrastructure.yaml) and owned by devops. No Resource of
     # this service's own was declared for either, and the absence is the

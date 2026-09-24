@@ -1,0 +1,147 @@
+{
+  "server_name": "autods-suppliers",
+  "domain": "suppliers",
+  "instructions": "",
+  "base_url_key": "scrapers_api",
+  "operations": [
+    {
+      "operation_id": "search_1688_offers_by_image",
+      "method": "GET",
+      "path": "/offers/scan",
+      "summary": "Find 1688 supplier offers that look like a product, by image similarity. Poll it until the offers arrive.",
+      "description": "",
+      "tags": [
+        "suppliers"
+      ],
+      "fixed_query": {
+        "store": "offers_1688",
+        "region": "ALL",
+        "warehouse": "CN"
+      },
+      "parameters": [
+        {
+          "name": "img_url",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "ONE product image, as a full public http(s) URL — an entry of the product's `images` from get_product_by_id, search_products or list_products. The search is per image: a different URL is a different search, with its own poll."
+        },
+        {
+          "name": "full_scrape",
+          "in": "query",
+          "required": true,
+          "schema_type": "bool",
+          "description": "true on the FIRST call for an image only; false on every poll after it. true starts a fresh search even when an older result is stored; false reads what that search has produced so far. Sending true on every poll restarts the search each time and it never finishes."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Read-only. Searches 1688 for supplier offers whose pictures look like ONE product image, and returns {data: [...], scraper_error, no_info: [...], not_in_db: [...]}. The search runs in the background: each call starts it or reads how far it has got, so you poll this same call until it answers. Offers ship from China and prices are in USD.\n\nREADING ONE ANSWER — which of four states the search is in:\n- `not_in_db` non-empty: the search was just queued and nothing is found yet. Keep polling.\n- `no_info` non-empty with `data` empty: the search is running. Keep polling.\n- `data` non-empty: done. These are the offers.\n- `scraper_error` set: the search FAILED for this image. Stop polling it — every error code is final for that image, including TOO_MANY_RETRIES, which means the search already retried itself. Nothing is gained by polling on.\n\nA 2xx here means the read worked, never that offers were found: `ok` is a transport-level signal only. A failed search is reported inside a 2xx, and the envelope then carries a `business_error` list beside `data`, with the code and what to do next. Read it before reading `data`.\n\nPolling cadence, because there is no push channel and every poll costs you a turn: send `full_scrape: true` on the first call only, then wait ~10s before the first poll, poll every ~15s with `full_scrape: false`, and stop after 10 attempts — about ~2.5 min at that cadence. On reaching the ceiling with no offers, report that this image found nothing yet; do not keep polling it.\n\nONE IMAGE FINDING NOTHING IS NOT \"NO SUPPLIER\". The first image of a product often matches nothing while a later one matches well. If an image ends in an error or reaches the ceiling with no offers, start a new search on the product's NEXT image, with its own poll and its own first `full_scrape: true`. Only when every image has come back empty is it right to tell the user no 1688 offer was found. Starting again on the SAME image is a new search, not a continuation, and it needs a reason to think it will work this time.\n\nREADING AN OFFER. `id` is the BARE 1688 offer id, e.g. \"1048927055094\" — the id get_1688_product_details takes as `asins`, and the one create_1688_sourcing_request takes as `alibaba_1688_id`. `similarity_score` is how closely the offer's picture matches the image you sent, from 0 to 100, higher is closer: rank the offers by it and compare scores within one answer rather than against a fixed threshold. `title` is the supplier's own, machine-translated. `price` is the lowest variation price in USD, `in_stock_qty` the units available, `order_min_qty` the minimum order, `rating` a 1-5 score, `url` the offer's page on 1688, `img_url` and `all_images` its pictures. An offer here has no variations: read those with get_1688_product_details before sourcing, since a sourcing request has to name them.\n\nOffer images: once offers arrive, the first 20 also come in an `images` block beside `data`, one ~220px thumbnail per offer, captioned with its title, in the same order as `data`. A client that renders MCP Apps shows them as a thumbnail grid the user can pick an offer from, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The grid shows no price or score, so also list the offers in text (title, `price`, `similarity_score`, `in_stock_qty`) in the same order, and let the user name the one they want. The thumbnails do not open anything; give the offer's `url` if the user wants its 1688 page. Set `include_images` only when YOU must judge the pictures — for example to check which offers really show the same item as the user's product; the user choosing from the grid never needs it.",
+      "annotations": {
+        "title": "Search 1688 Offers by Image",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "images": {
+        "item_path": "data",
+        "image_paths": [
+          "img_url",
+          "all_images.*"
+        ],
+        "per_item": 1,
+        "max": 20,
+        "label_path": "title",
+        "id_path": "id",
+        "widget": "product-grid",
+        "base64": "opt_in"
+      },
+      "business_errors": {
+        "paths": [
+          "scraper_error.error_code"
+        ],
+        "codes": {
+          "NO_OFFERS": "No 1688 offer matched this image. Stop polling it and search the product's next image; only when every image comes back empty has no supplier been found.",
+          "PRODUCT_404": "The image could not be found at that URL. Stop polling it; check the URL opens, or search the product's next image.",
+          "INVALID_INPUT": "The image URL was not accepted. Stop polling it and search with a different, publicly reachable image URL.",
+          "TOO_MANY_RETRIES": "The search already retried itself and gave up. Stop polling this image; search the product's next image instead.",
+          "UNEXPECTED": "The search failed on the supplier side. Stop polling this image and try the product's next one; if every image fails this way, report it.",
+          "PRODUCT_OOS": "The search reported the item as out of stock. Stop polling this image and search the product's next image.",
+          "SHIPPING_UNAVAILABLE": "The search reported that shipping is unavailable. Stop polling this image and search the product's next image.",
+          "VIRTUAL_PRODUCT": "The search input looks like a non-physical item, which cannot be sourced. Stop polling; check this is the product the user meant.",
+          "CUSTOMIZABLE_PRODUCT": "The search input looks like a made-to-order item, which cannot be sourced automatically. Stop polling; check this is the product the user meant.",
+          "BLACKLISTED_PRODUCT": "The search input contains restricted terms and cannot be sourced. Stop polling; check this is the product the user meant."
+        }
+      }
+    },
+    {
+      "operation_id": "get_1688_product_details",
+      "method": "GET",
+      "path": "/products/scan",
+      "summary": "Read one 1688 supplier offer in full, with its variations — the ids a sourcing request needs. Poll it until the offer arrives.",
+      "description": "",
+      "tags": [
+        "suppliers"
+      ],
+      "fixed_query": {
+        "store": "alibaba_1688",
+        "region": "ALL",
+        "warehouse": "CN",
+        "full_json": "true",
+        "include_oos_variations": "false"
+      },
+      "parameters": [
+        {
+          "name": "asins",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "ONE bare 1688 offer id, e.g. \"1048927055094\" — the `id` of a search_1688_offers_by_image result. Not a variation id (no underscore), and one offer per call."
+        },
+        {
+          "name": "full_scrape",
+          "in": "query",
+          "required": true,
+          "schema_type": "bool",
+          "description": "true on the FIRST call for an offer only; false on every poll after it. true reads the offer fresh from 1688 even when an older copy is stored; false reads what that read has produced so far. Sending true on every poll restarts the read each time."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "notes": "Read-only. Reads ONE 1688 offer in full, with its variations, and returns {data: {<offer id>: {...}}, no_info: [...], not_in_db: [...]} — `data` is keyed by the offer id you asked for. The read runs in the background: each call starts it or reads how far it has got, so you poll this same call until the offer is there. Offers found by search_1688_offers_by_image are often ready on the first call. Prices are in USD and every offer ships from China.\n\nREADING ONE ANSWER:\n- the offer id is in `no_info` and missing from `data`: queued or still being read. Keep polling.\n- `data[<offer id>]` is present and its `error` is null: done.\n- `data[<offer id>].error` is set: the read FAILED for this offer. Stop polling it — every error code is final for that offer, including TOO_MANY_RETRIES. The other fields of an entry with an `error` are placeholders, price included: do not read them.\n- `not_in_db` is always empty here; it does not mean anything on this tool.\n\nThis tool has no search-wide error field. So a read that failed without producing an entry looks exactly like a slow one, and the poll ceiling is the ONLY thing that stops the loop. An id that is not a 1688 offer id at all is answered at once as PRODUCT_OOS, the same code as a real out-of-stock offer — check the id before telling the user the offer is sold out.\n\nA 2xx here means the read worked, never that the offer is usable: `ok` is a transport-level signal only. A failed read is reported inside a 2xx, and the envelope then carries a `business_error` list beside `data`, with the code and what to do next. Read it before reading `data`.\n\nPolling cadence, because there is no push channel and every poll costs you a turn: send `full_scrape: true` on the first call only, then wait ~10s before the first poll, poll every ~15s with `full_scrape: false`, and stop after 10 attempts — about ~2.5 min at that cadence. On reaching the ceiling with the offer still missing, report that it could not be read; do not keep polling, and do not report the offer as unavailable.\n\nTHE ANSWER IS LARGE. Every variation carries its own shipping list, so an offer with 20 variations is around 160 KB. Shortlist offers from search_1688_offers_by_image (by `similarity_score`, `price`, `in_stock_qty`) and read only the ones the user is seriously considering, one at a time.\n\nREADING THE OFFER. `title`, `description` (HTML from the supplier), `attributes`, `item_specific`, `all_images`, `categories`, `price` (lowest variation, USD), `in_stock_qty`, `order_min_qty`. `variations[]` is what a sourcing request is built from: each variation's `id` is the SUPPLIER VARIATION id — the offer id, an underscore, then the supplier's own variation id, e.g. \"1048927055094_6245469138442\" — and it is exactly what create_1688_sourcing_request takes as `link.variations_match[].item_id_on_site`. Match a variation to the user's product by its `attributes` (e.g. {\"Color\": \"Purple\"}). Each variation also has `sku`, `price`, `in_stock_qty`, `image_url`, `product_dimensions` (size and weight), `shipping[]` — each option has `shipping_price` in USD, `shipping_time` in days and `shipping_tag` naming the carrier — and `shipping_by_region`, the same options keyed by destination country. Out-of-stock variations are left out of the answer, so a product variation with no counterpart here may simply be sold out on this offer.\n\nNEXT. Sourcing from this offer is create_1688_sourcing_request, with `alibaba_1688_id` set to the bare offer id and one `variations_match` entry per product variation. That call spends money; read its own notes before calling it.\n\nVariation images: the first 20 variations also come in an `images` block beside `data`, one ~220px thumbnail each from its `image_url`, captioned with its first attribute value (usually the colour) and keyed by the variation `id`. A client that renders MCP Apps shows them as a thumbnail grid, so the user can see which supplier variation matches which of their own, at no vision-token cost; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. An offer with more than 20 variations says so in the block's `note`, and the rest are in `data`. The offer's own gallery is `all_images`, in `data` only.",
+      "annotations": {
+        "title": "Get 1688 Product Details",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "images": {
+        "item_path": "data.*.variations",
+        "image_paths": [
+          "image_url"
+        ],
+        "per_item": 1,
+        "max": 20,
+        "label_path": "attributes.*",
+        "id_path": "id",
+        "widget": "product-grid",
+        "base64": "off"
+      },
+      "business_errors": {
+        "paths": [
+          "data.*.error.error_code"
+        ],
+        "codes": {
+          "CUSTOMIZABLE_PRODUCT": "This offer is a made-to-order item and cannot be sourced automatically. Pick a different offer.",
+          "BLACKLISTED_PRODUCT": "This offer's title contains restricted terms, so it cannot be sourced. Pick a different offer.",
+          "VIRTUAL_PRODUCT": "This offer is not a physical item. Pick a different offer.",
+          "SHIPPING_UNAVAILABLE": "This offer cannot be shipped. Pick a different offer. If none works, request_manual_sourcing is the fallback, but it spends a credit — ask the user first.",
+          "PRODUCT_OOS": "This offer is out of stock — or the id is not a 1688 offer id, which is reported the same way, so check the id first. Otherwise pick a different offer. If none works, request_manual_sourcing is the fallback, but it spends a credit — ask the user first.",
+          "PRODUCT_404": "This offer no longer exists on 1688. Pick a different offer.",
+          "NO_OFFERS": "Nothing could be read for this offer. Pick a different offer.",
+          "INVALID_INPUT": "The offer id was not accepted. Pass the bare offer id from search_1688_offers_by_image, not a variation id.",
+          "TOO_MANY_RETRIES": "Reading this offer was retried and gave up. Pick a different offer, or try this one again later only if the user wants this exact offer.",
+          "UNEXPECTED": "Reading this offer failed on the supplier side. Pick a different offer; report it if every offer fails this way."
+        }
+      }
+    }
+  ]
+}

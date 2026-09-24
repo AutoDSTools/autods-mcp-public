@@ -5,8 +5,9 @@ authenticated :class:`UserContext`, the dispatcher:
 
 1. looks up the manifest operation in the registry,
 2. resolves the upstream base URL from its ``base_url_key`` via ``Settings``,
-3. builds the upstream request — path-param substitution, query params, header
-   params, and the JSON body,
+3. builds the upstream request — path-param substitution, the operation's
+   ``fixed_query`` constants plus its query params, header params, and the JSON
+   body,
 4. forwards the caller's ``Authorization: Bearer ...`` so the upstream applies
    the user's own permissions (the public server never holds privileged creds),
 5. returns a structured envelope the MCP tool call serialises back to the client.
@@ -80,6 +81,20 @@ class DispatchResult(BaseModel):
     upstream_url: str = Field(default="", exclude=True)
 
 
+def _to_wire(value: Any) -> str:
+    """Render one argument as the text of a path segment, query value or header.
+
+    A boolean goes out as ``true`` / ``false``, the JSON spelling — the one
+    ``fixed_query`` already uses and the one httpx itself would send. ``str()``
+    gives Python's ``True`` / ``False``, which both current upstreams happen to
+    accept (marshmallow ``fields.Bool`` and pydantic both ignore case) but a
+    stricter parser reads as a non-boolean, or as false.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 class OperationDispatcher:
     """Forwards MCP tool calls to the right upstream REST operation."""
 
@@ -102,7 +117,9 @@ class OperationDispatcher:
         base_url = self._settings.upstream_base_url(operation.base_url_key or "autods_api")
 
         path = operation.path
-        query: dict[str, str] = {}
+        # Constants first; the boot lint guarantees no declared parameter shares
+        # a key with them, so the order never decides a value.
+        query: dict[str, str] = dict(operation.fixed_query)
         # The caller's own bearer token — never the server's. ``accept`` nudges
         # upstreams toward JSON; per-operation header params may override it.
         headers: dict[str, str] = {
@@ -120,11 +137,11 @@ class OperationDispatcher:
                 continue
             if parameter.location == "path":
                 # Encode the segment but keep it a single path component.
-                path = path.replace(f"{{{parameter.name}}}", quote(str(value), safe=""))
+                path = path.replace(f"{{{parameter.name}}}", quote(_to_wire(value), safe=""))
             elif parameter.location == "query":
-                query[parameter.name] = str(value)
+                query[parameter.name] = _to_wire(value)
             else:  # header
-                headers[parameter.name] = str(value)
+                headers[parameter.name] = _to_wire(value)
 
         body = arguments.get("body")
         if operation.request_body_required and body is None:

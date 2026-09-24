@@ -178,6 +178,9 @@ All settings come from environment variables. See
 | `MCP_REGISTRATION_REDIRECT_URIS` | yes for `/oauth/register` | JSON list of redirect URIs the DCR shim will echo back. Must mirror the URIs pre-registered on the Cognito client |
 | `FORCE_HTTPS` | yes in non-local | Set to `true` to acknowledge ALB-terminated TLS |
 | `PUBLIC_HOSTNAME` | yes in non-local | Pins the PRM URL host (defends against `Host` / `X-Forwarded-Host` injection) |
+| `AUTODS_API_BASE_URL` | no (default `https://api.autods.com`) | AutoDSApi upstream (`base_url_key: autods_api`) |
+| `PRODUCTS_RESEARCH_BASE_URL` | no (default `https://products-research.autods.com`) | ProductsResearch upstream (`base_url_key: products_research`); deployed as the gateway's `/marketplace/api` route |
+| `SCRAPERS_API_BASE_URL` | no (default `https://gw.autods.com/suppliers`) | Supplier scan upstream (`base_url_key: scrapers_api`, RD-95). **Must be the API gateway's `/suppliers` route, never the scrapers service itself**: the gateway swaps the caller's token for one the service accepts. Staging is `https://gw-staging.autods.com/suppliers`; a staging deploy without it falls back to the production gateway |
 | `MCP_MANIFEST_DIR` | no (default bundled `manifests/`) | Directory the MCP runtime loads tool manifests from. Point at an empty dir to serve zero tools |
 | `LOG_LEVEL` | no (default `INFO`) | |
 | `REDIS_URL` | yes in non-local | Shared Redis backing the per-user rate limiter (`redis://` / `rediss://`). Unset in local falls back to an in-process limiter |
@@ -305,10 +308,18 @@ fields the public server needs — two of them per operation:
   The server **refuses to boot** if any tool lacks a `title` or lacks both
   hint flags (D5).
 - `base_url_key` — which upstream serves the operation (`autods_api` →
-  `AUTODS_API_BASE_URL`, `products_research` → `PRODUCTS_RESEARCH_BASE_URL`).
+  `AUTODS_API_BASE_URL`, `products_research` → `PRODUCTS_RESEARCH_BASE_URL`,
+  `scrapers_api` → `SCRAPERS_API_BASE_URL`).
   Set per-operation or once at the manifest level; one running server can
   route different tools to different upstreams. An operation served *by this
   server* declares `handler` instead — see **Playbooks** below.
+
+One optional field is worth knowing about: `fixed_query` (RD-95), a map of
+query values sent on every call and never offered to the model. It is for an
+endpoint that serves several stores where the tool is only ever about one —
+`store=offers_1688` on the image search. A value the model must fill with a
+constant is a value it can fill wrong; and it cannot be written into `path`,
+because httpx replaces a URL's query string when the call adds its own.
 
 Each operation's path/query/header parameters (plus a free-form JSON `body`
 when present) are converted into a pydantic model whose JSON schema becomes
@@ -325,7 +336,9 @@ malformed manifest can't reach a client: (1) every operation must have an
 (3) the concatenated `instructions` (below) must be at most 6000 characters;
 (4) a `business_errors` block (below) must declare at least one path, and its
 operation's `notes` must mention `ok`; (5) each operation declares exactly one
-of `handler` / `base_url_key`; (6) the six playbook lints (below).
+of `handler` / `base_url_key`; (6) the six playbook lints (below); (7) a
+`fixed_query` key must not also be a declared parameter, and a locally-handled
+operation carries no `fixed_query`.
 
 #### Destructive tools
 
@@ -416,13 +429,16 @@ operation can declare where those codes live and what each one means:
 
 ```json
 "business_errors": {
-  "paths": ["scraper_error.errorCode", "data.*.error.errorCode"],
-  "codes": { "PRODUCT_OOS": "Offer is out of stock. Choose a different offer." }
+  "paths": ["data.*.error.error_code"],
+  "codes": { "PRODUCT_OOS": "This offer is out of stock. Pick a different offer." }
 }
 ```
 
 `paths` are dotted paths into the upstream payload (`*` matches every element
-of a list or value of a dict). On a match the envelope gains a
+of a list or value of a dict). Write them in the upstream's **wire** spelling,
+checked against a live response: the scrapers send `error_code`, while the web
+app's own request helper renames it `errorCode`, and a path in the wrong case
+simply never matches — nothing reports it. On a match the envelope gains a
 `business_error` list of `{code, message}` **next to** `data`; `data` itself is
 always the upstream payload verbatim, and an operation without the block gets
 an untouched envelope.
@@ -812,6 +828,50 @@ because nothing in the request says how many variations the product has — so a
 single entry with neither id passes the schema, and on a product with several
 variations it links nothing, silently. The `notes` say so.
 
+### Supplier scans (RD-95)
+
+Finding a 1688 supplier for a product comes before the sourcing writes above: an
+image-similarity search, then a full read of the chosen offer for its
+variations. Both tools live in `manifests/suppliers.json` and are forwarded to
+the ScrapersAPI service **through the API gateway** (`SCRAPERS_API_BASE_URL`),
+which swaps the caller's token for the one that service accepts.
+
+| Tool | Upstream | Answers |
+|---|---|---|
+| `search_1688_offers_by_image` | `GET /offers/scan` | 1688 offers whose pictures match one product image, each with a `similarity_score` (0–100) to rank by |
+| `get_1688_product_details` | `GET /products/scan` | one offer in full, with `variations[]` whose `id` (`<offer>_<sku>`) is what `create_1688_sourcing_request` takes as `item_id_on_site` |
+
+The store, region and warehouse are the same on every call, so they are sent as
+`fixed_query` constants and the model never sees them. Prices come back in USD.
+
+Four things that are easy to get wrong:
+
+- **Both are polled.** Each call starts the scan or reads how far it has got.
+  The cadence is the shared one (see **Polling conventions** above), with
+  `full_scrape: true` on the first attempt only.
+- **The two endpoints report their state differently.** The image search puts a
+  freshly queued search in `not_in_db`; the details read puts a queued offer in
+  `no_info` and leaves `not_in_db` empty. The details read also has no
+  search-wide error field, so a read that failed without an entry looks like a
+  slow one, and the poll ceiling is the only stop. `docs/polling-conventions.md`
+  has both state machines.
+- **An error is reported inside a 200.** Both tools carry a `business_errors`
+  block on the snake_case `error_code`, with all ten codes mapped; every one ends
+  the poll loop.
+- **The details answer is large.** Every variation carries its own shipping
+  list: an offer with 20 variations measured ~160 KB. The notes tell the agent
+  to shortlist from the search and read only the offers the user is considering.
+
+**Both draw a thumbnail grid**, because the user picks an offer by looking at it.
+The image search shows one ~220 px thumbnail per offer, captioned with its title,
+in the order of `data`. The details read shows the offer's variations, captioned
+with their first attribute (usually the colour), so the user can match them to
+their own. Neither grid is clickable — a 1688 offer has no page in the AutoDS web
+app — and neither shows a price, so the agent lists the offers in text as well.
+The image search also offers the `include_images` opt-in (base64 thumbnails the
+*model* can look at), for when the model has to judge whether an offer is really
+the same item; the user picking from the grid never needs it.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated
@@ -823,8 +883,8 @@ variations it links nothing, silently. The `notes` say so.
    SDK performs no validation of its own) and rejects a bad body as a typed
    `invalid_arguments` error before any upstream call.
 3. The dispatcher looks up the operation, resolves its upstream base URL
-   from `base_url_key`, substitutes path params, attaches query/header
-   params and the JSON body, forwards `Authorization: Bearer …`, and
+   from `base_url_key`, substitutes path params, attaches the operation's
+   `fixed_query` constants, the query/header params and the JSON body, forwards `Authorization: Bearer …`, and
    returns a structured `{ operation_id, status, ok, data }` envelope — plus a
    `business_error` sibling when the operation declares one and the payload
    matches, and a `playbook` sibling when the tool is a non-final step of a
@@ -870,6 +930,13 @@ choice here:
   closes the upstream HTTP and Redis clients on exit.
 
 ## Troubleshooting
+
+- **"Both supplier scan tools fail, and every other tool works."** Check
+  `SCRAPERS_API_BASE_URL` on the deployment before anything else (release check
+  S6). It must be this environment's gateway `/suppliers` route. Unset on
+  staging, it falls back to the production gateway, which does not accept a
+  staging token; pointed at the scrapers service directly, the call skips the
+  gateway's token swap and the service rejects the caller's token.
 
 - **"The sourcing request I submitted has vanished."** That is the failure
   signal, not a lost record. A request that fails is deleted rather than marked
@@ -1010,6 +1077,13 @@ skipped without it. The two free writes run against a request that already has a
 offer: `set_store_quote_shipping_option` re-chooses the option already in force,
 and `link_quoted_product` needs `E2E_SOURCING_LINK_VARIATION_ID` because it
 rewrites a product's supplier configuration.
+
+The two **supplier scans** (RD-95) are reads and need no flag. The run takes the
+images of a catalogue product it has already found, polls an image search until
+offers arrive (trying a second image if the first finds nothing), then polls a
+details read of the best-scoring offer. `SCRAPERS_API_BASE_URL` defaults to the
+*staging* gateway's `/suppliers` route here, not to the production default in
+`Settings`.
 
 **"Every registered tool" is a hand-maintained list, not a discovered one.** The
 op-name sets at the top of `tests/e2e/test_staging_smoke.py` are what

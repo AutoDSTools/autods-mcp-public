@@ -1,0 +1,134 @@
+{
+  "_comment": "RD-95. Live staging answers from gw-staging.autods.com/suppliers, recorded 2026-09-24 through the gateway with a Cognito user token, then trimmed (one offer, one variation, one shipping option each). They exist to pin the wire spelling of the error fields (snake_case `error_code`, not the frontend's `errorCode`) and the state each endpoint reports, so a business_errors path is tested against what the upstream really sends. `get_1688_product_details.invalid_id` is the placeholder the products view builds for an id that is not in 1688 offer format.",
+  "search_1688_offers_by_image": {
+    "queued": {
+      "data": [],
+      "scraper_error": null,
+      "no_info": [],
+      "not_in_db": ["2b17a3ba7b29d717:CN"]
+    },
+    "failed": {
+      "data": [],
+      "scraper_error": {
+        "error_code": "PRODUCT_404",
+        "error_msg": "Product doesn't exist on site.",
+        "retries": null
+      },
+      "no_info": ["2b17a3ba7b29d717:CN"],
+      "not_in_db": []
+    },
+    "done": {
+      "data": [
+        {
+          "id": "1048927055094",
+          "title": "Mobile phone stand logo cross-border desktop live broadcast tablet bedside stand adjustable folding multifunctional support frame",
+          "description": "",
+          "url": "https://detail.1688.com/offer/1048927055094.html?sk=consign",
+          "img_url": "https://cbu01.alicdn.com/O1CN01YOBlGs24KtKgOQMCf_!!2219064657373-0-cib.jpg",
+          "all_images": ["https://cbu01.alicdn.com/O1CN01YOBlGs24KtKgOQMCf_!!2219064657373-0-cib.jpg"],
+          "rating": 3.5,
+          "order_min_qty": 1,
+          "similarity_score": 52.38,
+          "price": 0.22,
+          "in_stock": 1,
+          "in_stock_qty": 999,
+          "shipping": []
+        }
+      ],
+      "scraper_error": null,
+      "no_info": [],
+      "not_in_db": []
+    }
+  },
+  "get_1688_product_details": {
+    "queued": {
+      "data": {},
+      "no_info": ["1049999999999"],
+      "not_in_db": []
+    },
+    "failed": {
+      "data": {
+        "1049999999999": {
+          "id": "1049999999999",
+          "item_input_id": "1049999999999",
+          "store_name": "alibaba_1688",
+          "title": "",
+          "price": 133.133,
+          "in_stock": null,
+          "variations": [],
+          "error": {
+            "error_code": "PRODUCT_404",
+            "error_msg": "Product doesn't exist on site.",
+            "retries": 0
+          }
+        }
+      },
+      "no_info": [],
+      "not_in_db": []
+    },
+    "invalid_id": {
+      "data": {
+        "1": {
+          "id": "1",
+          "item_input_id": "1",
+          "sold_by": "Out of stock",
+          "store_name": "alibaba_1688",
+          "title": "Out of stock",
+          "price": 133.133,
+          "in_stock": 0,
+          "in_stock_qty": 0,
+          "variations": [],
+          "error": {
+            "error_code": "PRODUCT_OOS",
+            "error_msg": "Product is out-of-stock (OOS).",
+            "retries": null
+          }
+        }
+      },
+      "no_info": [],
+      "not_in_db": []
+    },
+    "done": {
+      "data": {
+        "1048927055094": {
+          "id": "1048927055094",
+          "item_input_id": "1048927055094",
+          "store_name": "alibaba_1688",
+          "url": "https://detail.1688.com/offer/1048927055094.html",
+          "title": "Mobile phone stand logo cross-border desktop live broadcast tablet bed head stand lift folding multifunctional support frame",
+          "price": 0.22,
+          "in_stock": 1,
+          "in_stock_qty": 89118,
+          "order_min_qty": 1,
+          "attributes": {"Color": "Desktop Stand 758【Purple】"},
+          "all_images": ["https://cbu01.alicdn.com/img/ibank/O1CN01D8TkHm24KtKfhWaft_!!2219064657373-0-cib.jpg"],
+          "categories": [{"index": 0, "name": "Other"}],
+          "item_specific": {"Material": "Metal, Carbon steel"},
+          "variations": [
+            {
+              "id": "1048927055094_6245469138442",
+              "price": 0.22,
+              "sku": "6245469138442",
+              "image_url": "https://cbu01.alicdn.com/img/ibank/O1CN01b3u0im24KtKg3ijUW_!!2219064657373-0-cib.jpg",
+              "in_stock": 1,
+              "in_stock_qty": 89118,
+              "product_dimensions": {"length": null, "width": null, "height": null, "weight": {"unit_type": 1, "value": "75"}},
+              "shipping": [
+                {"shipping_price": 6.8, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Battery THZXR"}
+              ],
+              "shipping_by_region": {
+                "US": [
+                  {"shipping_price": 6.8, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Battery THZXR"}
+                ]
+              },
+              "attributes": {"Color": "Desktop Stand 758【Purple】"}
+            }
+          ],
+          "error": null
+        }
+      },
+      "no_info": [],
+      "not_in_db": []
+    }
+  }
+}

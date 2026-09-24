@@ -135,7 +135,7 @@ def _business_errors_op(**overrides: Any) -> ManifestOperation:
         "method": "POST",
         "path": "/scan",
         "notes": "`ok` is a transport-level signal only: a rejected scan still answers 200.",
-        "business_errors": {"paths": ["scraper_error.errorCode"], "codes": {"PRODUCT_OOS": "hint"}},
+        "business_errors": {"paths": ["scraper_error.error_code"], "codes": {"PRODUCT_OOS": "hint"}},
         "annotations": {"title": "Scan Offer", "readOnlyHint": True},
         # Set explicitly: these operations bypass the registry (which resolves
         # the manifest-level default), and ``build_tools`` requires exactly one

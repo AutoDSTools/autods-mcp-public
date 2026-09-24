@@ -182,9 +182,18 @@ e2e skips them unless the store's first quote is already at `ready` or `linked`.
 
 ## Scrapers: the three-state read
 
-For the ScrapersAPI child (`/offers/scan`, `/products/scan`). Both are
+Landed with RD-95 as `search_1688_offers_by_image` (`/offers/scan`) and
+`get_1688_product_details` (`/products/scan`), in `manifests/suppliers.json`. Both are
 poll-until-ready: the call queues a scrape and simultaneously returns whatever is in
-the store right now. An agent has to be able to tell **still working** from **done**
+the store right now. The poll is therefore the *same* call repeated, with
+`full_scrape=true` on the first attempt only.
+
+Measured on staging (2026-09-24, through the gateway): an image search answered
+`not_in_db` on the first call and offers on the second, ~12 s later; a details read of
+an offer that search had just found answered in full on the first call; a
+well-formed id for an offer that does not exist sat in `no_info` for one poll, then
+came back with `error.error_code: PRODUCT_404`. So the ceiling is rarely reached on a
+healthy input, and the loop mostly ends on data or on an error. An agent has to be able to tell **still working** from **done**
 from **failed**, and the fields that carry that are not the same on the two
 endpoints.
 
@@ -220,12 +229,18 @@ of them means "come back later", so an error always ends the poll loop. Re-queui
 with `full_scrape=true` is a *fresh scrape decision*, not a continuation of the loop,
 and it needs a reason to believe the input will scrape this time.
 
-**A `business_errors` block for these must use the wire spelling.** The illustrative
-block in `CLAUDE.md` / `README.md` shows `scraper_error.errorCode`; the ScrapersAPI
+**A `business_errors` block for these must use the wire spelling.** The ScrapersAPI
 response is `scraper_error.error_code` (the frontend's `scraperError.errorCode` is its
-own request helper camelising keys). A mis-cased path never matches, the boot lint
-cannot see it, and the operation ships looking protected — confirm the path against a
-live response before committing it.
+own request helper camelising keys, and was the spelling of this repo's illustrative
+blocks until RD-95). A mis-cased path never matches, the boot lint cannot see it, and
+the operation ships looking protected. RD-95 confirmed both paths against live
+answers — `scraper_error.error_code` on offers, `data.*.error.error_code` on products —
+and `tests/mcp_server/test_suppliers.py` runs them against those recorded answers.
+
+**`PRODUCT_OOS` on `/products/scan` is also the answer to a malformed id.** An id that
+fails the 1688 id format is never scraped: the view builds a placeholder entry (title
+"Out of stock", price `133.133`) with `PRODUCT_OOS` and answers at once. The tool's
+notes say to check the id before reporting an offer as sold out.
 
 Also note the asymmetry when writing the notes: `/products/scan` has **no
 `scraper_error`** field, so for a product a failed scrape that never produced a

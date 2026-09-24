@@ -130,7 +130,7 @@ environment a call lands in. Before the first tool call:
 
 | Phase | Section | Driver | Blocks |
 |---|---|---|---|
-| 1 | **S** — unauthenticated surface | `make release-checks` (shell) | nothing; S needs no connection |
+| 1 | **S** — unauthenticated surface | `make release-checks` (shell); S6 by hand from the deploy values | nothing; S needs no connection |
 | 2 | **C1–C2** — authorization | human, at a browser | everything below |
 | 3 | **C3–C9** — handshake payload | `make release-checks-c` (shell) | nothing |
 | 4 | **P** — account readiness | Claude, MCP | which of R/W can run at all |
@@ -278,6 +278,22 @@ a shim that accepts anything just moves the failure to sign-in.
 This proves only that the shim matches *its own* allowlist. That the allowlist
 mirrors what is registered on the Cognito app client is C1's job, and no script
 can drive it.
+
+**S6 — The supplier scans point at the gateway (manual, RD-95).** Not in the
+automated suite: nothing on the unauthenticated surface shows a deployment's
+upstream URLs, so this is read from the deployment, not from the host. Read
+`SCRAPERS_API_BASE_URL` in the released chart's values
+(`autods-mcp-deploy/helm-charts/autods-mcp/values-<env>.yaml`), or in the
+running pod's configmap if you have cluster access, and record the value.
+→ exactly `https://gw-staging.autods.com/suppliers` on staging and
+`https://gw.autods.com/suppliers` on production. Two wrong values, both of which
+boot cleanly: **missing**, which falls back to the production gateway — on staging
+that gateway does not accept the token, so both scan tools fail and every other
+tool works; and **the scrapers service's own host**, which skips the gateway's
+token swap, with the same symptom. The user sees "the assistant can't find a
+supplier for anything", and R17 is where that shows up if this check was skipped.
+`skipped` if you have neither the values file nor cluster access — say so, because
+R17 then carries the whole weight.
 
 ---
 
@@ -858,12 +874,14 @@ Then `get_product_by_id` on one of those `_id`s → `widget: "product-card"` and
 to 8 images on the single item. And `list_products` on P2's store →
 `widget: "product-grid"`.
 
-Also check **where the base64 opt-in is offered**, which is one tool and no
-others: `include_images` is in `get_product_by_id`'s schema and **absent** from
-every grid — `search_products`, `get_winning_products`, `get_similar_products`,
-`get_recommended_products` and `list_products`. Finding it on a grid means the
-withdrawal was reverted; a grid is something the user picks from, and the widget
-already does that at no token cost. Then call `get_product_by_id` again with
+Also check **where the base64 opt-in is offered**, which is two tools and no
+others: `include_images` is in the schema of `get_product_by_id` and of
+`search_1688_offers_by_image` (the one grid whose job is comparing pictures, RD-95),
+and **absent** from every other grid — `search_products`, `get_winning_products`,
+`get_similar_products`, `get_recommended_products`, `list_products` and
+`get_1688_product_details`. Finding it on one of those means the withdrawal was
+reverted; a grid is something the user picks from, and the widget already does
+that at no token cost. Then call `get_product_by_id` again with
 `include_images: true` and confirm image blocks come back with an `attached`
 count in the envelope — if `attached` is 0 or well short of the gallery, say so
 and quote the note: on a live host that most likely means the product's images
@@ -1034,6 +1052,69 @@ choice is made for the user before they are asked, so zero chosen options means 
 agent will present a decision that was already taken — report it. `skipped` per P10
 when the request has no offer yet; an `upstream_client_error` on a request at
 `new`/`in_progress` is the documented refusal, not a fault.
+
+**R17 — Supplier scans: "find me a 1688 supplier for this product" (RD-95).** The
+symptom these guard: a user asks for a supplier and the agent answers "none found"
+for a product that has plenty, or keeps polling a scan that already failed, or
+cannot tell which id to source with. Both calls are reads and safe in any
+environment. Each is polled, so run them at the documented cadence (first poll
+~10 s after the first call, then every ~15 s, 10 attempts at most).
+
+*R17.1 — the image search.* Take the `images` of R13.2's first Marketplace result
+(or R5's, if R13.2 did not run). Call `search_1688_offers_by_image`
+`{"img_url": "<the first image>", "full_scrape": true}`, then poll with
+`"full_scrape": false`.
+→ every answer is `ok: true` with `data` holding `data`, `scraper_error`,
+`no_info` and `not_in_db`. It ends in one of three ways, and only the first is a
+pass on its own: `data.data` non-empty, where every offer has a bare numeric `id`
+and a `similarity_score`; a `business_error` beside `data` whose `code` also
+appears in `data.scraper_error.error_code`; or the ceiling. On an error or the
+ceiling, repeat with the product's **next** image, as the notes tell an agent to —
+the first image often matches nothing. Every image of the product ending without
+offers is `skipped` with the codes seen, not a fail: a product with no 1688
+lookalike is not a server fault. **Every** scan tool call answering
+`unauthenticated` or `forbidden` while R1–R16 passed is a **fail** — it is the S6
+misroute, and the report should say so.
+
+A `scraper_error` in `data` with **no** `business_error` beside it is a fail: the
+manifest's error path no longer matches the wire, and an agent is told nothing.
+
+*R17.2 — the offer in full.* Take the offer with the highest `similarity_score`
+from R17.1 and call `get_1688_product_details`
+`{"asins": "<its id>", "full_scrape": true}`, then poll with `"full_scrape": false`
+until `data.data["<its id>"]` is present.
+→ that entry has `error: null` and a non-empty `variations`, and **every**
+variation's `id` is the offer id, an underscore, then digits
+(`1048927055094_6245469138442`). That id is what `create_1688_sourcing_request`
+takes as `item_id_on_site`, so any other shape breaks the sourcing chain at its
+last step. Note the answer's size in the report: ~160 KB for 20 variations is
+expected today, and much larger means an agent may lose the answer to its own
+response cap.
+
+Then call it once more with `{"asins": "1", "full_scrape": true}`.
+→ `ok: true`, and a `business_error` with `code: "PRODUCT_OOS"` beside `data`.
+That is the upstream's answer to a malformed id, and the check proves the
+per-offer error path reaches the envelope — the one thing on this tool that tells
+an agent to stop, since it has no search-wide error field.
+
+*R17.3 — the pictures the user picks from.* Two halves, split like R15.
+
+- *The envelope (Claude).* Re-use R17.1's finished answer: beside `data` there
+  must be an `images` block with `widget: "product-grid"`, one `items` entry per
+  offer **in the same order as `data.data`**, each with the offer `id`, the title
+  as `label`, and one URL ending `_220x220.jpg`, and **no** `link` key. On R17.2's
+  answer the block holds one entry per variation, keyed by the `<offer>_<sku>` id
+  and captioned with an attribute value (e.g. a colour), not the offer title. The
+  unfinished polls of R17.1 and R17.2 must carry **no** `images` block at all: an
+  empty grid while the scan runs would read as "no offers".
+- *The rendering (human, claude.ai web only).* Ask *"find a 1688 supplier for
+  <the R13.2 product>"* and look at the answer. A grid of offer thumbnails → pass.
+  Every cell "image unavailable" → the sandbox is blocking `cbu01.alicdn.com`,
+  which sits under the declared `*.alicdn.com` entry but has not been seen
+  rendering in a host before RD-95; quote one URL. Then ask for the details of one
+  offer and check the variation grid shows pictures with colour-like captions.
+  Reconnect the connector first if this release changed a widget (see R15.2).
+  `skipped` without a browser session, and say so in the report as R15.2 does.
 
 ---
 

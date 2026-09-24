@@ -356,15 +356,15 @@ async def test_delete_product_without_remove_from_marketplace_is_refused_locally
     request = upstream_calls[0]
     assert request.method == "DELETE"
     assert request.url.path == "/products/42/product/6512ab34cd56ef7890123456/"
-    assert request.url.params["remove_from_marketplace"] == "True"
-    # Both spellings are pinned because ``_build_request`` renders a query
-    # parameter with ``str()``, and this is the only boolean query parameter in
-    # any manifest — so nothing else covers that path. The upstream reads it
-    # with marshmallow ``fields.Bool``, which accepts "True"/"False"; ``false``
-    # is the value with the lasting consequence (a listing left live with
-    # nothing monitoring it), so a change to how booleans are rendered has to
-    # fail here rather than in someone's store.
-    assert upstream_calls[1].url.params["remove_from_marketplace"] == "False"
+    assert request.url.params["remove_from_marketplace"] == "true"
+    # Both spellings are pinned because ``_build_request`` renders a boolean
+    # itself (``dispatch._to_wire``), as the JSON ``true``/``false``. The
+    # upstream reads it with marshmallow ``fields.Bool``, which accepts that
+    # spelling (and the ``True``/``False`` that ``str()`` used to produce);
+    # ``false`` is the value with the lasting consequence (a listing left live
+    # with nothing monitoring it), so a change to how booleans are rendered has
+    # to fail here rather than in someone's store.
+    assert upstream_calls[1].url.params["remove_from_marketplace"] == "false"
 
 
 # --- The sourcing writes (RD-94) ---------------------------------------------

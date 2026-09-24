@@ -11,7 +11,7 @@ writes by hand, not a query language:
 
 * ``a.b.c`` walks dict keys.
 * ``*`` matches **every** element of a list or **every** value of a dict at that
-  position, so ``data.*.error.errorCode`` reads one field out of every item of a
+  position, so ``data.*.error.error_code`` reads one field out of every item of a
   result page.
 * A list index is *not* addressable on purpose: ``data.0.x`` would encourage
   manifests that depend on upstream ordering. Use ``*``.

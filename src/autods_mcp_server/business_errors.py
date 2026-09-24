@@ -30,7 +30,7 @@ BUSINESS_ERROR_KEY = "business_error"
 # caught up with yet is exactly when that trap bites.
 #
 # Deliberately does *not* claim the request was not applied. A per-item path
-# (``data.*.error.errorCode``) matches when one item of a page failed and the
+# (``data.*.error.error_code``) matches when one item of a page failed and the
 # rest landed, so "not applied" would be a false statement about the call as a
 # whole — and this hint is the one the model reads precisely when nobody has
 # curated the code's meaning yet.

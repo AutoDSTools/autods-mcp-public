@@ -38,8 +38,9 @@ def test_loads_vendored_products_manifest(bundled_manifest_dir: Path) -> None:
     # link_quoted_product) + 7 store-quote ops (4 reads + RD-94's 3 writes)
     # + 6 ProductsResearch ops
     # + 2 users ops (get_current_user, get_user_subscription)
+    # + 2 supplier scan ops (RD-95)
     # + 1 locally-served op (get_playbook).
-    assert len(operations) == 23
+    assert len(operations) == 25
     assert all(isinstance(op, ManifestOperation) for op in operations)
 
     op = registry.get("upload_products")

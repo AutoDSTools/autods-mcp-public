@@ -27,8 +27,8 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (16 AutoDSApi ops + 6 ProductsResearch ops + 1 op
-# this server answers itself). Used both to assert tools/list and to drive the
+# The full registered tool set (16 AutoDSApi ops + 6 ProductsResearch ops + 2
+# ScrapersAPI ops + 1 op this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
 AUTODS_OPS = {
@@ -57,9 +57,11 @@ PRODUCTS_RESEARCH_OPS = {
     "get_recommended_products",
     "get_categories",
 }
+# RD-95: the supplier scans, forwarded to ScrapersAPI through the gateway.
+SCRAPERS_OPS = {"search_1688_offers_by_image", "get_1688_product_details"}
 # Answered locally (RD-100), so it never reaches an upstream.
 LOCAL_OPS = {"get_playbook"}
-ALL_OPS = AUTODS_OPS | PRODUCTS_RESEARCH_OPS | LOCAL_OPS
+ALL_OPS = AUTODS_OPS | PRODUCTS_RESEARCH_OPS | SCRAPERS_OPS | LOCAL_OPS
 
 # Write ops: only exercised when E2E_INCLUDE_WRITES=1 (they mutate staging).
 WRITE_OPS = {"upload_products", "publish_drafts_to_marketplace", "delete_product"}
@@ -89,6 +91,14 @@ SOURCING_WRITE_OPS = {
 _POLL_FIRST_DELAY_SECONDS = 10
 _POLL_INTERVAL_SECONDS = 15
 _POLL_ATTEMPTS = 4
+
+# RD-95: the supplier scans poll the same way. Measured on staging, an image
+# search answered on its second attempt and a details read on its first; six
+# attempts keeps a slow scan a pass without letting one image hold the suite for
+# the full ~2.5 min, and two images covers the "first image finds nothing" case
+# the notes describe.
+_SCAN_ATTEMPTS = 6
+_SCAN_IMAGES = 2
 
 # Store-quote statuses that have a supplier offer attached
 # (``docs/polling-conventions.md``). Only these two can answer
@@ -145,6 +155,17 @@ def _first_product_id(data: Any) -> str | None:
                 if isinstance(value, str) and value:
                     return value
     return None
+
+
+def _first_product_images(data: Any) -> list[str]:
+    """The image URLs of the first catalogue result that has any (RD-95)."""
+    results = data.get("results") if isinstance(data, dict) else None
+    for product in results if isinstance(results, list) else []:
+        images = product.get("images") if isinstance(product, dict) else None
+        urls = [url for url in images or [] if isinstance(url, str) and url.startswith("http")]
+        if urls:
+            return urls
+    return []
 
 
 def _first_store_quote(data: Any) -> tuple[int, int, str, str, str] | None:
@@ -224,7 +245,7 @@ async def test_tools_list_exposes_all_registered_ops(staging_app, access_token) 
     assert names == ALL_OPS
     # Every ProductsResearch op is advertised read-only.
     by_name = {tool.name: tool for tool in tools.tools}
-    for op in PRODUCTS_RESEARCH_OPS:
+    for op in PRODUCTS_RESEARCH_OPS | SCRAPERS_OPS:
         assert by_name[op].annotations.read_only_hint is True
 
 
@@ -254,6 +275,8 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
 
         # --- ProductsResearch reads (also discover a product id to reuse) ---
         product_id: str | None = None
+        # RD-95: the images of one catalogue product, for the supplier scans.
+        product_images: list[str] = []
 
         # RD-107: `filters` is a required property, and the unfiltered listing is
         # the empty *list* — a body with no `filters` key is refused by the schema
@@ -266,6 +289,7 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         _record("search_products", search, failures, frozenset())
         if not search.is_error:
             product_id = _first_product_id((search.structured_content or {}).get("data"))
+            product_images = _first_product_images((search.structured_content or {}).get("data"))
 
         # RD-108: the category tree, and the reason it exists — a top-level id
         # has to come back with products under it, since the filter matches a
@@ -318,6 +342,11 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         _record("get_winning_products", winning, failures, frozenset())
         if product_id is None and not winning.is_error:
             product_id = _first_product_id((winning.structured_content or {}).get("data"))
+        if not product_images and not winning.is_error:
+            product_images = _first_product_images((winning.structured_content or {}).get("data"))
+
+        # --- ScrapersAPI: supplier scans (RD-95) ---
+        await _smoke_supplier_scans(call, product_images, failures, skipped)
 
         # These three need a real product id; a 307 (subscription-gated winning
         # product) is a documented business response for get_product_by_id.
@@ -505,6 +534,90 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         # coverage (missing store ids / product id / writes disabled).
         print(f"e2e smoke skipped ops (insufficient fixtures): {sorted(set(skipped))}")
     assert not failures, "ops failed the smoke contract:\n" + "\n".join(failures)
+
+
+async def _poll_scan(call: Any, name: str, arguments: dict[str, Any], done: Any) -> types.CallToolResult | None:
+    """Poll one scan tool at the documented cadence until ``done(data)`` holds.
+
+    ``full_scrape`` is true on the first attempt only, as both tools' notes say.
+    Returns the last result — an error, a result carrying ``business_error``
+    (both end the loop), or the finished one — or ``None`` at the ceiling.
+    """
+    for attempt in range(_SCAN_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_POLL_FIRST_DELAY_SECONDS if attempt == 1 else _POLL_INTERVAL_SECONDS)
+        result = await call(name, {**arguments, "full_scrape": attempt == 0})
+        payload = result.structured_content or {}
+        if result.is_error or payload.get("business_error") or done(payload.get("data")):
+            return result
+    return None
+
+
+async def _smoke_supplier_scans(
+    call: Any,
+    product_images: list[str],
+    failures: list[str],
+    skipped: list[str],
+) -> None:
+    """RD-95: an image search driven to real offers, then a details read of one.
+
+    Read-only on both sides, so it needs no flag. It walks the product's images
+    the way the notes tell an agent to, because the first image often matches
+    nothing. A search that ends in a ``business_error`` or at the ceiling is a
+    skip — a product with no 1688 lookalike is not a server fault — but an
+    ``ok`` answer whose offers do not have the documented shape is a failure.
+    """
+    if not product_images:
+        skipped.extend(f"{op} (no catalogue product image to search with)" for op in sorted(SCRAPERS_OPS))
+        return
+
+    offers: list[Any] = []
+    for image in product_images[:_SCAN_IMAGES]:
+        result = await _poll_scan(
+            call,
+            "search_1688_offers_by_image",
+            {"img_url": image},
+            lambda data: isinstance(data, dict) and bool(data.get("data")),
+        )
+        if result is None:
+            continue
+        _record("search_1688_offers_by_image", result, failures, frozenset())
+        data = None if result.is_error else (result.structured_content or {}).get("data")
+        if isinstance(data, dict) and data.get("data"):
+            offers = data["data"]
+            break
+    if not offers:
+        skipped.extend(
+            f"{op} (no 1688 offer found for the first {_SCAN_IMAGES} product images)" for op in sorted(SCRAPERS_OPS)
+        )
+        return
+
+    best = max(offers, key=lambda offer: offer.get("similarity_score") or 0)
+    offer_id = best.get("id")
+    if not (isinstance(offer_id, str) and offer_id.isdigit() and "similarity_score" in best):
+        failures.append(f"search_1688_offers_by_image: an offer lacks a numeric `id` or `similarity_score`: {best}")
+        return
+
+    details = await _poll_scan(
+        call,
+        "get_1688_product_details",
+        {"asins": offer_id},
+        lambda data: isinstance(data, dict) and isinstance((data.get("data") or {}).get(offer_id), dict),
+    )
+    if details is None:
+        skipped.append(f"get_1688_product_details (offer {offer_id} not read by the ceiling)")
+        return
+    _record("get_1688_product_details", details, failures, frozenset())
+    payload = details.structured_content or {}
+    if details.is_error or payload.get("business_error"):
+        return
+    entry = payload["data"]["data"][offer_id]
+    variations = entry.get("variations") or []
+    if not variations or not all(str(v.get("id", "")).startswith(f"{offer_id}_") for v in variations):
+        failures.append(
+            f"get_1688_product_details: offer {offer_id}'s variations do not carry `<offer>_<sku>` ids, "
+            f"which is what create_1688_sourcing_request takes as item_id_on_site"
+        )
 
 
 async def _smoke_sourcing_writes(

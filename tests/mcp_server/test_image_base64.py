@@ -93,15 +93,20 @@ async def test_include_images_is_advertised_only_where_there_is_an_image_surface
         tools = await session.list_tools()
 
     carries = {tool.name for tool in tools.tools if INCLUDE_IMAGES_ARG in (tool.input_schema.get("properties") or {})}
-    # One tool, and it is the single-product read.
+    # Two tools: the single-product read, and the offer image search.
     #
     # The four discovery grids render a widget and withhold base64: a result set
     # is something the *user* picks from, which the widget does at zero vision
     # tokens, and offering the flag there mostly buys a model that sets it out of
     # habit and pays ~1,620 tokens on every subsequent turn. Judging a picture is
-    # a per-product act, so the per-product read is where the flag belongs until
-    # there is a tool whose whole job is comparing images (RD-95's offer scan).
-    assert carries == {"get_product_by_id"}
+    # a per-product act, so the per-product read is where the flag belongs — and
+    # the RD-95 offer search, whose whole job is comparing images, which is the
+    # one set where the *model* may have to judge "is this the same item?". It
+    # stays opt-in there: the user choosing from the grid never needs it.
+    assert carries == {"get_product_by_id", "search_1688_offers_by_image"}
+    # The offer's variations are matched by their attribute captions, not by
+    # the model looking at them, so that grid withholds it too.
+    assert "get_1688_product_details" not in carries
     # `list_products` renders a widget but withholds base64 for its own reason:
     # roughly half of those images have no small variant to fetch, so the model
     # would be handed full-size originals to downscale. Deferred, not forgotten.

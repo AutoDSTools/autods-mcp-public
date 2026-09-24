@@ -79,6 +79,10 @@ class OperationHandlerError(ValueError):
     """An operation names both a local handler and an upstream, or neither."""
 
 
+class FixedQueryError(ValueError):
+    """An operation's ``fixed_query`` collides with a parameter, or is never sent."""
+
+
 # The parameter a ``handler: "playbook"`` operation takes. Its ``enum`` is the
 # registered playbook names, injected at boot — which is what makes the enum the
 # index: ``inputSchema`` is the most reliably delivered channel there is, so the
@@ -338,6 +342,33 @@ def _assert_handler_or_upstream(operation: ManifestOperation, playbooks: Playboo
         )
 
 
+def _assert_fixed_query_usable(operation: ManifestOperation) -> None:
+    """Reject a ``fixed_query`` that shares a key with a parameter, or that is never sent (RD-95).
+
+    Both fail silently otherwise. A key that is also a declared parameter lets
+    one value quietly replace the other — the constant was written because the
+    model must not choose that value, and a parameter of the same name gives
+    the choice straight back. A locally-handled operation builds no upstream
+    request, so constants on it are config nothing reads.
+
+    Raises:
+        FixedQueryError: at boot, like the other manifest lints.
+    """
+    if not operation.fixed_query:
+        return
+    if operation.handler is not None:
+        raise FixedQueryError(
+            f"Operation '{operation.operation_id}' declares 'fixed_query' but is answered locally; "
+            f"nothing would ever send it."
+        )
+    clashes = sorted({parameter.name for parameter in operation.parameters} & operation.fixed_query.keys())
+    if clashes:
+        raise FixedQueryError(
+            f"Operation '{operation.operation_id}' declares {clashes} both as 'fixed_query' and as a "
+            f"parameter; one would silently override the other."
+        )
+
+
 def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry | None = None) -> list[types.Tool]:
     """Lint, then convert every operation to an MCP tool descriptor."""
     assert_valid_annotations(operations)
@@ -345,5 +376,6 @@ def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry
         _assert_integer_enum_fields(operation)
         _assert_business_errors_usable(operation)
         _assert_handler_or_upstream(operation, playbooks)
+        _assert_fixed_query_usable(operation)  # RD-95
         assert_images_usable(operation)  # RD-92
     return [to_tool(operation, playbooks) for operation in operations]

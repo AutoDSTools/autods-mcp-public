@@ -30,6 +30,7 @@ _DEFAULT_MANIFEST_DIR = Path(__file__).resolve().parents[2] / "manifests"
 _BASE_URL_KEY_TO_ATTR: dict[str, str] = {
     "autods_api": "autods_api_base_url",
     "products_research": "products_research_base_url",
+    "scrapers_api": "scrapers_api_base_url",
 }
 
 
@@ -73,6 +74,14 @@ class Settings(BaseSettings):
     products_research_base_url: str = Field(
         default="https://products-research.autods.com",
         validation_alias="PRODUCTS_RESEARCH_BASE_URL",
+    )
+    # RD-95: the supplier scan endpoints. This must be the API gateway's
+    # ``/suppliers`` route, never the service itself: the gateway swaps the
+    # caller's token for the scrapers' own OAuth token on the way in, so a
+    # direct URL reaches the service with a token it does not accept.
+    scrapers_api_base_url: str = Field(
+        default="https://gw.autods.com/suppliers",
+        validation_alias="SCRAPERS_API_BASE_URL",
     )
 
     # Web-app host for the product links a widget renders (RD-92). Unset ⇒

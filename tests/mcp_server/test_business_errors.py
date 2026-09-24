@@ -34,7 +34,7 @@ def _operation(**overrides: Any) -> ManifestOperation:
         "method": "POST",
         "path": "/scan",
         "annotations": {"title": "Scan Offer", "readOnlyHint": True},
-        "business_errors": {"paths": ["scraper_error.errorCode", "data.*.error.errorCode"], "codes": _CODES},
+        "business_errors": {"paths": ["scraper_error.error_code", "data.*.error.error_code"], "codes": _CODES},
     }
     payload.update(overrides)
     return ManifestOperation.model_validate(payload)
@@ -92,11 +92,11 @@ def test_an_empty_path_matches_nothing() -> None:
 
 def test_no_block_means_no_business_error() -> None:
     operation = _operation(business_errors=None)
-    assert detect_business_errors(operation, {"scraper_error": {"errorCode": "PRODUCT_OOS"}}) is None
+    assert detect_business_errors(operation, {"scraper_error": {"error_code": "PRODUCT_OOS"}}) is None
 
 
 def test_a_matching_code_is_rendered_with_its_recovery_hint() -> None:
-    result = detect_business_errors(_operation(), {"scraper_error": {"errorCode": "PRODUCT_OOS"}})
+    result = detect_business_errors(_operation(), {"scraper_error": {"error_code": "PRODUCT_OOS"}})
     assert result == [{"code": "PRODUCT_OOS", "message": _CODES["PRODUCT_OOS"]}]
 
 
@@ -106,21 +106,21 @@ def test_a_clean_payload_produces_nothing() -> None:
 
 def test_a_null_or_blank_code_is_not_an_error() -> None:
     """Several upstreams send the field as null/empty rather than omitting it."""
-    assert detect_business_errors(_operation(), {"scraper_error": {"errorCode": None}}) is None
-    assert detect_business_errors(_operation(), {"scraper_error": {"errorCode": "  "}}) is None
+    assert detect_business_errors(_operation(), {"scraper_error": {"error_code": None}}) is None
+    assert detect_business_errors(_operation(), {"scraper_error": {"error_code": "  "}}) is None
 
 
 def test_codes_are_deduplicated_across_a_page() -> None:
     """A page of 100 items that all failed the same way is one fact, not a
     hundred repetitions that crowd out the payload."""
-    payload = {"data": [{"error": {"errorCode": "PRODUCT_OOS"}} for _ in range(100)]}
+    payload = {"data": [{"error": {"error_code": "PRODUCT_OOS"}} for _ in range(100)]}
     assert detect_business_errors(_operation(), payload) == [{"code": "PRODUCT_OOS", "message": _CODES["PRODUCT_OOS"]}]
 
 
 def test_several_codes_are_reported_in_path_then_document_order() -> None:
     payload = {
-        "scraper_error": {"errorCode": "SHIPPING_UNAVAILABLE"},
-        "data": [{"error": {"errorCode": "PRODUCT_OOS"}}],
+        "scraper_error": {"error_code": "SHIPPING_UNAVAILABLE"},
+        "data": [{"error": {"error_code": "PRODUCT_OOS"}}],
     }
     assert [entry["code"] for entry in detect_business_errors(_operation(), payload)] == [
         "SHIPPING_UNAVAILABLE",
@@ -131,7 +131,7 @@ def test_several_codes_are_reported_in_path_then_document_order() -> None:
 def test_an_unmapped_code_is_still_surfaced() -> None:
     """The whole point of the block is that ``ok`` must not be read as success —
     which is exactly when a code the manifest hasn't caught up with bites."""
-    result = detect_business_errors(_operation(), {"scraper_error": {"errorCode": "BRAND_NEW_CODE"}})
+    result = detect_business_errors(_operation(), {"scraper_error": {"error_code": "BRAND_NEW_CODE"}})
     assert result[0]["code"] == "BRAND_NEW_CODE"
     assert result[0]["message"]
 
@@ -141,7 +141,7 @@ def test_the_unmapped_hint_claims_nothing_about_what_was_applied() -> None:
     landed, so the generic hint must not assert the call did nothing — it points
     at ``data`` instead. The mapped hints are author-written per code and can be
     as specific as the code warrants; this one can't be."""
-    payload = {"data": [{"error": {"errorCode": "UNKNOWN_CODE"}}, {"title": "this one landed"}]}
+    payload = {"data": [{"error": {"error_code": "UNKNOWN_CODE"}}, {"title": "this one landed"}]}
     message = detect_business_errors(_operation(), payload)[0]["message"]
 
     assert "was not applied" not in message
@@ -182,7 +182,7 @@ _SCAN_MANIFEST: dict[str, Any] = {
             "summary": "Scan one supplier offer.",
             "notes": "`ok` is a transport-level signal only: a rejected scan still answers 200.",
             "annotations": {"title": "Scan Offer", "readOnlyHint": True},
-            "business_errors": {"paths": ["scraper_error.errorCode"], "codes": _CODES},
+            "business_errors": {"paths": ["scraper_error.error_code"], "codes": _CODES},
         }
     ],
 }
@@ -205,7 +205,7 @@ def _upstream(payload: dict[str, Any]):
 async def test_a_200_with_an_error_payload_carries_a_business_error(
     mcp_settings, make_mcp_app, tmp_path: Path, access_token
 ) -> None:
-    upstream_payload = {"scraper_error": {"errorCode": "PRODUCT_OOS", "message": "oos"}}
+    upstream_payload = {"scraper_error": {"error_code": "PRODUCT_OOS", "message": "oos"}}
     settings = mcp_settings(manifest_dir=_scan_dir(tmp_path))
     app, runtime = make_mcp_app(settings, upstream_handler=_upstream(upstream_payload))
 

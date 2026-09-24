@@ -49,6 +49,8 @@ Optional:
   ``SECRET_HASH`` to InitiateAuth).
 * ``AUTODS_API_BASE_URL`` / ``PRODUCTS_RESEARCH_BASE_URL`` — staging upstreams
   (default to the production hostnames baked into Settings).
+* ``SCRAPERS_API_BASE_URL`` — the supplier scan upstream (RD-95). Defaults to the
+  *staging* gateway's ``/suppliers`` route, not to the Settings default.
 * ``E2E_STORE_IDS`` — comma-separated AutoDS store ids for the store-scoped ops;
   when unset those ops are skipped rather than failed.
 * ``E2E_INCLUDE_WRITES=1`` — also exercise the write ops (upload_products,
@@ -163,6 +165,11 @@ _REQUIRED_VARS = (
 # which the smoke test reports rather than papering over.
 _PLACEHOLDER_ASIN = "B0TEST0000"
 
+# RD-95: the staging gateway's supplier route. Always the gateway, never the
+# service: the gateway is what swaps the caller's token for one the service
+# accepts.
+_STAGING_SCRAPERS_API_BASE_URL = "https://gw-staging.autods.com/suppliers"
+
 
 @dataclass(frozen=True)
 class StagingConfig:
@@ -187,6 +194,7 @@ class StagingConfig:
     sourcing_link_store_quote_id: str | None = None
     autods_api_base_url: str | None = None
     products_research_base_url: str | None = None
+    scrapers_api_base_url: str = ""
     extra: dict[str, str] = field(default_factory=dict)
 
 
@@ -219,6 +227,7 @@ def staging_config() -> StagingConfig:
         sourcing_link_store_quote_id=os.environ.get("E2E_SOURCING_LINK_STORE_QUOTE_ID"),
         autods_api_base_url=os.environ.get("AUTODS_API_BASE_URL"),
         products_research_base_url=os.environ.get("PRODUCTS_RESEARCH_BASE_URL"),
+        scrapers_api_base_url=os.environ.get("SCRAPERS_API_BASE_URL", _STAGING_SCRAPERS_API_BASE_URL),
     )
 
 
@@ -299,6 +308,10 @@ def staging_settings(staging_config: StagingConfig, monkeypatch: pytest.MonkeyPa
         env["AUTODS_API_BASE_URL"] = staging_config.autods_api_base_url
     if staging_config.products_research_base_url:
         env["PRODUCTS_RESEARCH_BASE_URL"] = staging_config.products_research_base_url
+    # RD-95: unlike the two above, this one has a staging default. The Settings
+    # default is the prod gateway, which does not accept a staging token, so
+    # falling back to it would fail both scan tools on every run.
+    env["SCRAPERS_API_BASE_URL"] = staging_config.scrapers_api_base_url
 
     for key, value in env.items():
         monkeypatch.setenv(key, value)

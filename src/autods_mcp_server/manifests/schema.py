@@ -193,6 +193,14 @@ class ManifestOperation(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     parameters: list[ManifestParameter] = Field(default_factory=list)
+    # RD-95: query values sent on every call and never offered to the model.
+    # For an upstream that serves several stores behind one endpoint, where this
+    # tool is only ever about one of them (``store=offers_1688``): a parameter
+    # the model must fill with a constant is a parameter it can fill wrong. It
+    # cannot live in ``path`` either, because httpx *replaces* a URL's query
+    # string when ``params`` is passed. A boot lint forbids a key that is also a
+    # declared parameter, so neither side can silently override the other.
+    fixed_query: dict[str, str] = Field(default_factory=dict)
     has_json_body: bool = False
     request_body_required: bool = False
     # Optional JSON Schema describing the request body. When set, the converter

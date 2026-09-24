@@ -244,6 +244,45 @@ def test_the_sourcing_write_offers_the_failure_exit(bundled_manifest_dir: Path) 
         assert "delete_product" in text, f"{operation_id} no longer names the cleanup tool"
 
 
+# --- tier 2: the supplier scans (RD-95) --------------------------------------
+
+SUPPLIER_SCAN_OPS = ("search_1688_offers_by_image", "get_1688_product_details")
+
+
+@pytest.mark.parametrize("operation_id", SUPPLIER_SCAN_OPS)
+def test_the_supplier_scans_carry_the_cadence_themselves(bundled_manifest_dir: Path, operation_id: str) -> None:
+    """Both scans are polled — the same call, repeated — so each is the
+    descriptor the agent holds when it decides whether to call again."""
+    text = _tool_text(bundled_manifest_dir, operation_id)
+
+    for token in CADENCE_TOKENS:
+        assert token in text, f"{operation_id} no longer states {token!r}"
+
+
+@pytest.mark.parametrize("operation_id", SUPPLIER_SCAN_OPS)
+def test_the_supplier_scans_force_a_scrape_on_the_first_attempt_only(
+    bundled_manifest_dir: Path, operation_id: str
+) -> None:
+    """``full_scrape`` true on every poll restarts the scan each time, so it
+    never finishes. The rule has to be on the parameter (tier 1, where the value
+    is chosen) and in the notes (tier 2, where the loop is described)."""
+    registry = build_registry(bundled_manifest_dir)
+    operation = registry.get(operation_id)
+    parameter = next(p for p in operation.parameters if p.name == "full_scrape")
+
+    assert "FIRST call" in (parameter.description or "")
+    assert "`full_scrape: true` on the first call only" in (operation.notes or "")
+
+
+@pytest.mark.parametrize("operation_id", SUPPLIER_SCAN_OPS)
+def test_the_supplier_scans_say_what_the_ceiling_means(bundled_manifest_dir: Path, operation_id: str) -> None:
+    """A ceiling with nothing found is neither "found nothing" nor "done"."""
+    notes = build_registry(bundled_manifest_dir).get(operation_id).notes or ""
+
+    assert "On reaching the ceiling" in notes
+    assert "do not keep polling" in notes
+
+
 # --- tier 3: the playbook runbook --------------------------------------------
 
 
@@ -386,6 +425,11 @@ async def test_the_sourcing_write_contract_reaches_a_real_client(
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
         tools = await session.list_tools()
+
+    for scan in SUPPLIER_SCAN_OPS:
+        delivered = next(tool for tool in tools.tools if tool.name == scan)
+        for token in CADENCE_TOKENS:
+            assert token in delivered.description, f"the delivered {scan} descriptor lacks {token!r}"
 
     writer = next(tool for tool in tools.tools if tool.name == "create_1688_sourcing_request")
     description = writer.description.lower()

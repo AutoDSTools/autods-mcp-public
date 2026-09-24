@@ -81,7 +81,7 @@ Module map (`src/autods_mcp_server/`):
 - `tools.py` — converts manifest operations to MCP `Tool` descriptors and runs the boot
   lint (D5).
 - `dispatch.py` — `OperationDispatcher` resolves the upstream base URL, substitutes path
-  params, attaches query/header params + JSON body, forwards the caller's bearer token,
+  params, attaches the operation's `fixed_query` constants, query/header params + JSON body, forwards the caller's bearer token,
   and returns a `{ operation_id, status, ok, data }` envelope.
 - `mcp_transport.py` — builds the runtime and mounts the **stateless** Streamable HTTP
   transport behind the auth dependency; the `call_tool` handler applies rate limiting,
@@ -127,8 +127,11 @@ Module map (`src/autods_mcp_server/`):
 Tools are defined by JSON manifests under `manifests/` (`MCP_MANIFEST_DIR`), maintained by
 hand. To add a tool, add a JSON operation entry — do **not** write a Python function.
 Each operation needs `operation_id`, `method`, `path`, `parameters`,
-`has_json_body`/`request_body_required`, `base_url_key` (`autods_api` or
-`products_research`), and `annotations`. The exception is a **locally-handled**
+`has_json_body`/`request_body_required`, `base_url_key` (`autods_api`,
+`products_research` or `scrapers_api`), and `annotations`. Query values that never
+change and must not be the model's choice go in `fixed_query` (RD-95), not in
+`parameters` and not in `path` — see the gotcha under **Manifests, the registry and
+the upstream contract**. The exception is a **locally-handled**
 operation (RD-100), which declares `handler` instead of `base_url_key` and carries no
 `method`/`path` at all — see **Playbooks** below.
 
@@ -161,6 +164,10 @@ client:
   (RD-92). Each of those otherwise ships as a link that is never built, one built
   wrong, or one that hides every entry after it.
 - The six playbook lints (RD-100), below.
+- A `fixed_query` key must not also be a declared parameter, and a locally-handled
+  operation carries no `fixed_query` (RD-95). The first would let one value quietly
+  override the other and hand the model back a choice the constant exists to take
+  away; the second is config nothing ever sends.
 
 ### Destructive operations
 
@@ -288,13 +295,16 @@ each code means, as data:
 
 ```json
 "business_errors": {
-  "paths": ["scraper_error.errorCode", "data.*.error.errorCode"],
-  "codes": { "PRODUCT_OOS": "Offer is out of stock. Choose a different offer." }
+  "paths": ["data.*.error.error_code"],
+  "codes": { "PRODUCT_OOS": "This offer is out of stock. Pick a different offer." }
 }
 ```
 
 `paths` are dotted paths **into the upstream payload** (i.e. relative to the envelope's
-`data`), where `*` fans out over a list's elements or a dict's values. A match publishes a
+`data`), where `*` fans out over a list's elements or a dict's values. They use the
+upstream's **wire** spelling, confirmed against a live response — see the snake_case
+gotcha below; `manifests/suppliers.json` (RD-95) is the reference, and its paths are
+tested against recorded staging answers in `tests/mcp_server/data/scrapers_payload_samples.json`. A match publishes a
 `business_error` list of `{code, message}` **beside** `data` — never inside it, so the
 upstream payload stays verbatim and `dispatch.py` stays a pure forwarder. An operation
 carrying this block must also say in its `notes` that `ok` is transport-level only — the
@@ -347,19 +357,35 @@ same rule and same reason as `business_error` and `playbook`:
    entirely; `"default_on"` is reserved for the one shape where the *model* must
    judge the picture rather than the user choosing from a set.
 
-**Exactly one tool offers the base64 opt-in: `get_product_by_id`.** The four
-discovery grids shipped with `"opt_in"` and were changed to `"off"`, which is a
+**Two tools offer the base64 opt-in: `get_product_by_id` and
+`search_1688_offers_by_image`.** The four discovery grids shipped with `"opt_in"` and were changed to `"off"`, which is a
 decision worth not quietly reverting. Every one of them returns a *set the user
 picks from* — the case the widget serves at zero vision tokens — so the flag
 there mostly buys a model that sets it out of habit and pays ~1,620 vision
 tokens, on that turn and on every turn after it, since the blocks stay in the
 conversation. Judging a picture is a per-product act, so it lives on the
 per-product read. `list_products` is `"off"` for a different reason (~51% of its
-images are scraper-bucket originals with no small variant). Turn a grid back on
-when there is a surface whose whole job is comparing images — RD-95's
-`search_1688_offers_by_image` is that surface, and it is the one place
-`"default_on"` may be right. `test_include_images_is_advertised_only_where_there_is_an_image_surface`
+images are scraper-bucket originals with no small variant). The offer image search (RD-95) is the one grid that has it, and it is
+`"opt_in"`, not `"default_on"`: its whole job is comparing pictures, so it is the
+one set where the *model* may need to judge "is this really the same item?" — but
+the common case is still the user picking an offer from the grid, which never
+needs it, and a default-on flag would charge the vision tokens on every finished
+search. `test_include_images_is_advertised_only_where_there_is_an_image_surface`
 asserts the set, so a change here fails loudly rather than drifting.
+
+**The two supplier grids (RD-95) are a picker, and neither links anywhere.** The
+offer search draws one thumbnail per offer captioned with its title; the details
+read draws the offer's **variations**, captioned with `attributes.*` — the first
+attribute value, usually the colour — because that is what the user matches
+against their own variations, and keyed by the `<offer>_<sku>` id the sourcing
+request takes. A 1688 offer has no page in the AutoDS web app, so no route in
+`product_links` fits and the cells are not clickable; the offer's `url` is in
+`data`. The grid shows no price or score, which is why the search's `notes` tell
+the agent to list the offers in text in the same order. 1688 images come from
+`cbu01.alicdn.com`, inside the existing `alicdn` family: its `_220x220.jpg`
+variant was measured working (~17 KB against ~110 KB), and the host is covered by
+the `*.alicdn.com` CSP entry. That CSP entry is still to be confirmed rendering in
+a real host for this host name — release check R17.3.
 
 Whenever a tool's `base64` changes, its `notes` change with it: the sentence
 telling the model to set `include_images` is a *phantom parameter* the moment
@@ -548,8 +574,11 @@ conversation re-reading the same unfinished job.
 By tier: the numbers belong in the polling tool's `notes` (tier 2) and the playbook
 `body` (tier 3), with **one** clause in `instructions` (tier 4) and nothing in tier 1.
 `get_bulk_action_items` + `product_import` are the reference implementation;
-`list_store_quotes` (RD-93) is the second polling tool and was written against them. A new
-polling tool should read like them, and
+`list_store_quotes` (RD-93) is the second polling tool and was written against them;
+the two supplier scans (RD-95) are the third and fourth, and they differ in one way worth
+knowing: the poll is the *same* call repeated, with `full_scrape: true` on the first
+attempt only — which is why that rule sits on the `full_scrape` parameter (tier 1) as
+well as in `notes`. A new polling tool should read like them, and
 `tests/mcp_server/test_polling_conventions.py` asserts the numbers arrive at a client
 on all three channels (and that no channel disagrees).
 
@@ -1001,6 +1030,11 @@ reads them.
   filtered on `product_id` first, and treat a returned request as proof the write landed.
   Keep both copies — tier 2 is the contract and tier 3 arrives at the moment of the
   decision, which prose in `notes` cannot guarantee.
+- **An upstream behind the API gateway is configured as its gateway route, never as the
+  service** (RD-95). `SCRAPERS_API_BASE_URL` must be `…/suppliers` on the gateway, like
+  `PRODUCTS_RESEARCH_BASE_URL` is `…/marketplace/api`: the gateway is where the
+  caller's token is exchanged for one the service accepts. A direct URL boots and fails
+  every call — the failure mode is in the Gotchas under **Specific upstream endpoints**.
 - **Transport is stateless** (`stateless=True`) by design — production runs many
   replicas × workers, so no MCP session is pinned to a worker. Don't reintroduce
   session state. This is also why the playbook hint has no "show it once" dedup: there
@@ -1247,16 +1281,19 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   must describe — not the upstream's intent. Don't widen the error mapping to echo 3xx/4xx
   bodies instead: those carry internal hostnames and are sanitized for that reason.
 - **The scrapers' error path is snake_case on the wire, and a mis-cased
-  `business_errors` path never matches** (RD-91). `ScraperErrorAPI` is
-  `error_code` / `error_msg` / `retries`; the `scraper_error.errorCode` spelling in the
-  illustrative block above (and in `README.md`) is the *frontend's* camelised view — its
-  request helper renames the keys. A path that doesn't match produces no error anywhere:
-  the boot lint only checks that `paths` is non-empty, so the operation ships looking
-  protected and the `business_error` field simply never appears. Confirm the path against
-  a live response. Same class of trap in the two scan endpoints: `/offers/scan` reports a
-  freshly queued id in `not_in_db`, `/products/scan` files it under `no_info` and leaves
-  `not_in_db` empty — documenting one shape for both makes "queued" unobservable for
-  products. Details in `docs/polling-conventions.md`.
+  `business_errors` path never matches** (RD-91, confirmed live in RD-95). `ScraperErrorAPI`
+  is `error_code` / `error_msg` / `retries`; `errorCode` is the *frontend's* camelised
+  view — its request helper renames the keys — and it was the spelling of the
+  illustrative block in this file and `README.md` until RD-95 corrected both. A path that
+  doesn't match produces no error anywhere: the boot lint only checks that `paths` is
+  non-empty, so the operation ships looking protected and the `business_error` field
+  simply never appears. That is why `tests/mcp_server/test_suppliers.py` runs the shipped
+  blocks against answers recorded from staging rather than against a payload written in
+  the test; don't replace the samples with hand-written ones. Same class of trap in the
+  two scan endpoints: `/offers/scan` reports a freshly queued id in `not_in_db`,
+  `/products/scan` files it under `no_info` and leaves `not_in_db` empty (the recorded
+  `queued` sample shows it) — documenting one shape for both makes "queued" unobservable
+  for products. Details in `docs/polling-conventions.md`.
 - **A failed async sourcing request has no error status — the record disappears**
   (RD-91). `alibaba_1688_request` rolls back by *deleting* the store quote and reports
   the error only over SSE, which this server cannot see. So a poller must treat "the
@@ -1370,6 +1407,24 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   `product_id`/`internal_id` stay distinct params. Verify enum value sets and example
   ranges against *live* upstream data — an enum narrower than the API silently rejects
   valid calls (e.g. a percentage field mistakenly documented as a 0–1 fraction).
+- **A constant query value cannot be written into `path`, because httpx throws it away**
+  (RD-95). `/offers/scan?store=offers_1688` looks like the no-code way to pin a
+  value, and the store would silently disappear: `build_request(url, params=…)`
+  *replaces* the URL's query string rather than merging into it, so any call that sends
+  one parameter of its own loses every value written into the path — measured, not
+  assumed. The upstream then answers a request with no `store` at all. That is why
+  `fixed_query` exists as a field, and why the dispatcher seeds the query dict from it
+  before adding the tool's own parameters. The other obvious shortcut, a required
+  parameter documented as "always pass `offers_1688`", hands the model a value it can
+  get wrong on every call.
+- **A boolean argument goes upstream as `true` / `false`, never through `str()`**
+  (RD-95). `str(True)` is `"True"`, so a `bool` parameter used to reach the upstream
+  in Python's spelling while `fixed_query` sent the JSON one. Both current upstreams
+  accept either — marshmallow `fields.Bool` and pydantic ignore case — which is why
+  nothing failed. A stricter parser reads `"True"` as a non-boolean or as false, and
+  on `delete_product` that is the difference between removing a live listing and
+  leaving it selling. `dispatch._to_wire` renders every path, query and header value;
+  don't go back to a bare `str(value)` there.
 - **The dispatcher is a pure forwarder** — `dispatch._parse_response` returns
   `response.json()` verbatim. You cannot trim or reshape a response via manifest text; that
   needs an upstream change. Don't add per-operation response logic — it breaks "tools are
@@ -1475,6 +1530,30 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   and W5 carry the exception; don't "simplify" either back to a flat "synchronous", and
   don't read the delay as a bug. Note the two halves are separate: the *channel* listing
   is removed synchronously via the sell account, it is the AutoDS-side status that lags.
+- **The supplier scans must go through the gateway, and nothing fails at boot if they
+  don't** (RD-95). `SCRAPERS_API_BASE_URL` is the gateway's `/suppliers` route
+  (`gw[-staging].autods.com/suppliers`; Kong strips the prefix), because the
+  `scrapers-api-auth` plugin on that route swaps the caller's Cognito token for the
+  scrapers' own OAuth token — the service itself does not accept ours. So a URL pointed
+  straight at the service, or a staging deploy that leaves the variable unset and falls
+  back to the production gateway, boots cleanly and fails both scan tools while every
+  other tool works. Release check S6 reads the deployed value for exactly this reason.
+- **`/products/scan` answers a malformed offer id as a real out-of-stock offer**
+  (RD-95, measured on staging). An id that fails the 1688 id format never reaches a
+  scrape: the view builds a placeholder entry — title "Out of stock", price `133.133` —
+  with `error.error_code: PRODUCT_OOS`, and answers at once. So `PRODUCT_OOS` on this
+  tool can mean "you sent the wrong id" as well as "sold out", and the tool's notes and
+  its `codes` entry both say to check the id first. The same placeholder shape (a fake
+  price beside an `error`) is on every failed entry, which is why the notes say not to
+  read the other fields of an entry that has an `error`.
+- **`get_1688_product_details` answers ~160 KB for one ordinary offer** (RD-95,
+  measured on staging: 20 variations, ~150 KB of it per-variation `shipping` and
+  `shipping_by_region`). `full_json=false` would cut it to ~5 KB and drops `variations`
+  entirely, which are the whole point of the call, and no query parameter trims the
+  shipping lists. The dispatcher is a pure forwarder, so the notes tell the agent to
+  shortlist from the search and read one offer at a time. A real fix is an upstream
+  option to leave the per-variation shipping out; until then, report an oversized
+  answer rather than "fix" it here.
 ### Scripts and log noise
 
 - **`uvicorn.access`, `httpx`, and `mcp` INFO lines duplicate our structured

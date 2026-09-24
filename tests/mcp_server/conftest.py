@@ -106,6 +106,7 @@ def mcp_settings(env, tmp_path: Path) -> Callable[..., Settings]:
             "COGNITO_DOMAIN": "autods.auth.us-west-2.amazoncognito.com",
             "AUTODS_API_BASE_URL": "https://autods-api.test",
             "PRODUCTS_RESEARCH_BASE_URL": "https://products-research.test",
+            "SCRAPERS_API_BASE_URL": "https://gw.test/suppliers",
         }
         if manifest_dir is not None:
             values["MCP_MANIFEST_DIR"] = str(manifest_dir)

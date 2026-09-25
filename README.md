@@ -484,12 +484,13 @@ on `list_products` is the preferred tool when it exists).
   `{path, reason, see?}`. An operation without the block — or an answer where no
   path matched — gets an untouched envelope.
 
-Five tools use it today:
+These tools use it today:
 
 | Tool | Removed | Why |
 |---|---|---|
 | `get_similar_products` | `results.*.images`, `.variations`, `.description` | each result is a full product document; one page measured 267 KB on staging, mostly image galleries. `get_product_by_id` returns them |
-| `get_store_quote`, `list_store_quotes` | `shipping_options` | the upstream repeats every option several times; `list_store_quote_shipping_options` returns each once |
+| `get_store_quote`, `list_store_quotes`, `set_store_quote_shipping_option`, `request_manual_sourcing` | `shipping_options` (`results.*.shipping_options` on the list) | all four answer the same store-quote record; the upstream repeats every option in this list several times, and `list_store_quote_shipping_options` returns each once |
+| `get_1688_product_details` | `data.*.variations.*.shipping_by_region.US`, `data.*.shipping_by_region.US` | a copy of `shipping`, which the upstream fills from exactly this key. Other countries stay. One 20-variation offer went from 378 KB to 199 KB on staging |
 | `get_current_user` | `*.intercom_user_jwt` | credential |
 | `list_stores_api` | `*.store.autods_store_token`, `*.store.ebay_eias` | credentials |
 
@@ -823,8 +824,9 @@ tool's own `notes` because getting it wrong is silent:
   `enum` on `body.filters.items.name` because the upstream really does accept
   exactly those.
 
-`list_store_quotes` and `get_store_quote` answer without the record's
-`shipping_options` list (see **Removing fields from a response**): the upstream
+`list_store_quotes`, `get_store_quote`, `set_store_quote_shipping_option` and
+`request_manual_sourcing` answer without the record's `shipping_options` list
+(see **Removing fields from a response**): the upstream
 repeats every option in it several times, and `list_store_quote_shipping_options`
 is where the list is read.
 

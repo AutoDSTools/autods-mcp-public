@@ -5,6 +5,8 @@
     "fields the block addresses, plus the fields that must survive it. They exist so that every",
     "declared path is checked against the payload the upstream really returns: a path that",
     "passes the boot lint and matches nothing removes nothing, and nobody notices.",
+    "The RD-146 follow-up added the two store-quote writes (same upstream record as get_store_quote)",
+    "and get_1688_product_details (staging offer 917560241690, 2026-09-25, cut to two variations).",
     "Credential values are FAKE — never paste a real token into this file.",
     "Adding an omit block to an operation means adding its sample here."
   ],
@@ -71,6 +73,98 @@
       "chosen_option_id": "YUNTU_THPHR:2:US:00000000:00000100",
       "chosen_option_title": "Yunexpress Standard THPHR"
     }
+  },
+  "set_store_quote_shipping_option": {
+    "id": 108,
+    "status": "linked",
+    "sourcing_supplier": "alibaba_1688",
+    "store_id": 5991,
+    "product_id": "6a6e0fcee0f244a5b983be6b",
+    "price": {"min": 0.53, "max": 0.67},
+    "shipping_options": [
+      {"id": "YUNTU_THZXR:2:US:00000000:00000100", "price": 6.17, "title": "Yunexpress Battery THZXR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true},
+      {"id": "YUNTU_THPHR:2:US:00000000:00000100", "price": 6.12, "title": "Yunexpress Standard THPHR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": false},
+      {"id": "YUNTU_THZXR:2:US:00000000:00000100", "price": 6.17, "title": "Yunexpress Battery THZXR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": true},
+      {"id": "YUNTU_THPHR:2:US:00000000:00000100", "price": 6.12, "title": "Yunexpress Standard THPHR", "delivery_time_min": 10, "delivery_time_max": 14, "is_chosen": false}
+    ],
+    "default_country": "US",
+    "chosen_shipping_option_id": "YUNTU_THZXR:2:US:00000000:00000100",
+    "quote_id": 566,
+    "shipping_options_stats": {
+      "min_price": 6.12,
+      "max_price": 6.17,
+      "min_days": 10,
+      "max_days": 14,
+      "chosen_option_id": "YUNTU_THZXR:2:US:00000000:00000100",
+      "chosen_option_title": "Yunexpress Battery THZXR"
+    }
+  },
+  "request_manual_sourcing": {
+    "id": 112,
+    "status": "new",
+    "sourcing_supplier": "honestfulphilment",
+    "store_id": 5991,
+    "product_id": "6a6e2a4cbfc22e62a7ec3301",
+    "price": null,
+    "buy_item": null,
+    "shipping_options": [],
+    "default_country": "US",
+    "chosen_shipping_option_id": null,
+    "quote_id": null,
+    "shipping_options_stats": null
+  },
+  "get_1688_product_details": {
+    "data": {
+      "917560241690": {
+        "id": "917560241690",
+        "title": "labubu transparent dust cover for labubu dolls raincoat outerwear plush pendant protective cover anti-dirt stroller bag",
+        "price": 0.88,
+        "in_stock_qty": 8837,
+        "shipping": [
+          {"shipping_price": 8.7, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Standard THPHR", "free_shipping": true}
+        ],
+        "shipping_by_region": {
+          "US": [
+            {"shipping_price": 8.7, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Standard THPHR", "free_shipping": true}
+          ]
+        },
+        "variations": [
+          {
+            "id": "917560241690_5999212454006",
+            "sku": "5999212454006",
+            "price": 0.88,
+            "image_url": "https://cbu01.alicdn.com/img/ibank/O1CN01qKh6Z52IWi6DP7tbg_!!2218679699294-0-cib.jpg",
+            "attributes": {"Color": "Transparent raincoat bag - upgraded three-dimensional (with white silicone rope) without doll"},
+            "shipping": [
+              {"shipping_price": 8.7, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Standard THPHR", "free_shipping": true}
+            ],
+            "shipping_by_region": {
+              "US": [
+                {"shipping_price": 8.7, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Standard THPHR", "free_shipping": true}
+              ]
+            }
+          },
+          {
+            "id": "917560241690_5999212454009",
+            "sku": "5999212454009",
+            "price": 0.81,
+            "image_url": "https://cbu01.alicdn.com/img/ibank/O1CN01YfrrmY2IWi6EPhCAi_!!2218679699294-0-cib.jpg",
+            "attributes": {"Color": "Transparent raincoat bag - flat (with white keychain) without doll"},
+            "shipping": [
+              {"shipping_price": 7.1, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Standard THPHR", "free_shipping": true}
+            ],
+            "shipping_by_region": {
+              "US": [
+                {"shipping_price": 7.1, "shipping_time": 14, "warehouse": "CN", "country": "ALL", "currency": "USD", "shipping_tag": "Yunexpress Standard THPHR", "free_shipping": true}
+              ]
+            }
+          }
+        ],
+        "error": null
+      }
+    },
+    "no_info": [],
+    "not_in_db": []
   },
   "list_store_quotes": {
     "results": [

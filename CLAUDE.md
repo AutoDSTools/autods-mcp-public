@@ -386,9 +386,14 @@ per-operation response logic:
 - **An upstream parameter still comes first.** Where one can do the job
   (`projection` on `list_products`), use it and do not add `omit`.
 
-What the five shipped blocks remove, and why, is in the `README.md` table under
-**Removing fields from a response**. `get_1688_product_details` (RD-95) is the obvious
-next candidate and is deliberately not in the list yet — see its gotcha.
+What the shipped blocks remove, and why, is in the `README.md` table under
+**Removing fields from a response**. A tool that answers the **same upstream record** as
+a tool that already has a block needs the same block: the RD-146 release check found
+`set_store_quote_shipping_option` still sending the repeated `shipping_options` list
+that `get_store_quote` had stopped sending. So before adding a block, find every
+operation whose upstream answers with the same response model (in AutoDSApi, the
+`response=` of each route's `api_schema`), not only the reads. `link_quoted_product`
+looks like one and is not: it answers the product, not the store quote.
 
 ### Product images: the `images` block, the widgets, the base64 opt-in (RD-92)
 
@@ -1645,17 +1650,23 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   its `codes` entry both say to check the id first. The same placeholder shape (a fake
   price beside an `error`) is on every failed entry, which is why the notes say not to
   read the other fields of an entry that has an `error`.
-- **`get_1688_product_details` answers ~160 KB for one ordinary offer** (RD-95,
-  measured on staging: 20 variations, ~150 KB of it per-variation `shipping` and
-  `shipping_by_region`). `full_json=false` would cut it to ~5 KB and drops `variations`
-  entirely, which are the whole point of the call, and no query parameter trims the
-  shipping lists. So the notes tell the agent to shortlist from the search and read one
-  offer at a time. An `omit` block (RD-146) could remove `variations.*.shipping_by_region`
-  (an exact copy of `shipping` in the one recorded offer), but it was left out of RD-146
-  on purpose: the tool was not on staging when the scope was decided, and "an exact
-  copy" rests on one offer with one destination region. Add it only after checking
-  several offers, including one quoted for more than one region. The real fix is still
-  an upstream option to leave the per-variation shipping out.
+- **`get_1688_product_details` answers hundreds of KB for one ordinary offer, and
+  its `omit` removes only `shipping_by_region.US`** (RD-95, RD-146 follow-up). On
+  staging an offer with 20 variations answered 378 KB and one with 33 answered 562 KB,
+  about half of it in per-variation `shipping_by_region`. Both were too large for
+  Claude Code's tool-response limit, so an agent lost the whole answer.
+  `full_json=false` would cut it to ~5 KB but drops `variations` entirely, which are
+  the whole point of the call, and no query parameter trims the shipping lists.
+  - Why only the `US` key, and not the whole `shipping_by_region`: the Scrapers-API
+    1688 parser builds `shipping` as `shipping_by_region.get("US", [])`, so that key
+    is a copy by construction. Other keys are not. AutoDSApi asks Scrapers-API for
+    another country's shipping (`/products/shipping_by_region/all`) when a store
+    ships outside the US, and the answer lands on the same offer. That country's list
+    is nowhere else in this answer. Removing the whole field would drop it in silence
+    for exactly the stores that need it.
+  - After the removal the 20-variation offer is 199 KB — still large. The notes keep
+    telling the agent to shortlist from the search and read one offer at a time. The
+    real fix is still an upstream option to leave the per-variation shipping out.
 ### Scripts and log noise
 
 - **`uvicorn.access`, `httpx`, and `mcp` INFO lines duplicate our structured

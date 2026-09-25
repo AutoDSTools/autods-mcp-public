@@ -1106,9 +1106,15 @@ until `data.data["<its id>"]` is present.
 variation's `id` is the offer id, an underscore, then digits
 (`1048927055094_6245469138442`). That id is what `create_1688_sourcing_request`
 takes as `item_id_on_site`, so any other shape breaks the sourcing chain at its
-last step. Note the answer's size in the report: ~160 KB for 20 variations is
-expected today, and much larger means an agent may lose the answer to its own
-response cap.
+last step. No variation, and not the offer itself, may carry a `US` key inside
+`shipping_by_region`, while `shipping` is still a non-empty list; `omitted` beside
+`data` lists `data.*.variations.*.shipping_by_region.US` and
+`data.*.shipping_by_region.US` with reason `duplicate` (RD-146 follow-up). A `US`
+key still present means the removal stopped running. An empty `shipping` means the
+path now removes more than it should. Any other country key in
+`shipping_by_region` must still be there. Note the answer's size in the report:
+about 200 KB for 20 variations is expected today (staging measured 378 KB before the
+removal). Much larger means an agent may lose the answer to its own response cap.
 
 Then call it once more with `{"asins": "1", "full_scrape": true}`.
 → `ok: true`, and a `business_error` with `code: "PRODUCT_OOS"` beside `data`.
@@ -1269,7 +1275,10 @@ W7 in the opening round, question 4; otherwise `skipped (W7 not requested for th
 run)`). Unlike W6, this request goes to the outside sourcing supplier, and people
 there work it by hand — from staging too. That is why it has its own question.
 `{"store_id": <the P5 id as a NUMBER>, "product_id": "<a second active product>"}` —
-no body. → the sourcing request record, with an `id` and a `status`.
+no body. → the sourcing request record, with an `id` and a `status`, and with no
+`shipping_options` key: `omitted` beside `data` names it with
+`see: "list_store_quote_shipping_options"` (RD-146 follow-up). A new request's list is
+empty, but the key is still removed and still listed.
 This one spends a credit too — it looks free (no body, one call, and the ticket that
 specified it said so), which is why it carries `destructiveHint: true` alongside the
 1688 trigger. Two things to check and report, because a host prompt announces that a
@@ -1378,7 +1387,11 @@ in one of those states; otherwise `skipped (no sourcing request with an offer)`.
 - `list_store_quote_shipping_options` for the request's `default_country`, then
   `set_store_quote_shipping_option` with the **`id` already carrying
   `is_chosen: true`** — re-choosing what is in force exercises the call and leaves
-  the request as it was found. → the sourcing request record back.
+  the request as it was found. → the sourcing request record back, without its
+  `shipping_options` list, and with `omitted` beside `data` naming it with
+  `see: "list_store_quote_shipping_options"` (RD-146 follow-up: this answer used to
+  carry every option several times). `shipping_options_stats.chosen_option_id` must
+  equal the `id` you sent. A record that still carries the list is a failure.
 - `link_quoted_product` only if the human named **both** the sourcing request and
   a supplier variation to re-link to; it rewrites a product's supplier
   configuration, so it does not run on a guess, and never on whichever request
@@ -1388,7 +1401,8 @@ in one of those states; otherwise `skipped (no sourcing request with an offer)`.
   `{"store_id": <the request's own store id>, "product_id": "<the request's
   product_id>", "body": {"store_quote_id": <the request id>,
   "add_to_unfulfilled_orders": false, "variations_match": [{"item_id_on_site":
-  "<that variation>"}]}}`
+  "<that variation>"}]}}` → the product as it now stands. It is not the sourcing
+  request record, so it has no `omitted` field; that is expected.
 
 Both refuse a request without an offer (`new` / `in_progress`) as
 `upstream_client_error`. That is the documented answer, not a fault — record it as

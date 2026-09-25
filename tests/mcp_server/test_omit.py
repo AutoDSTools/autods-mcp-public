@@ -293,6 +293,26 @@ def test_no_payload_sample_outlives_the_block_it_documents(bundled_manifest_dir:
     assert not stale, f"payload samples with no omit block left to check: {stale}"
 
 
+def test_a_1688_offer_keeps_every_shipping_region_but_the_us_copy(bundled_manifest_dir: Path) -> None:
+    """Only ``shipping_by_region.US`` is a copy of ``shipping``. A store that ships
+    outside the US makes AutoDSApi fetch that country's shipping onto the same
+    offer, and that list exists nowhere else in the answer, so it must stay."""
+    operation = next(op for op in _carrying(bundled_manifest_dir) if op.operation_id == "get_1688_product_details")
+    sample = json.loads(json.dumps(_payload_samples()["get_1688_product_details"]))
+    offer = next(iter(sample["data"].values()))
+    gb = [{"shipping_price": 9.4, "shipping_time": 16, "shipping_tag": "Yunexpress Standard GB"}]
+    offer["shipping_by_region"]["GB"] = gb
+    for variation in offer["variations"]:
+        variation["shipping_by_region"]["GB"] = gb
+
+    trimmed, _ = apply_omit(operation, sample)
+
+    trimmed_offer = next(iter(trimmed["data"].values()))
+    assert trimmed_offer["shipping_by_region"] == {"GB": gb}
+    assert [v["shipping_by_region"] for v in trimmed_offer["variations"]] == [{"GB": gb}, {"GB": gb}]
+    assert [v["shipping"] for v in trimmed_offer["variations"]] == [v["shipping"] for v in offer["variations"]]
+
+
 # --------------------------------------------------------------------------
 # End to end, through a real client session
 # --------------------------------------------------------------------------

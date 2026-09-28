@@ -60,6 +60,12 @@ Optional:
   upload. Without it the upload sends a placeholder that creates nothing, so
   ``delete_product`` — which may only remove a product this run created — is
   skipped (RD-98).
+* ``E2E_TIKTOK_INTERNAL_ID`` — RD-96: the ``internal_id`` of a TikTok Analytics
+  product (19 digits), for the TikTok import and its lookup by supplier id.
+  Behind ``E2E_INCLUDE_WRITES`` too, and without it that check is skipped. The
+  import is **active**, not a draft, so it puts a live listing on the first
+  store of ``E2E_STORE_IDS``; the check deletes it again, with the listing,
+  once the lookup has been graded.
 * ``E2E_INCLUDE_SOURCING_WRITES=1`` — RD-94's four sourcing writes, behind a
   **second** flag rather than ``E2E_INCLUDE_WRITES``. Two of them
   (``create_1688_sourcing_request``, ``request_manual_sourcing``) charge a real,
@@ -183,6 +189,9 @@ class StagingConfig:
     store_ids: str | None
     include_writes: bool
     upload_asin: str
+    # RD-96: no default, unlike ``upload_asin`` — a placeholder would only prove
+    # that an id which matches nothing imports nothing.
+    tiktok_internal_id: str | None = None
     # RD-94: a gate of its own, because two of the ops behind it spend a real
     # non-refundable credit — see the module docstring.
     include_sourcing_writes: bool = False
@@ -218,6 +227,7 @@ def staging_config() -> StagingConfig:
         store_ids=os.environ.get("E2E_STORE_IDS"),
         include_writes=os.environ.get("E2E_INCLUDE_WRITES") == "1",
         upload_asin=os.environ.get("E2E_UPLOAD_ASIN", _PLACEHOLDER_ASIN),
+        tiktok_internal_id=os.environ.get("E2E_TIKTOK_INTERNAL_ID"),
         include_sourcing_writes=os.environ.get("E2E_INCLUDE_SOURCING_WRITES") == "1",
         sourcing_product_id=os.environ.get("E2E_SOURCING_PRODUCT_ID"),
         sourcing_1688_offer_id=os.environ.get("E2E_SOURCING_1688_OFFER_ID"),

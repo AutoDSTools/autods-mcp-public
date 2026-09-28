@@ -55,7 +55,9 @@ the run:
 2. **Writes** — run section W or not. If yes, **which store**: the human describes
    it however they like ("the Shopify store", a store name, a URL). They do *not*
    need to know the id — P5 resolves the description against their store list.
-   Staging only.
+   Staging only. In the same question, ask for the `internal_id` of one TikTok
+   Analytics product if W10 should run (P12), and say what W10 does: it puts a
+   **live** listing on that store for a minute or two, then deletes it.
 3. **The sourcing checks W6–W9, separately** (RD-94) — they each spend one
    non-refundable auto-order credit on the authorized account for a request nobody
    can cancel, so consent to "writes" is not consent to these. Ask in the same
@@ -674,6 +676,19 @@ request)`.
 W7 is independent and needs only a **second** such product, because one product
 carries at most one sourcing request.
 
+**P12 — A TikTok Analytics product to import** (only if W10 will run). W10 needs
+the `internal_id` of one TikTok Analytics row: 19 digits, e.g.
+`1730859172304425695`. Not the row's 24-character hex `id` — that is the mistake
+W10 exists to catch in the tool text, so do not make it here.
+*Where it comes from:* the human, in the opening round. Nothing in this server
+reads TikTok Analytics yet.
+*Check the P5 store does not hold it already:* `find_product_by_buy_id`
+`{"store_ids": "<the P5 id>", "buy_id": "<that internal_id>"}` must answer `{}`.
+A product in the answer means W10's import would fail as a duplicate and create
+nothing this run may delete, so record `skipped (the store already holds this
+TikTok product)`.
+*If no id was given:* W10 is `skipped (no TikTok Analytics product named)`.
+
 ---
 
 ## R — Read paths (the operations users actually run)
@@ -1141,6 +1156,39 @@ an agent to stop, since it has no search-wide error field.
   Reconnect the connector first if this release changed a widget (see R15.2).
   `skipped` without a browser session, and say so in the report as R15.2 does.
 
+**R18 — Recovering an import that errored: "is my product in the store or not?"
+(RD-96).** The symptom this guards: a user's import times out, and the agent either
+imports it again (a duplicate listing, a live one for a TikTok import), or tells the
+user it failed while it is still running. `find_product_by_buy_id` is the read an
+agent uses to decide, and it is safe in any environment.
+
+*R18.1 — not found.* `{"store_ids": "<the P2 id>", "buy_id": "1000000000000000001"}`
+→ `ok: true` and `data` is exactly `{}`. That empty object is what the notes tell an
+agent to read as "not in the store yet — keep polling". An error here, or a
+`data` that is anything but `{}`, is a **fail**: an agent following the notes would
+stop a recovery loop that should go on.
+
+*R18.2 — found.* Take one product from R3 and repeat R3 with that product's id as a
+filter (`{"name": "id", "op": "=", "value_type": "object_id", "value": "<id>"}`) and
+`"projection": ["variations.active_buy_item.item_id_without_variant"]`. Call
+`find_product_by_buy_id` with that value as `buy_id`, on the same store.
+→ `data` is `{"status": 2, "id": "<an id>"}`. The same supplier id can be on more
+than one product in the store, so a different `id` is not a fail by itself. When the
+`id` differs, repeat R3 once more, filtered on the returned `id` with the same
+projection: its `item_id_without_variant` must be the `buy_id` sent. A product
+without that supplier id is a **fail**, and so is `{}`. If the projection comes
+back without the field, record `skipped (the product exposes no supplier id)` and
+try the next R3 product; after three, stop.
+
+*R18.3 — the descriptor.* Read the tool's `notes` off the handshake. They must say
+it is **not** the step after `upload_products`, and that `get_bulk_action_items` is
+the route whenever a `bulk_action.id` exists. Without that sentence the tool reads
+like the next step of every import, and an import whose item failed is polled here
+until the ceiling, where its error is lost. Then read `upload_products`' own
+`notes`: they must point at this tool for an upload that errored. And the
+`upload_products` step's failure text in `get_playbook` `{"name": "product_import"}`
+must name `find_product_by_buy_id` in its `verify_with`, not `list_products`.
+
 ---
 
 ## W — Write paths (gated: staging only, explicit go-ahead, test store)
@@ -1407,6 +1455,46 @@ in one of those states; otherwise `skipped (no sourcing request with an offer)`.
 Both refuse a request without an offer (`new` / `in_progress`) as
 `upstream_client_error`. That is the documented answer, not a fault — record it as
 a pass for the check and as evidence the status guard works.
+
+### W10 — the TikTok Analytics import, and its recovery read (RD-96)
+
+The symptom this guards: a user asks to add a TikTok Analytics product to their
+store, and nothing is imported because the agent sent the wrong id — or it is
+imported as a draft that cannot be sourced, or it goes live at cost without the
+user being told. And afterwards, the recovery read disagrees with the import about
+which product was created.
+
+Runs only with the W gate open and a P12 id; otherwise `skipped` with P12's reason.
+It spends no credit, but it **does** put a live listing on the P5 store until step 5
+removes it. That is what the opening round asked the human about.
+
+1. **Read the recipe off the handshake before calling anything.** `upload_products`'
+   `notes` must carry the TikTok body (`region` 7, `status` 2, `buy_site_id` 37,
+   `action_source` 10), say the asin is the `internal_id` and not the `id`, and say
+   that the result is a live listing priced at cost. Each one missing is a finding;
+   the last one missing is a **fail**, because it is the one a user pays for.
+2. **Import.** `upload_products` `{"store_ids": "<the P5 id>", "body": {"region": 7,
+   "status": 2, "buy_site_id": 37, "action_source": 10, "new_products": [{"asin":
+   "<the P12 internal_id>"}]}}` → `data.bulk_action.id`, as in W1.
+3. **Poll it** exactly as W2 does → the item reaches 3 with an `autods_product_id`.
+   An item at 99 → record `failed (import error: <error_code> <error_reason>)` and
+   skip steps 4 and 5; there is no product to resolve or delete. Still at 1 or 2 at
+   the ceiling → `inconclusive`, and skip steps 4 and 5 for the same reason.
+4. **Resolve it by supplier id.** `find_product_by_buy_id` `{"store_ids": "<the P5
+   id>", "buy_id": "<the P12 internal_id>"}` → `{"status": 2, "id": "<the
+   autods_product_id from step 3>"}`.
+   - Another `id` → **fail**: the two routes an agent is told to choose between
+     name different products.
+   - `{}` while the bulk item says finished → **fail**: an agent recovering from an
+     errored upload would be told no product landed, and would import it a
+     second time — a duplicate live listing.
+   - `status` 1 → **fail**: the import ran as a draft, which cannot be sourced.
+5. **Clean up.** `delete_product` `{"store_id": <the P5 id as a NUMBER>,
+   "product_id": "<the step 3 id>", "remove_from_marketplace": true}` — `true`,
+   because the product is live. Then repeat step 4 → `{}`. A deleted product is
+   not matched any more, so a product still in the answer means the delete did not
+   land: that is W5's finding, and report it the same way. On an eBay MIP store,
+   wait ~30 s and read once more first, for the reason W5 gives.
 
 ---
 

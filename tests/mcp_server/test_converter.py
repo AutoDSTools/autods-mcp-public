@@ -129,6 +129,41 @@ def test_build_tools_rejects_string_typed_enum_field() -> None:
         build_tools([operation])
 
 
+def test_build_tools_rejects_a_string_typed_action_source() -> None:
+    """RD-96: ``action_source`` joined the checked fields when the TikTok
+    Analytics recipe put a value on it. The upload schema reads it with the same
+    enum field as ``region`` / ``status`` / ``buy_site_id``, and the stored
+    product field is an integer enum, so a string here is the same drift."""
+    operation = ManifestOperation.model_validate(
+        {
+            "operation_id": "bad_action_source_op",
+            "method": "POST",
+            "path": "/x",
+            "base_url_key": "autods_api",
+            "has_json_body": True,
+            "request_body_required": True,
+            "body_schema": {
+                "type": "object",
+                "properties": {"action_source": {"type": "string"}},
+            },
+            "annotations": {"title": "Bad", "readOnlyHint": False, "destructiveHint": False},
+        }
+    )
+    with pytest.raises(BodySchemaError, match="action_source"):
+        build_tools([operation])
+
+
+def test_upload_products_action_source_is_integer_enum(bundled_manifest_dir: Path) -> None:
+    """The value table lives on the parameter that takes it (tier 1), and 10 —
+    the TikTok Analytics value the recipe in the notes sends — is in it."""
+    tool = to_tool(build_registry(bundled_manifest_dir).get("upload_products"))
+    action_source = tool.input_schema["properties"]["body"]["properties"]["action_source"]
+
+    assert action_source["type"] == "integer"
+    assert action_source["enum"] == list(range(1, 11))
+    assert "10=tiktok_analytics" in action_source["description"]
+
+
 def _business_errors_op(**overrides: Any) -> ManifestOperation:
     payload: dict[str, Any] = {
         "operation_id": "scan_offer",

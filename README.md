@@ -332,7 +332,7 @@ server runs its startup lints and refuses to boot if any fails, so a
 malformed manifest can't reach a client: (1) every operation must have an
 `annotations.title` and at least one hint; (2) integer enum fields in a
 `body_schema` (e.g. `product_status`, `status`, `region`, `site_id`,
-`buy_site_id`, `inventory_status`) must be typed as integers, never strings;
+`buy_site_id`, `inventory_status`, `action_source`) must be typed as integers, never strings;
 (3) the concatenated `instructions` (below) must be at most 6000 characters;
 (4) a `business_errors` block (below) must declare at least one path, and its
 operation's `notes` must mention `ok`; (5) each operation declares exactly one
@@ -524,8 +524,8 @@ looks done and isn't. A **playbook** declares one such chain as data, in
       "on_failure": {
         "idempotent": false,
         "left_behind": "The bulk job may have started even though the call errored.",
-        "verify_with": {"operation_id": "list_products", "how": "product_status 1, filtered on the uploaded title"},
-        "then": "If the drafts exist, poll them; otherwise resubmit unchanged.",
+        "verify_with": {"operation_id": "find_product_by_buy_id", "how": "buy_id = each asin sent, as a bare id"},
+        "then": "A product back: continue from it. None at the ceiling: nothing landed; resubmit as is.",
         "ask_user": true
       }
     }
@@ -558,7 +558,7 @@ A client meets a playbook on four channels, by when the text is needed:
   exactly when the agent has just finished that step.
 - **the error text** — a failing chain step whose `on_failure` is declared gets
   the chain consequence appended to the `isError` message ("this step is not
-  idempotent … verify with `list_products` … before retrying"). An error result
+  idempotent … verify with `find_product_by_buy_id` … before retrying"). An error result
   carries no `structuredContent`, so this is the only way to deliver it, and it
   is the half that prevents a duplicated write.
 - **the tool `description` and `instructions`** — one bounded pointer each
@@ -931,6 +931,39 @@ The image search also offers the `include_images` opt-in (base64 thumbnails the
 *model* can look at), for when the model has to judge whether an offer is really
 the same item; the user picking from the grid never needs it.
 
+### Import recovery and the TikTok Analytics import (RD-96)
+
+`find_product_by_buy_id` (`GET /products/{store_ids}/search-buy-id/`, read-only)
+answers whether a store holds a product for one supplier product id. The answer is
+`{status, id}` for a match, and an empty `{}` with a 200 when there is none. Only
+products at status 1 (draft), 2 (active) or 5 (scheduled) are matched.
+
+It is a **recovery** read, not a step of the normal import:
+
+| Situation | Route |
+|---|---|
+| `upload_products` returned a `bulk_action.id` | poll `get_bulk_action_items`. It is the only route that reports a failed item; a failed item has no product, so the lookup would read "not found yet" until the ceiling and the error would be lost. |
+| `upload_products` errored or timed out, so there is no `bulk_action.id` | poll `find_product_by_buy_id` with each submitted `asin` (the bare id, not a URL), at the shared cadence. A product means the import started (or the store already held that product); either way, do not upload again. Still `{}` at the ceiling means no product landed: the import did not start, or it failed. The upload may be repeated after asking the user. |
+
+This is also the `verify_with` of `upload_products` in the `product_import`
+playbook. It replaced a `list_products` filter on the submitted title, which could
+match an unrelated product with the same title and depended on the status the
+upload used.
+
+`upload_products` also documents the **TikTok Analytics import**, the body the web
+app sends to add a TikTok Analytics product to a store:
+`{"region": 7, "status": 2, "buy_site_id": 37, "action_source": 10,
+"new_products": [{"asin": "<the row's internal_id>"}]}`. Three points are easy to
+get wrong, and the tool's notes state all three: the asin is the row's 19-digit
+`internal_id`, not its hex `id`; the status is 2 (active), because a draft cannot
+be sourced; and so the call puts a live listing in the user's store, priced at
+cost by default. `action_source` now has its value table on the parameter itself.
+
+The web app's request also carries `urls`, `upload_as_draft`, `is_sample_loading`
+and `upload_type` (the frontend code calls them `uploadAsDraft`, `isSampleLoading`
+and `uploadType`; the names above are what goes over the wire). They are **not** in the tool's schema on purpose: the upload endpoint
+drops unknown fields before it does anything, so they have no effect.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated
@@ -1122,6 +1155,15 @@ polls that job and deletes what it reports. Without `E2E_UPLOAD_ASIN` the upload
 sends a placeholder supplier id that creates nothing, and the delete is reported
 as skipped rather than pointed at something pre-existing. Set
 `E2E_UPLOAD_ASIN=<a real supplier product id>` to exercise the whole path.
+
+`E2E_TIKTOK_INTERNAL_ID` (RD-96, also behind `E2E_INCLUDE_WRITES=1`) runs the
+TikTok Analytics import on the first store of `E2E_STORE_IDS`, polls its bulk job,
+and checks that `find_product_by_buy_id` names the same product the job reported
+in `autods_product_id`. The import is active, so it is a live listing; the check
+deletes it again, with the listing. It is skipped when the store already holds
+that product, because then the import creates nothing this run may delete.
+`find_product_by_buy_id` also runs in every read pass with an unknown id, and must
+answer `{}`.
 
 The **sourcing** writes have a gate of their own,
 `E2E_INCLUDE_SOURCING_WRITES=1`, and not because there are more of them:

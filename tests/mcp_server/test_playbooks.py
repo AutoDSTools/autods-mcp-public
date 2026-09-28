@@ -1033,7 +1033,8 @@ async def test_a_failing_chain_step_carries_its_chain_consequence(
     assert result.is_error is True
     assert text.startswith("upstream_error: ")
     assert 'Playbook "product_import" step 1/3: this step is not idempotent.' in text
-    assert "Verify with list_products" in text
+    # RD-96: an exact supplier-id lookup replaced the title filter on list_products.
+    assert "Verify with find_product_by_buy_id" in text
     assert "Ask the user before retrying." in text
     # The upstream detail is still not echoed.
     assert "boom" not in text

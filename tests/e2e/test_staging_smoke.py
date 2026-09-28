@@ -27,13 +27,14 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (16 AutoDSApi ops + 6 ProductsResearch ops + 2
+# The full registered tool set (17 AutoDSApi ops + 6 ProductsResearch ops + 2
 # ScrapersAPI ops + 1 op this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
 AUTODS_OPS = {
     "list_stores_api",
     "list_products",
+    "find_product_by_buy_id",
     "get_bulk_action_items",
     "upload_products",
     "publish_drafts_to_marketplace",
@@ -117,6 +118,16 @@ _TERMINAL_ITEM_STATUSES = frozenset({3, 4, 99})  # finished / canceled / error
 # already in the store carries the id of the **pre-existing** product. Deleting
 # by that id is the one thing this block may never do.
 _FINISHED_ITEM_STATUS = 3
+
+# RD-96: a supplier id in the TikTok shape (19 digits) that no store holds, for
+# the read-only not-found check.
+_UNKNOWN_BUY_ID = "1000000000000000001"
+
+# RD-96: the TikTok Analytics import, exactly as ``upload_products``' notes state
+# it — all regions, active, the TikTok supplier site, the TikTok Analytics
+# action source. The asin is added per run.
+_TIKTOK_IMPORT_BODY = {"region": 7, "status": 2, "buy_site_id": 37, "action_source": 10}
+_ACTIVE_PRODUCT_STATUS = 2
 
 # Error-type prefixes that mean "the upstream answered with a business
 # response" — acceptable per the E3 contract. Any other error prefix
@@ -401,8 +412,16 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
                 failures,
                 frozenset(),
             )
+            # RD-96: a supplier id no store holds. The documented not-found
+            # answer is an empty object with a 200 — "keep polling", not an
+            # error — so anything else is a failure of the contract the notes
+            # state, not a business answer.
+            not_found = await call("find_product_by_buy_id", {"store_ids": store_ids, "buy_id": _UNKNOWN_BUY_ID})
+            _record("find_product_by_buy_id", not_found, failures, frozenset())
+            if not not_found.is_error and (not_found.structured_content or {}).get("data") != {}:
+                failures.append("find_product_by_buy_id: an unknown supplier id did not answer the documented {}")
         else:
-            skipped += ["list_products", "get_bulk_action_items"]
+            skipped += ["list_products", "get_bulk_action_items", "find_product_by_buy_id"]
 
         # --- AutoDSApi: sourcing requests (RD-93) ---
         # ``list_store_quotes`` runs on any store: an account with no sourcing
@@ -516,6 +535,9 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
                     if first_store_id.isdigit()
                     else "delete_product (E2E_STORE_IDS does not start with a numeric store id)"
                 )
+
+            # RD-96: the TikTok Analytics import, and the lookup that recovers it.
+            await _smoke_tiktok_import(call, staging_config, first_store_id, failures, skipped)
 
             _record(
                 "publish_drafts_to_marketplace",
@@ -874,6 +896,79 @@ def _chosen_shipping_option_id(result: types.CallToolResult) -> str | None:
         None,
     )
     return None if chosen is None else str(chosen["id"])
+
+
+async def _smoke_tiktok_import(
+    call: Any,
+    staging_config: Any,
+    store_id: str,
+    failures: list[str],
+    skipped: list[str],
+) -> None:
+    """RD-96: import a TikTok Analytics product, then resolve it by supplier id.
+
+    The check is that ``find_product_by_buy_id`` names the **same** product the
+    bulk job reports in ``autods_product_id`` — the two routes an agent is told
+    to pick between must agree when both are available. The import runs at
+    status 2, so it is a live listing, and it is deleted with that listing at
+    the end. Only a product this run created is deleted, for the same reason as
+    the RD-98 delete above.
+    """
+    internal_id = staging_config.tiktok_internal_id
+    if not internal_id:
+        skipped.append("upload_products TikTok import + find_product_by_buy_id (needs E2E_TIKTOK_INTERNAL_ID)")
+        return
+    if not store_id.isdigit():
+        skipped.append("upload_products TikTok import (E2E_STORE_IDS does not start with a numeric store id)")
+        return
+
+    # A product the store already holds would make the import fail as a
+    # duplicate, and the id on that failed item names the pre-existing product —
+    # nothing this run may delete. So look first, and skip rather than fail.
+    before = await call("find_product_by_buy_id", {"store_ids": store_id, "buy_id": internal_id})
+    _record("find_product_by_buy_id (before the TikTok import)", before, failures, frozenset())
+    if before.is_error:
+        return
+    before_data = (before.structured_content or {}).get("data")
+    if isinstance(before_data, dict) and before_data.get("id"):
+        skipped.append("upload_products TikTok import (the store already holds this TikTok product)")
+        return
+
+    upload = await call(
+        "upload_products",
+        {"store_ids": store_id, "body": {**_TIKTOK_IMPORT_BODY, "new_products": [{"asin": internal_id}]}},
+    )
+    _record("upload_products (TikTok Analytics import)", upload, failures, frozenset())
+    created = await _created_product_ids(call, upload, store_id, failures)
+    if not created:
+        skipped.append("find_product_by_buy_id after the TikTok import (the import created no product)")
+        return
+
+    resolved = await call("find_product_by_buy_id", {"store_ids": store_id, "buy_id": internal_id})
+    _record("find_product_by_buy_id (after the TikTok import)", resolved, failures, frozenset())
+    data = (resolved.structured_content or {}).get("data")
+    if not resolved.is_error:
+        found_id = data.get("id") if isinstance(data, dict) else None
+        if found_id != created[0]:
+            failures.append(
+                f"find_product_by_buy_id: resolved {found_id!r}, but the bulk job reported {created[0]!r} "
+                f"for the same TikTok import"
+            )
+        elif data.get("status") != _ACTIVE_PRODUCT_STATUS:
+            failures.append(
+                f"find_product_by_buy_id: the TikTok import resolved at status {data.get('status')!r}, not 2 (active)"
+            )
+
+    # Active, so it reached the sell channel: remove the listing too.
+    _record(
+        "delete_product (the TikTok import)",
+        await call(
+            "delete_product",
+            {"store_id": int(store_id), "product_id": created[0], "remove_from_marketplace": True},
+        ),
+        failures,
+        frozenset(),
+    )
 
 
 async def _created_product_ids(

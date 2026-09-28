@@ -53,7 +53,7 @@ _MAX_TOOL_NAME_LENGTH = 128
 # string-vs-integer bug this carrier exists to prevent, so the boot lint rejects
 # it. Matched by property name anywhere in the body schema.
 _INTEGER_ENUM_BODY_FIELDS = frozenset(
-    {"product_status", "status", "region", "site_id", "buy_site_id", "inventory_status"}
+    {"product_status", "status", "region", "site_id", "buy_site_id", "inventory_status", "action_source"}
 )
 
 # A standalone mention of ``ok`` in an operation's ``notes`` — backticked, bare

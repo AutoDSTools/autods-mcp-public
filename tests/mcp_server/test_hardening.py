@@ -367,6 +367,46 @@ async def test_delete_product_without_remove_from_marketplace_is_refused_locally
     assert upstream_calls[1].url.params["remove_from_marketplace"] == "false"
 
 
+# --- The recovery lookup by supplier id (RD-96) ------------------------------
+
+
+async def test_find_product_by_buy_id_sends_the_id_as_a_query_parameter_and_passes_not_found_through(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-96: ``buy_id`` is required upstream, and a missing one would come back
+    as a validation error the model cannot act on — so the schema gate refuses
+    it here. The not-found answer is an empty object with a 200, and it must
+    reach the client as ``ok: true`` with ``data == {}``: the notes tell the
+    agent to read exactly that as "keep polling", so an envelope that turned it
+    into an error would end a recovery loop that should go on."""
+    upstream_calls: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request)
+        return httpx.Response(200, json={})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        missing = await session.call_tool("find_product_by_buy_id", {"store_ids": "42"})
+        found = await session.call_tool("find_product_by_buy_id", {"store_ids": "42", "buy_id": "1730859172304425695"})
+
+    assert missing.is_error is True
+    assert missing.content[0].text.startswith("invalid_arguments: ")
+    assert "buy_id" in missing.content[0].text
+
+    assert found.is_error is False
+    envelope = found.structured_content or {}
+    assert envelope["ok"] is True
+    assert envelope["data"] == {}
+    assert len(upstream_calls) == 1
+    request = upstream_calls[0]
+    assert request.method == "GET"
+    assert request.url.path == "/products/42/search-buy-id/"
+    assert request.url.params["buy_id"] == "1730859172304425695"
+
+
 # --- The sourcing writes (RD-94) ---------------------------------------------
 
 # The AutoDS product this run pretends to source, and the 1688 offer it is

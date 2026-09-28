@@ -283,6 +283,44 @@ def test_the_supplier_scans_say_what_the_ceiling_means(bundled_manifest_dir: Pat
     assert "do not keep polling" in notes
 
 
+# --- tier 2: the recovery lookup (RD-96) -------------------------------------
+
+
+def test_the_recovery_lookup_carries_the_cadence_itself(bundled_manifest_dir: Path) -> None:
+    """``find_product_by_buy_id`` is polled while an import that errored may
+    still be running, so it is the descriptor the agent holds when it decides
+    whether to call again — the same rule as every other polling tool."""
+    text = _tool_text(bundled_manifest_dir, "find_product_by_buy_id")
+
+    for token in CADENCE_TOKENS:
+        assert token in text, f"find_product_by_buy_id no longer states {token!r}"
+
+
+def test_the_recovery_lookup_reads_not_found_as_keep_polling(bundled_manifest_dir: Path) -> None:
+    """Not-found is ``{}`` with a 200. Read as "failed", it ends the loop on an
+    import that was about to land, and the agent resubmits a duplicate."""
+    notes = build_registry(bundled_manifest_dir).get("find_product_by_buy_id").notes or ""
+
+    assert 'Read {} as "not in the store yet — keep polling"' in notes
+    # ...and a bounded loop needs its third answer: {} at the ceiling ends it.
+    # It says "no product landed", not "did not start": a failed import (a bulk
+    # item at 99) and one still running past the ceiling both read {} too.
+    assert "on reaching the ceiling means no product landed: the import either did not start or failed" in notes
+    assert "Do not keep polling." in notes
+
+
+def test_the_recovery_lookup_sends_a_normal_import_to_the_bulk_poll(bundled_manifest_dir: Path) -> None:
+    """The bulk poll is the only route that reports a failed item: an item at 99
+    has no product, so this lookup would say "not yet" up to the ceiling and
+    lose the error. The notes must say so, or the tool reads as the step after
+    every upload."""
+    notes = build_registry(bundled_manifest_dir).get("find_product_by_buy_id").notes or ""
+
+    assert "NOT the step after upload_products" in notes
+    assert "poll get_bulk_action_items instead" in notes
+    assert "ask the user first" in notes
+
+
 # --- tier 3: the playbook runbook --------------------------------------------
 
 

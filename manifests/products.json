@@ -12,7 +12,7 @@
       "path": "/products/{store_ids}/",
       "summary": "Bulk-upload products to one or more stores from supplier products, a file, or finder categories.",
       "description": "",
-      "notes": "Bulk-upload products to one or more stores. Async: starts an asynchronous bulk job and returns immediately with {\"status\": \"Product uploading started\", \"bulk_action\": {...}}; poll progress by passing bulk_action.id to get_bulk_action_items (autods-bulk-actions manifest). Provide at least ONE product source in the body: new_products, file_url, or finder_categories. The asin in new_products is the supplier's product id, usually embedded in the product URL (e.g. Amazon B0D8HR6M4B from .../dp/B0D8HR6M4B/...) — pass the bare id or the full product URL, not a search/category landing page. If status=5 (scheduled), upload_settings.scheduled_datetime is required and must be a future, timezone-aware time. region, status and buy_site_id are integer enums whose values are listed on each field.",
+      "notes": "Bulk-upload products to one or more stores. Async: starts an asynchronous bulk job and returns immediately with {\"status\": \"Product uploading started\", \"bulk_action\": {...}}; poll progress by passing bulk_action.id to get_bulk_action_items (autods-bulk-actions manifest). Provide at least ONE product source in the body: new_products, file_url, or finder_categories. The asin in new_products is the supplier's product id, usually embedded in the product URL (e.g. Amazon B0D8HR6M4B from .../dp/B0D8HR6M4B/...) — pass the bare id or the full product URL, not a search/category landing page. If status=5 (scheduled), upload_settings.scheduled_datetime is required and must be a future, timezone-aware time. region, status, buy_site_id and action_source are integer enums whose values are listed on each field.\n\nIf this call errors or times out it returns no bulk_action.id, and the job may have started anyway. Do not resubmit blind: look the product up with find_product_by_buy_id first.\n\nTikTok Analytics import — the body that adds a product found in TikTok Analytics to a store: {\"region\": 7, \"status\": 2, \"buy_site_id\": 37, \"action_source\": 10, \"new_products\": [{\"asin\": \"<the row's internal_id>\"}]}, e.g. asin \"1730859172304425695\". Three things about it are easy to get wrong:\n1. The asin is the row's `internal_id` (19 digits), NOT its `id`. A TikTok Analytics row carries both; the 24-character hex `id` names the row inside TikTok Analytics, and sent here it imports nothing.\n2. `status` is 2 (active), not 1 (draft), when the product is to be sourced afterwards. A sourcing request needs the product's variant ids on the sell channel, and a draft has none yet, so a draft cannot be sourced.\n3. The consequence: this call puts a LIVE listing in the user's store, in front of buyers, and unless the store's own settings say otherwise it is priced at cost: the default pricing for TikTok products adds zero profit. Tell the user that before calling it, and set the price they want afterwards.",
       "tags": [
         "products"
       ],
@@ -107,7 +107,19 @@
           },
           "action_source": {
             "type": "integer",
-            "description": "Optional action-source enum value."
+            "enum": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "description": "Optional. Records where the product was picked from, as an INTEGER enum value: 1=unknown, 2=platform, 3=extension, 4=marketplace, 5=untracked, 6=finder, 7=external_integration, 8=winning_products, 9=trending_product, 10=tiktok_analytics. Send 10 for a product taken from TikTok Analytics; otherwise leave it out (it defaults to 1). It labels the upload and does not change what is created."
           },
           "supplier_settings": {
             "type": "object",
@@ -477,6 +489,41 @@
         "required": [
           "product_status"
         ]
+      }
+    },
+    {
+      "operation_id": "find_product_by_buy_id",
+      "method": "GET",
+      "path": "/products/{store_ids}/search-buy-id/",
+      "summary": "Find the product a store holds for one supplier product id — the recovery read after an upload_products call that failed without a bulk_action.id.",
+      "description": "",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "store_ids",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "AutoDS store IDs if more than one should be comma separated. Pass the store the upload targeted."
+        },
+        {
+          "name": "buy_id",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "The supplier product id that was sent as `new_products[].asin`, as the bare id — not a product URL. For a TikTok Analytics import it is the row's `internal_id` (19 digits). One id per call."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "is_top_typed_tool": false,
+      "notes": "Read-only GET. Answers whether the store already holds a product for one supplier product id, and which one. The answer is deliberately tiny: {\"status\": <int>, \"id\": \"<24-character hex AutoDS product id>\"}. `status` is the product's integer status, and only three are ever matched: 1=draft, 2=active, 5=scheduled. When nothing matches, the answer is an empty object {} with `ok: true`. Read {} as \"not in the store yet — keep polling\", never as an error and never as a failed import: an import that is still running answers {} too.\n\nThis is a recovery read, NOT the step after upload_products. Whenever upload_products returned a `bulk_action.id`, poll get_bulk_action_items instead: it is the only route that reports a FAILED import. An item that ended at 99 (error) created no product, so this lookup would keep answering {} up to the ceiling and the error reason would be lost. Use this tool only when upload_products itself errored or timed out and so returned no `bulk_action.id` — then nothing else can say whether the import started.\n\nThe recovery loop: wait ~10s, then call it every ~15s, stopping after 10 attempts (~2.5 min). A product in the answer means the import started, or the store already held that product before it (then a second upload would fail as a duplicate). Either way, continue from its `id` (confirm it with list_products, or take it into a sourcing request) and do not submit the upload again. Still {} on reaching the ceiling means no product landed: the import either did not start or failed. Do not keep polling. The upload may then be repeated unchanged, but ask the user first — if it is still running after all, a second submission is a duplicate listing, and a live one when it was imported at status 2.\n\nOne supplier id per call: for a batch, call it once per id. If several of the given stores hold the product, only one of them is answered. An upload by `file_url` or `finder_categories` has no supplier id to look up — read the store with list_products instead.",
+      "annotations": {
+        "title": "Find Product By Supplier Id",
+        "readOnlyHint": true,
+        "destructiveHint": false
       }
     },
     {

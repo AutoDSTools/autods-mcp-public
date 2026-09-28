@@ -247,6 +247,41 @@ Also note the asymmetry when writing the notes: `/products/scan` has **no
 `data[asin]` entry is indistinguishable from a slow one. There, the ceiling is the
 only stop condition.
 
+## Import recovery: `find_product_by_buy_id` (RD-96)
+
+The fourth polling loop, and the only one that is **not** a step of a chain. It runs
+when `upload_products` errored or timed out and so returned no `bulk_action.id` —
+the one case where the bulk poll above cannot run. The same call is repeated with the
+same `buy_id` (the submitted `asin`, bare id), at the same cadence.
+
+It has two states, not a state machine:
+
+| answer | meaning | polling |
+| --- | --- | --- |
+| `{}` | no product in the store for this supplier id **yet** | keep polling |
+| `{status, id}` | the import started, or the store already held this product; `id` is the AutoDS product | stop; do not upload again; continue from `id` |
+| `{}` at the ceiling | no product landed: the import did not start, or it failed (or it is still running past the ceiling) | stop; the upload may be repeated, after asking the user |
+
+`{}` at the ceiling cannot say *which* of those three happened, so the text an agent
+reads says "no product landed" and never "did not start". A resubmit after a failure
+most likely fails again for the same reason; a resubmit of an import still running is
+a duplicate. That is why the user is asked first.
+
+Where it comes from upstream: `SearchProductBuyID` in
+`AutoDSApi/api/resource/products/products.py`, and
+`ProductRepository.get_product_by_buy_id`. The lookup matches
+`variations.active_buy_item.item_id_without_variant`, so a product URL in `buy_id`
+never matches — only the bare id does. It only looks at products at draft, active
+or scheduled, so a product still in an earlier import state reads as `{}`, which is
+why `{}` is "not yet" and never "failed". It returns the first match, so one call
+answers one product even when several stores hold one.
+
+Why it must not replace the bulk poll when a `bulk_action.id` exists: a bulk item
+that ends at 99 created no product, so this lookup reads `{}` for it on every
+attempt. The error reason is only on the bulk item. A loop on the lookup would end
+at the ceiling, conclude "no product landed", and invite a resubmission of an upload
+that failed for a reason (a duplicate, a bad id) that a resubmission repeats.
+
 ## Rate limits (reviewed, unchanged)
 
 Two token buckets keyed by `user.sub`, shared across all operations: **60/min** and

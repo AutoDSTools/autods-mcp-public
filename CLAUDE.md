@@ -144,8 +144,8 @@ client:
 - Every operation must have an `annotations.title` **and** at least one hint
   (`readOnlyHint` or `destructiveHint`) — D5.
 - Integer enum fields in `body_schema` (e.g. `product_status`, `status`, `region`,
-  `site_id`, `buy_site_id`, `inventory_status`) **must** be typed as integers, never
-  strings — D5.
+  `site_id`, `buy_site_id`, `inventory_status`, `action_source`) **must** be typed as
+  integers, never strings — D5.
 - The **concatenated** `instructions` across all manifests must be ≤ 6000 chars
   (RD-90). See the tiers below.
 - A `business_errors` block must carry at least one `paths` entry, and the operation's
@@ -1536,6 +1536,37 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
 
 ### Specific upstream endpoints
 
+- **The web app's upload body carries four fields the upload endpoint throws away, and
+  they are left out of `body_schema` on purpose** (RD-96). The TikTok Analytics hook
+  sends `urls`, `upload_as_draft`, `is_sample_loading` and `upload_type` beside the
+  real fields (wire names; in the frontend code they are `uploadAsDraft`,
+  `isSampleLoading`, `uploadType`), and RD-96 asked for all four to be documented. They were not:
+  `ProductUploadSchema` inherits `unknown = EXCLUDE` from AutoDSApi's `BaseSchema`, the
+  POST handler reads only the declared fields, and the background job receives only
+  those. The raw request is stored on the bulk action record, and nothing reads the four
+  back from it. So documenting them would teach an agent to send fields that do nothing,
+  and would suggest that `upload_as_draft` decides the status, when `status` does. Add one
+  only after finding code that reads it. `action_source` looks like the same case and is
+  not: it *is* declared and stored on the product (`dal/model/item.py`), so its value
+  table went on the parameter. Nothing upstream branches on it; it labels the product
+  and its analytics event.
+- **`find_product_by_buy_id` answers `{}` for "not found", and for several cases that
+  are not "never imported"** (RD-96). `get_product_by_buy_id` matches
+  `variations.active_buy_item.item_id_without_variant` exactly, and only on products
+  at draft, active or scheduled. So a product URL as `buy_id` never matches (only the
+  bare id does), a product still in an earlier import state reads as `{}`, and so does
+  one that was deleted or ended. It returns the first match, so several stores in the
+  path give one answer. The schema dumps a missing product as an empty object with a 200,
+  which is why the notes say "keep polling" and not "failed". Two decisions follow, and
+  both are pinned by tests. It is a **recovery** read, the `verify_with` of
+  `upload_products`, and never a chain step: a bulk item at 99 created no product, so a
+  loop on this lookup would end at the ceiling and lose the error, which only the bulk
+  item carries (`test_the_recovery_lookup_sends_a_normal_import_to_the_bulk_poll`). And
+  its `{}` has to reach the client as `ok: true` with `data == {}`
+  (`test_find_product_by_buy_id_sends_the_id_as_a_query_parameter_and_passes_not_found_through`).
+  It replaced a `list_products` filter on the submitted title, which matched by title
+  and assumed the upload was a draft. The TikTok import is active, so that route never
+  worked for it.
 - **`search_products` answers four different malformed calls badly, each in its own way —
   two 500s, a 400 and an empty 200 — and one of them is the call our own text used to ask
   for** (RD-107). Omitting `filters` entirely **500s** (`filters: []` is fine) — and the

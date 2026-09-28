@@ -60,13 +60,17 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 7 AutoDSApi ops + 7 store-quote ops + 6 ProductsResearch ops + 2 users ops
+    # 8 AutoDSApi ops + 7 store-quote ops + 6 ProductsResearch ops + 2 users ops
     # (get_current_user, get_user_subscription) + 2 supplier scan ops (RD-95)
     # + 1 locally-served op (get_playbook).
-    assert len(by_name) == 25
+    assert len(by_name) == 26
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
+    # RD-96: the recovery read. Read-only is also what playbook lint 5 needs,
+    # since product_import names it as upload_products' verify_with.
+    assert by_name["find_product_by_buy_id"].annotations.title == "Find Product By Supplier Id"
+    assert by_name["find_product_by_buy_id"].annotations.read_only_hint is True
     # RD-98: the single-product delete is advertised destructive, and the hint is
     # what makes a client apply its own confirmation step. Both hints are set
     # explicitly rather than leaning on the D5 minimum of one.

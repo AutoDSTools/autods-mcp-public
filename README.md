@@ -21,7 +21,8 @@ to MCP tool descriptors, and dispatches each tool call to the right
 upstream service. Phase E
 ([RD-55](https://autods.atlassian.net/browse/RD-55)) finalizes the
 launch endpoint set — the AutoDSApi manifests plus the hand-authored
-ProductsResearch read endpoints (`manifests/products_research.json`) —
+ProductsResearch read endpoints (`manifests/products_research.json`,
+and later the TikTok Analytics reads in `manifests/tiktok_analytics.json`) —
 and adds the opt-in staging end-to-end smoke suite. Phase F
 ([RD-56](https://autods.atlassian.net/browse/RD-56)) hardens the server
 for production: a stateless transport, Redis-backed per-user rate
@@ -964,6 +965,52 @@ and `upload_type` (the frontend code calls them `uploadAsDraft`, `isSampleLoadin
 and `uploadType`; the names above are what goes over the wire). They are **not** in the tool's schema on purpose: the upload endpoint
 drops unknown fields before it does anything, so they have no effect.
 
+### TikTok Analytics research (RD-69)
+
+Four read-only tools in `manifests/tiktok_analytics.json`, forwarded to
+ProductsResearch (`base_url_key: products_research`) under its
+`/tiktok-analytics` route. All four need the Product Finding Hub add-on; without
+it the upstream answers 403, which reaches the client as `forbidden`.
+
+| Tool | Upstream | Answers |
+|---|---|---|
+| `get_tiktok_products` | `GET /tiktok-analytics/products` | one page of the TikTok Shop product table, filtered and sorted, as `{quantity, products}` |
+| `get_tiktok_product_details` | `GET /tiktok-analytics/product` | one product in full: gallery, rating, stock, score, all-time video and affiliate counts |
+| `get_tiktok_product_overview` | `GET /tiktok-analytics/overview` | one product's daily units sold and GMV over a date range, with totals and averages |
+| `get_tiktok_product_videos` | `GET /tiktok-analytics/videos` | one page of the TikTok videos that promote the product |
+
+Every filter, allowed value and date format is on the parameter itself (tier 1),
+and the manifest's own `instructions` is empty. Five things are easy to get wrong,
+and each was measured on staging:
+
+- **Each row has two ids, and each tool takes one of them.** `id` (32-character
+  hex) goes to the details and overview tools as `product_id`. `internal_id`
+  (19 digits) goes to the videos tool, and it is also the `asin` of the TikTok
+  Analytics import above. The wrong id fails differently per tool: the details and
+  overview tools answer `upstream_error`, and the videos tool answers an empty
+  list with no error at all.
+- **`commission_rate` and `sold_growth_*` are percentages** (10 = 10%). The
+  upstream's own parameter text shows a fraction (`"0.05-0.2"`) for
+  `commission_rate`, which would match almost every product.
+- **The `product_score` filter is on a raw score no answer carries.** It is not
+  the 0–100 `product_score_norm`: `"50-"` matches nothing. Sorting by
+  `product_score_norm` is the usable form.
+- **The overview's `end_date` is exclusive**, although the upstream describes it
+  as included: the series ends the day before it. The videos tool's `end_date`
+  really is included.
+- **Paging stops at 10,000 results.** Past `offset + limit = 10000` the upstream
+  answers 500, so the tool answers `upstream_error`. A product row is about 2 KB,
+  so the notes ask for pages of 20 or fewer.
+
+**The table draws a thumbnail grid and the details read a product card**, like the
+catalogue tools. Each cell links to the product's TikTok Analytics page in the web
+app, `/marketplace/tiktok-analytics/{id}/{internal_id}` — the one route that takes
+two ids, so its link entry names the second one with `internal_id_path`. `base64` is
+off on both: the user picks from the grid, which costs no vision tokens. The images
+are signed TikTok CDN URLs that stop working after a while; an old conversation loses
+its pictures, but the links keep working. The videos read has no grid, because the
+video covers carry their own expiry, which had already passed on the staging rows.
+
 ### Manifest → upstream call flow
 
 0. Client connects; the `initialize` response carries the concatenated
@@ -1023,6 +1070,14 @@ choice here:
   closes the upstream HTTP and Redis clients on exit.
 
 ## Troubleshooting
+
+- **"A TikTok Analytics tool answers `upstream_unreachable`, and every other tool
+  works."** On staging this is usually upstream latency, not a broken route: the
+  TikTok Analytics endpoints answered in 15–40 s there, and the overview in up to
+  53 s (RD-69). A call past the dispatcher's 30 s timeout ends as
+  `upstream_unreachable`. Retry once, and for the
+  overview ask for a shorter date range. A `forbidden` instead means the account has
+  no Product Finding Hub add-on.
 
 - **"Both supplier scan tools fail, and every other tool works."** Check
   `SCRAPERS_API_BASE_URL` on the deployment before anything else (release check

@@ -11,7 +11,14 @@ walk the user into production.
 import pytest
 
 from autods_mcp_server.manifests.schema import LinkBlock
-from autods_mcp_server.product_links import build_link, gate_matches, route_names, route_needs_id, route_status
+from autods_mcp_server.product_links import (
+    build_link,
+    gate_matches,
+    route_names,
+    route_needs_id,
+    route_needs_internal_id,
+    route_status,
+)
 from autods_mcp_server.settings import McpEnv, Settings
 
 _STAGING = "https://v2-staging.autods.com"
@@ -99,9 +106,59 @@ def test_every_route_builds_the_path_the_app_actually_registers(route: str, expe
 
 
 def test_the_route_table_reports_what_it_serves() -> None:
-    assert route_names() == ["store_draft", "store_product", "hand_picked_product", "marketplace_product"]
+    assert route_names() == [
+        "store_draft",
+        "store_product",
+        "hand_picked_product",
+        "marketplace_product",
+        "tiktok_analytics_product",
+    ]
     assert all(route_needs_id(name) for name in route_names())
     assert route_needs_id("not_a_route") is False
+    assert [name for name in route_names() if route_needs_internal_id(name)] == ["tiktok_analytics_product"]
+    assert route_needs_internal_id("not_a_route") is False
+
+
+_TIKTOK_LINK = LinkBlock(route="tiktok_analytics_product", internal_id_path="internal_id")
+
+
+def test_the_tiktok_page_takes_the_row_id_then_the_internal_id() -> None:
+    """RD-69: ``MARKETPLACE_TIKTOK_ANALYTICS_SINGLE_PATH =
+    '/marketplace/tiktok-analytics/:id/:internalId'``, filled the way the app's
+    own table fills it. Swapped, it still opens the app."""
+    link = build_link(
+        _TIKTOK_LINK,
+        identifier="ee794ba31e68dafa50197d76463a9688",
+        internal_identifier="1729893779001479400",
+        arguments=None,
+        base_url=_STAGING,
+    )
+    assert link == (
+        "https://v2-staging.autods.com/marketplace/tiktok-analytics/"
+        "ee794ba31e68dafa50197d76463a9688/1729893779001479400"
+    )
+
+
+@pytest.mark.parametrize(
+    ("identifier", "internal_identifier"),
+    [
+        ("ee794ba31e68dafa50197d76463a9688", None),
+        ("ee794ba31e68dafa50197d76463a9688", ""),
+        (None, "1729893779001479400"),
+    ],
+)
+def test_the_tiktok_page_with_either_id_missing_gets_no_link(
+    identifier: str | None, internal_identifier: str | None
+) -> None:
+    """Half the path would open a page that says the product has no videos."""
+    link = build_link(
+        _TIKTOK_LINK,
+        identifier=identifier,
+        internal_identifier=internal_identifier,
+        arguments=None,
+        base_url=_STAGING,
+    )
+    assert link is None
 
 
 def test_a_store_route_reports_the_status_written_into_its_own_path() -> None:
@@ -112,6 +169,7 @@ def test_a_store_route_reports_the_status_written_into_its_own_path() -> None:
     assert route_status("store_product") == 2
     assert route_status("hand_picked_product") is None
     assert route_status("marketplace_product") is None
+    assert route_status("tiktok_analytics_product") is None
     assert route_status("not_a_route") is None
 
 

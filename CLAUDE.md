@@ -162,9 +162,10 @@ client:
 - Every entry of `images.links` must name a route `product_links` serves, set both
   halves of its body gate or neither, gate on a field the operation's own
   `body_schema` declares **and on a value that field's `enum` accepts**, carry an
-  `id_path` when its route needs an id, and — for a route whose path holds a
-  product status — be gated on that same status. An ungated entry must be last
-  (RD-92). Each of those otherwise ships as a link that is never built, one built
+  `id_path` when its route needs an id, carry an `internal_id_path` exactly when its
+  route also needs the item's internal id (RD-69, the TikTok Analytics page), and —
+  for a route whose path holds a product status — be gated on that same status. An
+  ungated entry must be last (RD-92). Each of those otherwise ships as a link that is never built, one built
   wrong, or one that hides every entry after it.
 - The six playbook lints (RD-100), below.
 - A `fixed_query` key must not also be a declared parameter, and a locally-handled
@@ -567,6 +568,13 @@ the app's single source for these:
 | `store_product` | `/products/{id}&2` | `list_products`, `product_status: 2` |
 | `hand_picked_product` | `/marketplace/hand-picked-products/{id}` | `get_winning_products` |
 | `marketplace_product` | `/marketplace/all-products/{id}` | `search_products`, `get_similar_products`, `get_recommended_products`, `get_product_by_id` |
+| `tiktok_analytics_product` | `/marketplace/tiktok-analytics/{id}/{internal_id}` | `get_tiktok_products`, `get_tiktok_product_details` |
+
+The TikTok Analytics page (RD-69) is the one route that takes **two** ids: the row's
+32-hex `id`, then its 19-digit `internal_id`, which is how the app's own table opens
+it. The second id comes from the link entry's `internal_id_path`, and a missing one
+means no link — the page reads its videos by the internal id, so half a path opens a
+page that says the product has no videos.
 
 Two of those are not what they look like, and both are in the Gotchas below: a
 store product's page takes the status *in the path*, and the catalogue page is
@@ -1070,12 +1078,16 @@ reads them.
   because it rides the client's system prompt on every turn and sits in the cached prefix;
   moving a long enum table back into it is a regression even though nothing about the call
   breaks. Empty per-manifest `instructions` is legitimate — don't add a non-empty lint.
-- **"Enums are integers" has exactly one exception, and the index names it** (RD-93). The
-  store-quote statuses (`new`, `in_progress`, `ready`, `linked`, `cannot_be_sourced`),
-  the `QuoteStatus` on a version, and `sourcing_supplier` are lowercase **strings** on
-  the wire — they are SQL enums, not the integer enums every other AutoDS surface uses.
+- **"Enums are integers" has exactly two exceptions, and the index names both** (RD-93,
+  RD-69). The store-quote statuses (`new`, `in_progress`, `ready`, `linked`,
+  `cannot_be_sourced`), the `QuoteStatus` on a version, and `sourcing_supplier` are
+  lowercase **strings** on the wire — they are SQL enums, not the integer enums every
+  other AutoDS surface uses. The TikTok Analytics tools are the second: their
+  `sort_field`, `sort_order` and `product_status` are string enums of the
+  ProductsResearch controller (`available`, `desc`, `gmv_7d`, …).
   A server-wide invariant with an unmarked exception is worse than no invariant, so
-  `_server.json` carries the exception clause and each tool's `notes` list the values.
+  `_server.json` carries the exception clause and each tool lists the values.
+  A new tool with string enums joins that clause; don't let it ship unmarked.
   The integer-enum boot lint is unaffected: it matches on *property name* in a
   `body_schema`, and these values are filter operands, not a property called `status`.
   Keep it that way — a body property literally named `status` in a store-quote manifest
@@ -1698,6 +1710,35 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   - After the removal the 20-variation offer is 199 KB — still large. The notes keep
     telling the agent to shortlist from the search and read one offer at a time. The
     real fix is still an upstream option to leave the per-variation shipping out.
+- **The TikTok Analytics endpoints' own parameter texts are wrong in three places, and
+  each mistake fails with no error** (RD-69, measured on staging). (1) `commission_rate`
+  is documented upstream as a fraction (`"0.05-0.2"`); stored values are percentages
+  (5, 10, 30), so a fraction filter matches almost everything. (2) The `product_score`
+  filter's example is `"83.3-90.8"`, but it filters a raw score that no answer carries
+  and that is far below 1 for most products — `"50-"` matches nothing, `"0.5-"` a
+  handful. The 0–100 `product_score_norm` is only a sort field. (3) The overview's
+  `end_date` says "included", and the code builds the series up to the day *before*
+  it; the videos endpoint's `end_date` really is included. `manifests/tiktok_analytics.json`
+  documents what the upstream does, and `tests/mcp_server/test_tiktok_analytics.py`
+  pins it. Don't "restore" the upstream wording.
+- **A TikTok Analytics row has two ids, and the wrong one fails three different ways**
+  (RD-69). `id` (32-character hex — not 24, which RD-96's text said until RD-69) is
+  what `/product` and `/overview` take as `product_id`; `internal_id` (19 digits) is
+  what `/videos` takes, and it is also the `asin` of the TikTok import. Sent the wrong
+  id, `/product` and `/overview` answer a 500 (`upstream_error`), and `/videos`
+  answers `{quantity: 0, videos: []}` with a 200 — so an agent reports "no videos" for
+  a product that has many. That is why both parameter descriptions name the other id,
+  and why the videos notes tell the agent to compare with `related_videos_qty`.
+- **The TikTok Analytics reads are slow on staging, and the overview is slower than the
+  dispatcher's 30 s timeout** (RD-69, measured 2026-09-28 direct against the gateway).
+  The table, details and videos reads took 15–40 s. The overview took 22 s once and then
+  37–53 s on every later try, even for a 3-day range, and a 27-day range took 60 s and
+  answered 500. So through this server the overview ended as `upstream_unreachable`
+  (a transport timeout, not `upstream_error`) on every staging call after the first,
+  and the staging smoke records it as a failure — correctly. That is an upstream latency problem, not a manifest bug, and not a
+  reason to raise `_DEFAULT_TIMEOUT_SECONDS` for every tool. Measure prod before
+  treating it as a finding there.
+
 ### Scripts and log noise
 
 - **`uvicorn.access`, `httpx`, and `mcp` INFO lines duplicate our structured
@@ -2076,8 +2117,16 @@ the audit line carries about a call** above.
 - **Signed CDN URLs expire, and a widget refetches on scroll** (RD-92). TikTok
   marketplace URLs carry `t`/`ps`/`shp`/`shcp`; the rewrite deliberately leaves the query
   untouched (it authorises the object, not the size), but a persisted conversation
-  reopened later shows broken images regardless. Proxy-vs-accept-decay is undecided and
-  has to be decided before a TikTok surface ships.
+  reopened later shows broken images regardless. RD-69 shipped the first TikTok
+  surfaces (the TikTok Analytics grid and card) on **accept-decay**: a grid is for
+  choosing now, the full URLs are in `data` either way, and each cell's `link` to the
+  app does not expire, so an old conversation loses its pictures but not its way back
+  to the product. The rewritten sizes were fetched live from the TikTok CDN:
+  `resize-jpeg:800:800` → `:256:256` and a non-square `crop-webp:1350:1800` →
+  `:256:256` both load (~14 KB against 80–140 KB), so the signature does not cover the
+  size. A proxy is still the fix if decay turns out to matter. Video covers are the
+  exception, and why `get_tiktok_product_videos` has no grid: they carry their own
+  `x-expires`, and on the staging rows RD-69 read it had already passed.
 ### OAuth discovery metadata
 
 - **OAuth metadata URL fields are typed `str`, not `AnyUrl`/`HttpUrl`** — `AnyUrl` appends a

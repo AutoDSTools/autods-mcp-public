@@ -55,9 +55,9 @@ the run:
 2. **Writes** — run section W or not. If yes, **which store**: the human describes
    it however they like ("the Shopify store", a store name, a URL). They do *not*
    need to know the id — P5 resolves the description against their store list.
-   Staging only. In the same question, ask for the `internal_id` of one TikTok
-   Analytics product if W10 should run (P12), and say what W10 does: it puts a
-   **live** listing on that store for a minute or two, then deletes it.
+   Staging only. In the same question, ask whether W10 should run, and say what W10
+   does: it puts a **live** listing on that store for a minute or two, then deletes
+   it. The human may name the TikTok Analytics product; if not, P12 picks one.
 3. **The sourcing checks W6–W9, separately** (RD-94) — they each spend one
    non-refundable auto-order credit on the authorized account for a request nobody
    can cancel, so consent to "writes" is not consent to these. Ask in the same
@@ -556,7 +556,7 @@ Record the raw `addon_type`/`status` pairs too, so the grading below can be re-d
 from the report — and flag it as a finding if `status` arrives as a *name* rather than a
 number, because that is an upstream rendering change the tool's `notes` tolerate but
 callers may not.
-*Fixture:* the two entitlement flags (needed by R6, R7 and P8).
+*Fixture:* the two entitlement flags (needed by R6, R7, R19 and P8).
 *Why it matters:* without the Product Finding Hub, `get_winning_products` returns a
 limited free set and `get_product_by_id` on a *winning* product answers with an
 `upstream_error` about an unexpected redirect. Both are correct behaviour. Decide this
@@ -629,7 +629,7 @@ connector added, and nothing Claude can drive substitutes for it. Establish it
 here rather than discovering it at R15 — ask once, alongside C1, whether the human
 has that session open (C1 normally leaves them signed in on web anyway, which is
 why this costs nothing).
-*Fixture:* whether R15.2 can run at all.
+*Fixture:* whether R15.2 (and the rendering half of R19.5) can run at all.
 *If not available:* R15.2 is `skipped (no widget-rendering client)`, and
 the report says the rendering path is unverified for this release. R15.1 still
 runs and still grades the data.
@@ -678,16 +678,18 @@ carries at most one sourcing request.
 
 **P12 — A TikTok Analytics product to import** (only if W10 will run). W10 needs
 the `internal_id` of one TikTok Analytics row: 19 digits, e.g.
-`1730859172304425695`. Not the row's 24-character hex `id` — that is the mistake
+`1730859172304425695`. Not the row's 32-character hex `id` — that is the mistake
 W10 exists to catch in the tool text, so do not make it here.
-*Where it comes from:* the human, in the opening round. Nothing in this server
-reads TikTok Analytics yet.
+*Where it comes from:* the human, in the opening round. If they named none and P4
+shows `product_hub` active, take the `internal_id` of the first row of
+`get_tiktok_products` `{"limit": 5}` that passes the check below (RD-69).
 *Check the P5 store does not hold it already:* `find_product_by_buy_id`
 `{"store_ids": "<the P5 id>", "buy_id": "<that internal_id>"}` must answer `{}`.
 A product in the answer means W10's import would fail as a duplicate and create
 nothing this run may delete, so record `skipped (the store already holds this
 TikTok product)`.
-*If no id was given:* W10 is `skipped (no TikTok Analytics product named)`.
+*If no id was given and none could be picked:* W10 is `skipped (no TikTok Analytics
+product named)`.
 
 ---
 
@@ -982,6 +984,7 @@ only the right one holds the product:
 | `list_products`, any other status | **no** `link` key at all |
 | `get_winning_products` | `/marketplace/hand-picked-products/{_id}` |
 | `search_products`, `get_similar_products`, `get_recommended_products`, `get_product_by_id` | `/marketplace/all-products/{id}` — `all-products`, not `products` |
+| `get_tiktok_products`, `get_tiktok_product_details` | `/marketplace/tiktok-analytics/{id}/{internal_id}` — **both** ids, the 32-hex one first (R19.5) |
 
 Re-use R13.2's and R15.1's results rather than making fresh calls where you can.
 
@@ -1188,6 +1191,61 @@ until the ceiling, where its error is lost. Then read `upload_products`' own
 `notes`: they must point at this tool for an upload that errored. And the
 `upload_products` step's failure text in `get_playbook` `{"name": "product_import"}`
 must name `find_product_by_buy_id` in its `verify_with`, not `list_products`.
+
+**R19 — TikTok Analytics research: "which TikTok products are selling, and why?"
+(RD-69).** The symptom this guards: a user asks for trending TikTok products and
+then for one product's sales and videos, and the agent either says it cannot find
+the product, or reports that a product with many videos has none. Both come from
+sending the wrong one of a row's two ids, which the four tools' parameter texts
+exist to prevent. All four are read-only and safe in any environment.
+*Grade against P4 first.* All four need the Product Finding Hub. With `product_hub`
+not active in P4, each call must answer `forbidden` — that is a **pass** (the
+correct behaviour), and the rest of R19 is `skipped (no Product Finding Hub)`.
+Upstream latency on staging is high for these reads; a slow answer is within
+contract, and only a timeout (`upstream_error` / `upstream_unreachable` on a call
+that is otherwise well formed) is a finding.
+
+*R19.1 — the table.* `get_tiktok_products`
+`{"limit": 3, "sort_field": "gmv", "commission_rate": "10-"}`
+→ `data` is `{quantity, products}` with at most 3 products. Each carries a
+32-character hex `id` and a 19-digit `internal_id`, and every `commission_rate` is
+10 or more. A `commission_rate` below 10, or null, is a **fail**: the filter is a
+percentage and the parameter text says so. Take the first row's two ids.
+
+*R19.2 — details.* `get_tiktok_product_details` `{"product_id": "<the row's id>"}`
+→ one object with the same `id`, plus `all_images`, `product_score_norm`,
+`related_videos_qty` and `affiliates_qty`.
+
+*R19.3 — overview.* `get_tiktok_product_overview` `{"product_id": "<the row's id>"}`
+→ `gained_units_sold` has exactly 7 points, the last one dated **yesterday** (UTC).
+A point dated today means the documented end of the range has moved.
+
+*R19.4 — videos, with the right id and then the wrong one.* `get_tiktok_product_videos`
+`{"internal_id": "<the row's internal_id>", "limit": 3}` → `{quantity, videos}`.
+Then the same call with the row's **`id`** as `internal_id` → `ok: true` with
+`videos: []`. That empty list is what the tool's notes and parameter text describe;
+an error here is a finding (the documented behaviour changed). Then read the
+`internal_id` parameter's description off the handshake: it must say the hex `id`
+returns an empty list. Without that sentence an agent reports "no videos" for a
+product that has them.
+
+*R19.5 — the TikTok grid and card (RD-69).* The first TikTok surfaces with pictures,
+on signed TikTok CDN URLs, so both halves of R15 apply to them.
+*The envelope (Claude).* R19.1's answer must carry an `images` block beside `data`
+with `widget: "product-grid"`, one item per product, each with one `resize-jpeg:256:256`
+or `crop-webp:256:256` URL, the product `title` as `label`, and a `link` ending in
+`/marketplace/tiktok-analytics/<the row's id>/<the row's internal_id>` on this
+environment's host. R19.2's answer must carry `widget: "product-card"` with up to 8
+gallery URLs and the same link. A link with only one id, or the ids swapped, is a
+**fail**: it still opens the app, on a page that shows no videos.
+*The picture (human, claude.ai web only, needs P9).* Ask *"show me TikTok products
+with at least 10% commission"*, then *"show me the first one in detail"*.
+→ a grid of product pictures, then a card with a gallery. Empty cells where the
+envelope had URLs are a **fail** (the host's CSP or the CDN refused them — say which
+cells). Click one thumbnail: grade it as R15.3b does, and the page must be that
+product's TikTok Analytics page, not the TikTok Analytics list.
+*If P9 is not available:* this half is `skipped (no widget-rendering client)`, and the
+report says the TikTok rendering path is unverified.
 
 ---
 

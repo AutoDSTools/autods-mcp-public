@@ -430,6 +430,45 @@ def test_a_link_whose_route_needs_an_id_is_rejected_without_an_id_path() -> None
         assert_images_usable(_linking_operation({"route": "marketplace_product"}, id_path=""))
 
 
+def test_a_two_id_route_without_an_internal_id_path_is_rejected() -> None:
+    """RD-69: the TikTok Analytics page takes the row id *and* the internal id,
+    so a link that only knows the first could never be built."""
+    with pytest.raises(ImagesError, match="declares no 'internal_id_path'"):
+        assert_images_usable(_linking_operation({"route": "tiktok_analytics_product"}))
+
+
+def test_an_internal_id_path_on_a_one_id_route_is_rejected() -> None:
+    with pytest.raises(ImagesError, match="nothing would read it"):
+        assert_images_usable(_linking_operation({"route": "marketplace_product", "internal_id_path": "internal_id"}))
+
+
+def test_an_internal_id_path_in_bracket_notation_is_rejected() -> None:
+    with pytest.raises(ImagesError, match="bracket notation"):
+        assert_images_usable(_linking_operation({"route": "tiktok_analytics_product", "internal_id_path": "ids[0]"}))
+
+
+def test_a_two_id_link_is_built_from_each_items_own_ids() -> None:
+    operation = _operation(
+        item_path="products",
+        image_paths=["product_image"],
+        id_path="id",
+        links=[{"route": "tiktok_analytics_product", "internal_id_path": "internal_id"}],
+    )
+    payload = {
+        "products": [
+            {"id": "a" * 32, "internal_id": "1" * 19, "product_image": "https://x.test/1.jpg"},
+            {"id": "b" * 32, "product_image": "https://x.test/2.jpg"},
+        ]
+    }
+
+    block = extract_images(operation, payload, app_base_url="https://v2-staging.autods.com")
+
+    first, second = block["items"]
+    assert first["link"] == f"https://v2-staging.autods.com/marketplace/tiktok-analytics/{'a' * 32}/{'1' * 19}"
+    # No internal id on the row: no link, never a URL with a hole in it.
+    assert "link" not in second
+
+
 def test_an_ungated_link_before_the_end_of_the_list_is_rejected() -> None:
     """First matching gate wins, so an ungated entry swallows everything after
     it — and the entries it hides look perfectly configured in review."""

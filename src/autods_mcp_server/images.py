@@ -44,7 +44,13 @@ from typing import Any
 from autods_mcp_server.image_rewrites import rewrite_thumbnail
 from autods_mcp_server.manifests.schema import ImagesBlock, ManifestOperation
 from autods_mcp_server.payload_paths import resolve_path
-from autods_mcp_server.product_links import build_link, route_names, route_needs_id, route_status
+from autods_mcp_server.product_links import (
+    build_link,
+    route_names,
+    route_needs_id,
+    route_needs_internal_id,
+    route_status,
+)
 from autods_mcp_server.widgets import widget_names
 
 # Envelope key the extracted images are published under — a sibling of ``data``.
@@ -120,7 +126,8 @@ def assert_images_usable(operation: ManifestOperation) -> None:
             f"Operation '{op_id}' declares 'images' with no 'image_paths'; the block can never match "
             f"and is dead config."
         )
-    for path in [block.item_path, *block.image_paths, block.label_path, block.id_path]:
+    link_paths = [link.internal_id_path for link in block.links]
+    for path in [block.item_path, *block.image_paths, block.label_path, block.id_path, *link_paths]:
         if path and _BRACKET_PATH.search(path):
             raise ImagesError(
                 f"Operation '{op_id}' uses bracket notation in image path '{path}'; this server's "
@@ -184,6 +191,17 @@ def assert_images_usable(operation: ManifestOperation) -> None:
             raise ImagesError(
                 f"Operation '{op_id}' links to route '{link.route}', whose path needs an item id, but declares "
                 f"no 'id_path'; no item could ever get a link."
+            )
+        needs_internal_id = route_needs_internal_id(link.route)
+        if needs_internal_id and not link.internal_id_path:
+            raise ImagesError(
+                f"Operation '{op_id}' links to route '{link.route}', whose path also needs the item's "
+                f"internal id, but the link declares no 'internal_id_path'; no item could ever get a link."
+            )
+        if link.internal_id_path and not needs_internal_id:
+            raise ImagesError(
+                f"Operation '{op_id}' sets 'internal_id_path' on its '{link.route}' link, whose path takes no "
+                f"internal id; nothing would read it."
             )
     for index, link in enumerate(block.links[:-1]):
         if not link.when_body_field:
@@ -312,6 +330,9 @@ def extract_images(
                 identifier=identifier,
                 arguments=arguments,
                 base_url=app_base_url,
+                internal_identifier=(
+                    _first_str(item, candidate.internal_id_path) if candidate.internal_id_path else None
+                ),
             )
             if link is not None:
                 entry["link"] = link

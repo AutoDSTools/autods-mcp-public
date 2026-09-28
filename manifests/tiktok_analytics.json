@@ -1,0 +1,362 @@
+{
+  "server_name": "autods-tiktok-analytics",
+  "domain": "tiktok_analytics",
+  "base_url_key": "products_research",
+  "instructions": "",
+  "operations": [
+    {
+      "operation_id": "get_tiktok_products",
+      "method": "GET",
+      "path": "/tiktok-analytics/products",
+      "summary": "Browse and filter the TikTok Analytics product table.",
+      "description": "Read-only. One page of TikTok Shop products with their sales figures, filtered and sorted. This is where TikTok product research starts: each row carries the two ids the other TikTok Analytics tools take.",
+      "notes": "Returns `{quantity, products: [...]}`. `quantity` is the number of matching products, capped at 10000. Each product carries: `id` and `internal_id` (see below); `title`, `product_image`, `price`, `category` / `categories`; seller fields (`seller_name`, `seller_location`, `seller_units_sold`); all-time `sold_qty` and `gmv`; per window (7d, 30d, 60d, 90d) `sold_units_during_<w>`, `gmv_<w>` and `sold_growth_<w>`; `top_sales` and `top_sales_in_category` (rank, 1 = best seller); `viral_score` (0-100); `commission_rate` (percent, often null); `gained_units_sold` (units sold per day over the last 7 full days, as `{x: date, y: value, legend}` points); `up_to_date` and the `*_updated_at` times.\n\nThe two ids are not interchangeable, and each one feeds different tools:\n- `id` (32-character hex) names the row inside TikTok Analytics. Pass it as `product_id` to `get_tiktok_product_details` and `get_tiktok_product_overview`.\n- `internal_id` (19 digits) is the product's id on TikTok Shop. Pass it as `internal_id` to `get_tiktok_product_videos`, as the `asin` of the TikTok Analytics import in `upload_products`, and as `buy_id` to `find_product_by_buy_id`.\nA wrong id does not fail cleanly: the details and overview tools answer `upstream_error`, and the videos tool answers an empty list.\n\nMoney is in US dollars. `sold_growth_<w>` and `commission_rate` are percentages (10 = 10%), not fractions.\n\nPaging stops at 10000 results: when `offset + limit` goes past 10000 the call fails with `upstream_error`, so narrow the filters instead of paging deeper. Each product is about 2 KB of answer, so keep `limit` at 20 or less unless the user asked for more.\n\nThe call needs the Product Finding Hub add-on. Without it the tool answers `forbidden`; check `get_user_subscription` and tell the user the add-on is missing.\n\nProduct images: the first 20 products' `product_image` also arrives in an `images` block beside `data`, rewritten to a ~256px thumbnail. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Each entry also carries a `link` to that product's TikTok Analytics page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link. The image URLs are signed TikTok CDN URLs and stop working after some time, so do not store them for later; the link does not expire.",
+      "tags": [
+        "tiktok_analytics"
+      ],
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Page size, at least 1. Default 20. `offset + limit` must stay within 10000."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Number of products to skip (>= 0). Default 0. `offset + limit` must stay within 10000."
+        },
+        {
+          "name": "sort_field",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Field to sort by. Default sold_units_during_7d. One of: price, product_score_norm, commission_rate, sold_units_during_7d, sold_units_during_30d, sold_units_during_60d, sold_units_during_90d, sold_qty, gmv_7d, gmv_30d, gmv_60d, gmv_90d, gmv, sold_growth_7d, sold_growth_30d, sold_growth_60d, sold_growth_90d, viral_score, top_sales, top_sales_in_category. `top_sales` and `top_sales_in_category` are ranks where 1 is the best seller, so sort them with sort_order asc. Any other value is refused as `upstream_client_error`."
+        },
+        {
+          "name": "sort_order",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "asc or desc. Default desc."
+        },
+        {
+          "name": "category",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "AutoDS category id (24-character hex string): a `value` from `get_categories`. Each product's own ids are in its `categories[].autods_category_id`."
+        },
+        {
+          "name": "product_status",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "available (default: products still sold on TikTok Shop), discontinued (products no longer sold), or all."
+        },
+        {
+          "name": "price",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Price range in US dollars, as \"min-max\" with both ends included; either end may be left out: \"10-20\", \"-50\" (at most 50), \"60-\" (at least 60). Decimals allowed (\"9.99-19.5\"). Digits, one dot per number and a single \"-\" only: no spaces, no currency sign, no negative numbers. A malformed range is refused as `upstream_client_error`."
+        },
+        {
+          "name": "product_score",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range on the raw product score, as \"min-max\" (same syntax as `price`, decimals allowed). This raw score appears in no answer, and it is NOT on the 0-100 scale of `product_score_norm`: most products score well below 1, so \"50-\" matches nothing. To rank by score, sort by product_score_norm instead."
+        },
+        {
+          "name": "commission_rate",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Affiliate commission range in percent, as \"min-max\" (same syntax as `price`): \"10-\" means at least 10%. A percentage, not a fraction: \"0.1-\" means at least 0.1%. Products with no commission rate never match."
+        },
+        {
+          "name": "sold_units_during_7d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of units sold in the last 7 days, as \"min-max\" with whole numbers only: \"500-1000\", \"-500\", \"50000-\". Both ends included; either may be left out."
+        },
+        {
+          "name": "sold_units_during_30d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of units sold in the last 30 days, as \"min-max\" with whole numbers only (same syntax as sold_units_during_7d)."
+        },
+        {
+          "name": "sold_units_during_60d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of units sold in the last 60 days, as \"min-max\" with whole numbers only (same syntax as sold_units_during_7d)."
+        },
+        {
+          "name": "sold_units_during_90d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of units sold in the last 90 days, as \"min-max\" with whole numbers only (same syntax as sold_units_during_7d)."
+        },
+        {
+          "name": "sold_qty",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of total units sold (all time), as \"min-max\" with whole numbers only: \"1000-5000\", \"-500\", \"1000000-\"."
+        },
+        {
+          "name": "gmv_7d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of GMV (revenue, US dollars) in the last 7 days, as \"min-max\" (same syntax as `price`): \"1000-5000\", \"-500\", \"100000-\"."
+        },
+        {
+          "name": "gmv_30d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of GMV (US dollars) in the last 30 days, as \"min-max\" (same syntax as `price`)."
+        },
+        {
+          "name": "gmv_60d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of GMV (US dollars) in the last 60 days, as \"min-max\" (same syntax as `price`)."
+        },
+        {
+          "name": "gmv_90d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of GMV (US dollars) in the last 90 days, as \"min-max\" (same syntax as `price`)."
+        },
+        {
+          "name": "gmv",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of total GMV (US dollars, all time), as \"min-max\" (same syntax as `price`)."
+        },
+        {
+          "name": "sold_growth_7d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of the 7-day growth of units sold, in percent, as \"min-max\" (same syntax as `price`): \"100-\" means a growth of at least 100%. No negative numbers, so a falling-sales range cannot be expressed."
+        },
+        {
+          "name": "sold_growth_30d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of the 30-day growth of units sold, in percent, as \"min-max\" (same syntax as sold_growth_7d)."
+        },
+        {
+          "name": "sold_growth_60d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of the 60-day growth of units sold, in percent, as \"min-max\" (same syntax as sold_growth_7d)."
+        },
+        {
+          "name": "sold_growth_90d",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Range of the 90-day growth of units sold, in percent, as \"min-max\" (same syntax as sold_growth_7d)."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get TikTok Analytics Products",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "images": {
+        "item_path": "products",
+        "image_paths": [
+          "product_image"
+        ],
+        "per_item": 1,
+        "max": 20,
+        "label_path": "title",
+        "id_path": "id",
+        "widget": "product-grid",
+        "base64": "off",
+        "links": [
+          {
+            "route": "tiktok_analytics_product",
+            "internal_id_path": "internal_id"
+          }
+        ]
+      }
+    },
+    {
+      "operation_id": "get_tiktok_product_details",
+      "method": "GET",
+      "path": "/tiktok-analytics/product",
+      "summary": "Get the full details of one TikTok Analytics product.",
+      "description": "Read-only. Everything the product table shows for one product, plus its image gallery, rating, stock, score and all-time counts of related videos and affiliates.",
+      "notes": "Returns one product object: every field a `get_tiktok_products` row has, plus `created_at`, `all_images` (the gallery), `rating`, `reviews_qty`, `in_stock_qty` (summed over variations), `product_score_norm` (0-100), `related_videos_qty` and `affiliates_qty` (all time; `get_tiktok_product_overview` gives both for a date range), and `url`. Money is in US dollars; `sold_growth_<w>` and `commission_rate` are percentages.\n\nAn unknown `product_id` is not answered as \"not found\": it arrives as `upstream_error`. The usual cause is passing the 19-digit `internal_id` where the 32-character hex `id` belongs, so check which id was sent before reporting a fault.\n\nThe call needs the Product Finding Hub add-on; without it the tool answers `forbidden`.\n\nProduct images: this product's gallery (up to 8 images, from `all_images`) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The block also carries a `link` to the product's TikTok Analytics page in the AutoDS web app. The image URLs are signed TikTok CDN URLs and stop working after some time; the link does not expire.",
+      "tags": [
+        "tiktok_analytics"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "The row's `id` from get_tiktok_products: a 32-character hex string. NOT the 19-digit `internal_id`, which only get_tiktok_product_videos takes."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get TikTok Product Details",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "images": {
+        "image_paths": [
+          "all_images.*",
+          "product_image"
+        ],
+        "per_item": 8,
+        "max": 1,
+        "label_path": "title",
+        "id_path": "id",
+        "widget": "product-card",
+        "base64": "off",
+        "links": [
+          {
+            "route": "tiktok_analytics_product",
+            "internal_id_path": "internal_id"
+          }
+        ]
+      }
+    },
+    {
+      "operation_id": "get_tiktok_product_overview",
+      "method": "GET",
+      "path": "/tiktok-analytics/overview",
+      "summary": "Get one TikTok Analytics product's daily sales over a date range.",
+      "description": "Read-only. Daily units sold and GMV for one product over a date range, with totals, daily averages, and the number of related videos and affiliates in that range.",
+      "notes": "Returns `{gained_units_sold, gained_gmv, cumulative_units_sold, cumulative_gmv, units_sold, units_sold_avg, gmv, gmv_avg, related_videos_qty, affiliates_qty}`. The four series are lists of `{x: \"YYYY-MM-DD\", y: <number>, legend: <label text>}` points, one per day: `gained_*` is what was sold that day, `cumulative_*` is the running total. `units_sold` / `gmv` are the totals over the range and `*_avg` the daily averages. GMV is in US dollars. `related_videos_qty` and `affiliates_qty` count only videos published in the range.\n\nThe days covered: the series starts at `start_date` and ends on the day BEFORE `end_date`. With neither date, that is the last 7 full days. So for the week of 1-7 September, send start_date 2026-09-01 and end_date 2026-09-08.\n\nAn unknown `product_id` arrives as `upstream_error`, not as \"not found\" (see `get_tiktok_product_details`). A long range is slower to answer and can time out, which arrives as `upstream_unreachable`; ask for the range the user needs, not more, and retry a timeout once with a shorter range. The call needs the Product Finding Hub add-on; without it the tool answers `forbidden`.",
+      "tags": [
+        "tiktok_analytics"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "The row's `id` from get_tiktok_products: a 32-character hex string. NOT the 19-digit `internal_id`, which only get_tiktok_product_videos takes."
+        },
+        {
+          "name": "start_date",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "First day of the range, YYYY-MM-DD (e.g. 2026-09-01), included. Default: 7 days before today."
+        },
+        {
+          "name": "end_date",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "YYYY-MM-DD. The series stops on the day BEFORE this date, so pass the day after the last day wanted. Default: today, which gives a series ending yesterday."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get TikTok Product Sales Overview",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
+      "operation_id": "get_tiktok_product_videos",
+      "method": "GET",
+      "path": "/tiktok-analytics/videos",
+      "summary": "List the TikTok videos that promote one product.",
+      "description": "Read-only. One page of the TikTok videos linked to a product, with their views, likes, comments and engagement rate.",
+      "notes": "Returns `{quantity, videos: [...]}`. `quantity` is the number of matching videos, capped at 10000. Each video carries `id`, `url` (the TikTok post), `cover`, `video_url`, `video_duration` (seconds), `views`, `likes`, `comments`, `engagement_rate` (percent), `published_date`, `desc`, and the author's `nickname` and `avatar`.\n\nThis tool takes the product's `internal_id`, not the `id` the details and overview tools take. Given the wrong id it does not fail: it answers `{quantity: 0, videos: []}`. So an empty list for a product whose `related_videos_qty` is above 0 means the wrong id was sent, not that the product has no videos.\n\nPaging stops at 10000 results (`offset + limit`), like `get_tiktok_products`. The call needs the Product Finding Hub add-on; without it the tool answers `forbidden`. The cover, avatar and video URLs are signed TikTok CDN URLs and stop working after some time; `url` is the stable link to the post.",
+      "tags": [
+        "tiktok_analytics"
+      ],
+      "parameters": [
+        {
+          "name": "internal_id",
+          "in": "query",
+          "required": true,
+          "schema_type": "str",
+          "description": "The product's `internal_id` from get_tiktok_products: its 19-digit TikTok Shop id, e.g. 1729893779001479400. NOT the 32-character hex `id` the details and overview tools take; that id here returns an empty list with no error."
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Page size, at least 1. Default 20."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema_type": "int",
+          "description": "Number of videos to skip (>= 0). Default 0."
+        },
+        {
+          "name": "start_date",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Only videos published on or after this day, YYYY-MM-DD, included. Default: no lower bound."
+        },
+        {
+          "name": "end_date",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Only videos published on or before this day, YYYY-MM-DD, included. Default: no upper bound."
+        },
+        {
+          "name": "sort_field",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "Field to sort by. Default created_at. One of: created_at (publication time), stats.play_count (views), stats.digg_count (likes), stats.comment_count (comments), interaction_rate (engagement rate)."
+        },
+        {
+          "name": "sort_order",
+          "in": "query",
+          "required": false,
+          "schema_type": "str",
+          "description": "asc or desc. Default desc."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get TikTok Product Videos",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    }
+  ]
+}

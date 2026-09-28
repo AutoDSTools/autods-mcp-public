@@ -27,7 +27,7 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (17 AutoDSApi ops + 6 ProductsResearch ops + 2
+# The full registered tool set (17 AutoDSApi ops + 10 ProductsResearch ops + 2
 # ScrapersAPI ops + 1 op this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
@@ -57,6 +57,11 @@ PRODUCTS_RESEARCH_OPS = {
     "get_similar_products",
     "get_recommended_products",
     "get_categories",
+    # RD-69: TikTok Analytics, on the same upstream.
+    "get_tiktok_products",
+    "get_tiktok_product_details",
+    "get_tiktok_product_overview",
+    "get_tiktok_product_videos",
 }
 # RD-95: the supplier scans, forwarded to ScrapersAPI through the gateway.
 SCRAPERS_OPS = {"search_1688_offers_by_image", "get_1688_product_details"}
@@ -356,6 +361,9 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         if not product_images and not winning.is_error:
             product_images = _first_product_images((winning.structured_content or {}).get("data"))
 
+        # --- ProductsResearch: TikTok Analytics (RD-69) ---
+        await _smoke_tiktok_analytics(call, failures, skipped)
+
         # --- ScrapersAPI: supplier scans (RD-95) ---
         await _smoke_supplier_scans(call, product_images, failures, skipped)
 
@@ -573,6 +581,72 @@ async def _poll_scan(call: Any, name: str, arguments: dict[str, Any], done: Any)
         if result.is_error or payload.get("business_error") or done(payload.get("data")):
             return result
     return None
+
+
+async def _smoke_tiktok_analytics(call: Any, failures: list[str], skipped: list[str]) -> None:
+    """RD-69: the product table, then each per-product read with the id it takes.
+
+    The row's ``id`` goes to the details and overview reads, its ``internal_id``
+    to the videos read. The videos read is also checked the other way round:
+    given the row ``id`` it must answer an empty list, not an error — the silent
+    case the tool's notes describe, and the reason both parameters warn about
+    the other id. ``forbidden`` is a business answer (no Product Finding Hub
+    add-on on the account), so ``_record`` accepts it and the rest is skipped.
+    """
+    table = await call("get_tiktok_products", {"limit": 3})
+    _record("get_tiktok_products", table, failures, frozenset())
+    data = None if table.is_error else (table.structured_content or {}).get("data")
+    products = data.get("products") if isinstance(data, dict) else None
+    rows = [p for p in products or [] if isinstance(p, dict) and p.get("id") and p.get("internal_id")]
+    if not rows:
+        skipped.extend(
+            f"{op} (get_tiktok_products returned no row)"
+            for op in ("get_tiktok_product_details", "get_tiktok_product_overview", "get_tiktok_product_videos")
+        )
+        return
+
+    row_id, internal_id = rows[0]["id"], rows[0]["internal_id"]
+    if not (len(row_id) == 32 and len(internal_id) == 19 and internal_id.isdigit()):
+        failures.append(
+            f"get_tiktok_products: row ids {row_id!r} / {internal_id!r} are not the documented "
+            f"32-character hex `id` and 19-digit `internal_id`"
+        )
+    # The grid (RD-69): one thumbnail per row, and a link that carries both ids.
+    items = ((table.structured_content or {}).get("images") or {}).get("items") or []
+    first_link = items[0].get("link", "") if items else ""
+    if not (items and items[0].get("images") and first_link.endswith(f"/tiktok-analytics/{row_id}/{internal_id}")):
+        failures.append(
+            f"get_tiktok_products: the images block does not carry a thumbnail and a "
+            f"/marketplace/tiktok-analytics/<id>/<internal_id> link for the first row: {items[:1]!r}"
+        )
+
+    _record(
+        "get_tiktok_product_details",
+        await call("get_tiktok_product_details", {"product_id": row_id}),
+        failures,
+        frozenset(),
+    )
+    overview = await call("get_tiktok_product_overview", {"product_id": row_id})
+    _record("get_tiktok_product_overview", overview, failures, frozenset())
+    if not overview.is_error:
+        series = ((overview.structured_content or {}).get("data") or {}).get("gained_units_sold")
+        if not isinstance(series, list) or len(series) != 7:
+            failures.append(
+                "get_tiktok_product_overview: the default range is documented as the last 7 full days, "
+                f"got {len(series) if isinstance(series, list) else series!r} points"
+            )
+    _record(
+        "get_tiktok_product_videos",
+        await call("get_tiktok_product_videos", {"internal_id": internal_id, "limit": 3}),
+        failures,
+        frozenset(),
+    )
+    wrong_id = await call("get_tiktok_product_videos", {"internal_id": row_id, "limit": 3})
+    _record("get_tiktok_product_videos (row id)", wrong_id, failures, frozenset())
+    if not wrong_id.is_error:
+        wrong = (wrong_id.structured_content or {}).get("data") or {}
+        if wrong.get("videos") != []:
+            failures.append("get_tiktok_product_videos: the row `id` did not answer the documented empty list")
 
 
 async def _smoke_supplier_scans(

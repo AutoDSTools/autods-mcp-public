@@ -60,10 +60,10 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 8 AutoDSApi ops + 7 store-quote ops + 6 ProductsResearch ops + 2 users ops
-    # (get_current_user, get_user_subscription) + 2 supplier scan ops (RD-95)
-    # + 1 locally-served op (get_playbook).
-    assert len(by_name) == 26
+    # 8 AutoDSApi ops + 7 store-quote ops + 6 ProductsResearch ops + 4 TikTok
+    # Analytics ops (RD-69) + 2 users ops (get_current_user, get_user_subscription)
+    # + 2 supplier scan ops (RD-95) + 1 locally-served op (get_playbook).
+    assert len(by_name) == 30
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False

@@ -81,6 +81,13 @@ _ROUTES: dict[str, _Route] = {
     # two sets never overlap.
     "hand_picked_product": _Route("/marketplace/hand-picked-products/{id}"),
     "marketplace_product": _Route("/marketplace/all-products/{id}"),
+    # TikTok Analytics (RD-69): ``MARKETPLACE_TIKTOK_ANALYTICS_SINGLE_PATH =
+    # '/marketplace/tiktok-analytics/:id/:internalId'`` — the only page here that
+    # takes **two** ids, the row's hex ``id`` and its 19-digit ``internal_id``,
+    # in that order (the app's own table opens ``…/${id}/${internalId}``). The
+    # page reads its videos by the second one, so a link with only the first
+    # would open a page that says the product has no videos.
+    "tiktok_analytics_product": _Route("/marketplace/tiktok-analytics/{id}/{internal_id}"),
 }
 
 
@@ -98,6 +105,17 @@ def route_needs_id(route: str) -> bool:
     """
     row = _ROUTES.get(route)
     return row is not None and "{id}" in row.path
+
+
+def route_needs_internal_id(route: str) -> bool:
+    """Whether this route's path also has an ``{internal_id}`` to fill in.
+
+    Only the TikTok Analytics page does. A link entry for such a route must
+    say where the second id is (``internal_id_path``), and one for any other
+    route must not — both are boot lints in ``images.assert_images_usable``.
+    """
+    row = _ROUTES.get(route)
+    return row is not None and "{internal_id}" in row.path
 
 
 def route_status(route: str) -> int | None:
@@ -138,6 +156,7 @@ def build_link(
     identifier: str | None,
     arguments: Mapping[str, Any] | None,
     base_url: str | None,
+    internal_identifier: str | None = None,
 ) -> str | None:
     """The web-app URL for one item, or ``None`` when there is nothing honest to build.
 
@@ -148,6 +167,9 @@ def build_link(
             link rather than a URL with a hole in it.
         arguments: the tool call's arguments, for the gate.
         base_url: the environment's web-app host, without a trailing slash.
+        internal_identifier: the item's second id, resolved through the link's
+            ``internal_id_path``, for the one route that takes two. Missing ⇒
+            no link, by the same rule as ``identifier``.
     """
     if not base_url:
         return None
@@ -161,4 +183,8 @@ def build_link(
         if not identifier:
             return None
         path = path.replace("{id}", identifier)
+    if "{internal_id}" in path:
+        if not internal_identifier:
+            return None
+        path = path.replace("{internal_id}", internal_identifier)
     return f"{base_url.rstrip('/')}{path}"

@@ -93,6 +93,11 @@ class LinkBlock(BaseModel):
     wins, the same rule as ``image_paths``. A tool that answers for one product
     type declares one ungated entry; ``list_products`` declares one per status
     it links, and a status with no entry gets no link at all.
+
+    ``internal_id_path`` is a per-item path to a **second** id, for the one
+    route whose page takes two (the TikTok Analytics product page, RD-69). It
+    lives on the link rather than on the ``images`` block because only that
+    route reads it; the boot lint requires it exactly where the route needs it.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -100,6 +105,7 @@ class LinkBlock(BaseModel):
     route: str
     when_body_field: str = ""
     when_body_equals: int | None = None
+    internal_id_path: str = ""
 
 
 class ImagesBlock(BaseModel):

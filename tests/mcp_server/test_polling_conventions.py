@@ -324,14 +324,26 @@ def test_the_recovery_lookup_sends_a_normal_import_to_the_bulk_poll(bundled_mani
 # --- tier 3: the playbook runbook --------------------------------------------
 
 
-def test_the_playbook_body_states_the_same_numbers(bundled_manifest_dir: Path) -> None:
+@pytest.mark.parametrize("name", ["product_import", "tiktok_to_sourced_product"])
+def test_the_playbook_body_states_the_same_numbers(bundled_manifest_dir: Path, name: str) -> None:
     """The runbook is where an agent that entered the chain reads the cadence, so
     it repeats the numbers rather than pointing at the tool — but it must repeat
     *these* numbers. Two channels disagreeing is worse than one being silent."""
-    playbook = build_playbook_registry(bundled_manifest_dir).get("product_import")
+    playbook = build_playbook_registry(bundled_manifest_dir).get(name)
 
     for token in CADENCE_TOKENS:
-        assert token in playbook.body, f"the product_import runbook no longer states {token!r}"
+        assert token in playbook.body, f"the {name} runbook no longer states {token!r}"
+
+
+def test_the_sourcing_runbook_states_the_cadence_once(bundled_manifest_dir: Path) -> None:
+    """RD-110: four of its eight steps are polls, and the body states the
+    numbers once for all of them. A second statement is where a second set of
+    numbers starts."""
+    body = build_playbook_registry(bundled_manifest_dir).get("tiktok_to_sourced_product").body
+
+    for token in CADENCE_TOKENS:
+        assert body.count(token) == 1, f"the sourcing runbook states {token!r} more than once"
+    assert "Steps 3, 5, 6 and 8 are polls." in body
 
 
 def test_the_playbook_says_what_hitting_the_ceiling_means(bundled_manifest_dir: Path) -> None:

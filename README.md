@@ -572,8 +572,9 @@ A client meets a playbook on four channels, by when the text is needed:
   carries no `structuredContent`, so this is the only way to deliver it, and it
   is the half that prevents a duplicated write.
 - **the tool `description` and `instructions`** — one bounded pointer each
-  (`Step 1 of 3 in playbook "product_import" — call get_playbook for the full
-  chain.`) and one generated index line per chain. No step bodies in either.
+  (`Step 1 of 8 in playbook "tiktok_to_sourced_product" — call get_playbook for
+  the full chain.`) and one generated index line per chain. No step bodies in
+  either.
 
 One tool can be a step of several chains, and nothing in a request says which one
 the caller is following (the transport is stateless, so there is no session that
@@ -584,12 +585,31 @@ clauses every candidate agrees on — resolving the disagreements towards cautio
 so "not idempotent" wins over "idempotent". A confident wrong answer about what an
 unfinished chain left behind is worse than one extra call.
 
+Two playbooks ship:
+
+| Playbook | Steps | What it is for |
+|---|---|---|
+| `product_import` | `upload_products` → `get_bulk_action_items` → `list_products` | import supplier products and confirm they are in the store |
+| `tiktok_to_sourced_product` (RD-110) | `get_tiktok_products` → `upload_products` → `get_bulk_action_items` → `list_products` → `search_1688_offers_by_image` → `get_1688_product_details` → `create_1688_sourcing_request` → `list_store_quotes` | take a TikTok Analytics product to a live listing with a 1688 supplier and Auto-Order |
+
+The sourcing chain is not done when its last step reads `linked`: that status is
+set even when a pairing matched none of the offer's variations. Its `done_when`
+and runbook require one more `list_products` read, checking each variation's
+`active_buy_item.item_id_on_site`. That read is text, not a ninth step, because an
+operation may appear only once in a chain and `list_products` is already step 4.
+
+`upload_products`, `get_bulk_action_items` and `list_products` are steps of both
+chains, so since RD-110 they get the shared-step hints described above: no step
+number in the envelope hint, and a merged failure tail. `list_products` names only
+the sourcing chain in its hint, because it is the last step of `product_import`.
+
 Playbooks are also mirrored as `autods://playbook/<name>` resources with
 `mimeType: text/markdown`, for hosts that let a user attach a resource:
 
 ```bash
 uv run python scripts/mcp_call.py resources
 uv run python scripts/mcp_call.py get_playbook '{"name":"product_import"}'
+uv run python scripts/mcp_call.py get_playbook '{"name":"tiktok_to_sourced_product"}'
 ```
 
 #### Product images (RD-92)

@@ -22,6 +22,7 @@ was parsed for a year and never reached anyone.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -188,8 +189,9 @@ def test_playbook_files_never_enter_the_manifest_registry(bundled_manifest_dir: 
 def test_the_dedicated_loader_reads_the_subdirectory(bundled_manifest_dir: Path) -> None:
     playbooks = build_playbook_registry(bundled_manifest_dir)
 
-    assert playbooks.names() == ["product_import"]
+    assert playbooks.names() == ["product_import", "tiktok_to_sourced_product"]
     assert playbooks.get("product_import").entry_operation == "upload_products"
+    assert playbooks.get("tiktok_to_sourced_product").entry_operation == "get_tiktok_products"
 
 
 def test_a_missing_playbook_directory_is_not_an_error(tmp_path: Path) -> None:
@@ -789,7 +791,10 @@ async def test_get_playbook_advertises_the_registered_names_as_an_enum(
 
     tool = next(t for t in tools.tools if t.name == "get_playbook")
 
-    assert tool.input_schema["properties"]["name"]["enum"] == ["product_import"]
+    # RD-110: a new file joins the enum with no edit anywhere else — the enum is
+    # the registry's name list, so asserting both names is asserting that.
+    assert tool.input_schema["properties"]["name"]["enum"] == ["product_import", "tiktok_to_sourced_product"]
+    assert tool.input_schema["properties"]["name"]["enum"] == build_playbook_registry(bundled_manifest_dir).names()
     assert tool.annotations.read_only_hint is True
 
 
@@ -911,12 +916,14 @@ async def test_get_playbook_emits_the_audit_line_and_the_analytics_event(
 async def test_the_envelope_hint_is_absent_on_a_final_step(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:
-    """A chain that is over has nothing to nudge."""
+    """A chain that is over has nothing to nudge. ``list_store_quotes`` is the
+    last step of the only chain it is in; ``list_products`` stopped being a
+    fit for this test when RD-110 made it a middle step of the sourcing chain."""
     settings = mcp_settings(manifest_dir=bundled_manifest_dir)
     app, runtime = make_mcp_app(settings, upstream_handler=_ok_upstream)
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        result = await session.call_tool("list_products", {"store_ids": "s1", "body": {"product_status": 1}})
+        result = await session.call_tool("list_store_quotes", {"store_ids": "s1", "body": {}})
 
     assert result.is_error is False
     assert "playbook" not in result.structured_content
@@ -939,20 +946,221 @@ async def test_the_envelope_hint_rides_beside_data_not_inside_it(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:
     """Same placement rule as ``business_error``: ``data`` stays the upstream
-    payload verbatim."""
+    payload verbatim. Driven through a step that is in one chain only, so the
+    specific hint is what arrives."""
     settings = mcp_settings(manifest_dir=bundled_manifest_dir)
     app, runtime = make_mcp_app(settings, upstream_handler=_ok_upstream)
 
     async with mcp_client_session(app, runtime, token=access_token) as session:
-        result = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
+        result = await session.call_tool(
+            "search_1688_offers_by_image", {"img_url": "https://img.test/a.jpg", "full_scrape": True}
+        )
 
     payload = result.structured_content
     assert payload["data"] == {"task_id": "abc"}
-    assert payload["playbook"]["step"] == "1/3"
-    assert payload["playbook"]["next"] == ["get_bulk_action_items"]
-    assert payload["playbook"]["runbook"] == 'get_playbook("product_import")'
+    assert payload["playbook"]["name"] == "tiktok_to_sourced_product"
+    assert payload["playbook"]["step"] == "5/8"
+    assert payload["playbook"]["next"] == ["get_1688_product_details"]
+    assert payload["playbook"]["runbook"] == 'get_playbook("tiktok_to_sourced_product")'
     # …and it is in the text block too, since that is a dump of the same dict.
     assert '"playbook"' in result.content[0].text
+
+
+# --- RD-110: the two committed chains share two steps -------------------------
+#
+# ``upload_products`` and ``get_bulk_action_items`` are steps 1-2 of
+# ``product_import`` and steps 2-3 of ``tiktok_to_sourced_product``. This is the
+# first time the multi-chain renderers run on committed data rather than on the
+# synthetic ``_shared_write_env``, so what a client receives is asserted here.
+
+_BOTH_CHAINS = ["product_import", "tiktok_to_sourced_product"]
+_MULTI_CHAIN_HINT = {
+    "in": _BOTH_CHAINS,
+    "step_depends_on_chain": True,
+    "runbook": "get_playbook(<the chain you are in, from `in`>)",
+}
+
+
+async def test_the_shared_committed_steps_get_the_vaguer_success_hint(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """Neither the step number nor either chain's ``incomplete_alone`` may reach
+    the client: "nothing is in the store until the job finishes" is true for
+    the plain import and wrong for the sourcing chain, where the job leaves a
+    live listing priced at cost. For ``get_bulk_action_items`` the hint repeats
+    on every poll, which is why it is the short form."""
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=_ok_upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        upload = await session.call_tool("upload_products", {"store_ids": "s1", "body": _VALID_UPLOAD_BODY})
+        poll = await session.call_tool("get_bulk_action_items", {"store_ids": "s1", "bulk_action_id": 1})
+
+    for result in (upload, poll):
+        assert result.is_error is False
+        assert result.structured_content["playbook"] == _MULTI_CHAIN_HINT
+        text = result.content[0].text
+        assert "incomplete_alone" not in text
+        assert "Nothing is in the store" not in text and "live at cost" not in text
+
+
+async def test_list_products_names_only_the_chain_it_is_not_final_in(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """``list_products`` ends ``product_import`` and is step 4 of the sourcing
+    chain. Only a chain with work left is named, and the step number still
+    cannot be asserted: a caller in the plain import is done here."""
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=_ok_upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool("list_products", {"store_ids": "s1", "body": {"product_status": 2}})
+
+    assert result.structured_content["playbook"] == {**_MULTI_CHAIN_HINT, "in": ["tiktok_to_sourced_product"]}
+
+
+def test_the_shared_committed_steps_merge_their_failure_tails(bundled_manifest_dir: Path) -> None:
+    """The cautious reading wins, and the verification tool survives because
+    both files word it the same way. That agreement is load-bearing: if the two
+    ``verify_with.how`` strings drift apart, the merged tail silently drops the
+    one clause that stops a duplicated upload."""
+    playbooks = build_playbook_registry(bundled_manifest_dir)
+
+    upload = render_failure_hint(playbooks.steps_for("upload_products"))
+    assert upload.startswith(
+        'Playbook step in "product_import", "tiktok_to_sourced_product": this step is not idempotent.'
+    )
+    assert "Verify with find_product_by_buy_id (buy_id = each asin sent, as a bare id)." in upload
+    assert "Recovery differs by chain — call get_playbook for yours." in upload
+    assert upload.endswith("Ask the user before retrying.")
+    assert len(upload) <= FAILURE_HINT_MAX_CHARS
+
+    poll = render_failure_hint(playbooks.steps_for("get_bulk_action_items"))
+    assert "this step is idempotent." in poll
+    assert "Ask the user" not in poll
+
+    for operation_id in ("upload_products", "get_bulk_action_items", "list_products"):
+        tail = render_description_tail(playbooks.steps_for(operation_id))
+        assert tail == (
+            'A step in playbooks "product_import", "tiktok_to_sourced_product" — call get_playbook for the full chain.'
+        )
+        assert len(tail) <= DESCRIPTION_TAIL_MAX_CHARS
+
+
+# --- RD-110: the sourcing chain's own contract ------------------------------
+
+
+def _sourcing_chain(manifest_dir: Path) -> Playbook:
+    return build_playbook_registry(manifest_dir).get("tiktok_to_sourced_product")
+
+
+def test_the_sourcing_chain_is_the_observed_flow(bundled_manifest_dir: Path) -> None:
+    """Step 3 is the bulk poll, not the supplier-id lookup: the lookup cannot see
+    an import that ended at 99, so it would read "not yet" to the ceiling and
+    lose the failure reason. The lookup belongs to step 2's failure path only."""
+    playbook = _sourcing_chain(bundled_manifest_dir)
+
+    assert [step.operation_id for step in playbook.steps] == [
+        "get_tiktok_products",
+        "upload_products",
+        "get_bulk_action_items",
+        "list_products",
+        "search_1688_offers_by_image",
+        "get_1688_product_details",
+        "create_1688_sourcing_request",
+        "list_store_quotes",
+    ]
+    # A straight chain: no branch, so no authored successor anywhere.
+    assert all(not step.then for step in playbook.steps)
+    # The body's failure section names it too, as prose; among the steps it is
+    # only step 2's verify_with.
+    steps = json.dumps([step.model_dump() for step in playbook.steps])
+    assert steps.count("find_product_by_buy_id") == 1
+    assert playbook.steps[1].on_failure.verify_with.operation_id == "find_product_by_buy_id"
+
+
+def test_the_sourcing_chain_is_not_done_at_linked(bundled_manifest_dir: Path) -> None:
+    """``linked`` is set even when a pairing matched none of the offer's
+    variations, so the only proof is the product itself. That read cannot be a
+    ninth step (``list_products`` is already step 4), so it lives in
+    ``done_when`` and the body."""
+    playbook = _sourcing_chain(bundled_manifest_dir)
+
+    assert "linked" in playbook.done_when
+    assert "list_products" in playbook.done_when
+    assert "active_buy_item.item_id_on_site" in playbook.done_when
+    assert "active_buy_item.item_id_on_site" in playbook.body
+    assert "not the last check" in playbook.steps[-1].goal
+    # Any line about the last poll that claims completion must also negate it.
+    # Checked per line, since the body's opening does say when the job is done.
+    completion = re.compile(r"end of the job|final step|last step|is done|job is complete|finishes the job")
+    for text in (playbook.body, playbook.done_when, *(step.goal for step in playbook.steps)):
+        for line in text.splitlines():
+            if not re.search(r"list_store_quotes|step 8|`?linked`?", line):
+                continue
+            assert not completion.search(line) or " not " in line, f"treats the last poll as the end: {line!r}"
+
+
+def test_the_sourcing_chain_declares_its_two_risky_writes(bundled_manifest_dir: Path) -> None:
+    """Step 2 leaves a live listing at cost; step 7 may have spent a credit. Both
+    retries are the risk, so both ask the user — and nothing else does."""
+    playbook = _sourcing_chain(bundled_manifest_dir)
+    upload, source = playbook.steps[1], playbook.steps[6]
+
+    assert "live at cost" in upload.incomplete_alone
+    assert upload.on_failure.idempotent is False
+    assert upload.on_failure.ask_user is True
+
+    assert source.incomplete_alone
+    assert source.on_failure.idempotent is False
+    assert source.on_failure.left_behind
+    assert source.on_failure.verify_with.operation_id == "list_store_quotes"
+    assert source.on_failure.then
+    assert source.on_failure.ask_user is True
+
+    assert [step.operation_id for step in playbook.steps if step.on_failure and step.on_failure.ask_user] == [
+        "upload_products",
+        "create_1688_sourcing_request",
+    ]
+
+
+@pytest.mark.parametrize(
+    "required",
+    [
+        # the quote state machine, including the failure that has no status
+        "`new` → `in_progress` → `ready` → `linked`",
+        "`cannot_be_sourced`",
+        "A failed request has no status: it is removed.",
+        # the per-endpoint scraper reads
+        "`scraper_error` set",
+        "`not_in_db` is always empty here",
+        # the projection the flow needs
+        "`main_picture_url`",
+        "`variations.variant_id_on_site`",
+        "`variations.active_buy_item`",
+        "`product_status: 2`",
+        # the pre-flight order
+        "`product_hub`",
+        "`orders_processor`",
+        'A missing `"1"` entry is not a zero balance',
+        # the failure exit and the web-app pointer
+        "`delete_product`",
+        "not available here",
+        # the recipe
+        '"buy_site_id": 37',
+        # a canceled item ends the chain as surely as an error does
+        "An item at 4 (canceled) or 99 (error) did not import",
+        # both scans restart when full_scrape is sent on every poll
+        "6. `get_1688_product_details` — `full_scrape: true` on its first call only.",
+        # step 7's required flag, and the pairing key when a variation has no SKU
+        "`add_to_unfulfilled_orders: false`",
+        "or `variant_id_on_site` when it has none",
+        # a recovered product that is not active cannot go through step 4
+        "At another status, step 4's `product_status: 2` read will not find it",
+    ],
+)
+def test_the_sourcing_runbook_carries(bundled_manifest_dir: Path, required: str) -> None:
+    assert required in _sourcing_chain(bundled_manifest_dir).body
 
 
 async def test_the_ambiguous_hint_reaches_a_real_client(
@@ -1003,8 +1211,12 @@ async def test_a_chain_tool_description_carries_the_bounded_pointer(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
+    assert by_name["get_tiktok_products"].description.endswith(
+        'Step 1 of 8 in playbook "tiktok_to_sourced_product" — call get_playbook for the full chain.'
+    )
+    # RD-110: a step of both committed chains names both, and no step number.
     assert by_name["upload_products"].description.endswith(
-        'Step 1 of 3 in playbook "product_import" — call get_playbook for the full chain.'
+        'A step in playbooks "product_import", "tiktok_to_sourced_product" — call get_playbook for the full chain.'
     )
     # No step bodies in a description: the pointer, and nothing else.
     assert "incomplete_alone" not in by_name["upload_products"].description
@@ -1032,12 +1244,43 @@ async def test_a_failing_chain_step_carries_its_chain_consequence(
     text = result.content[0].text
     assert result.is_error is True
     assert text.startswith("upstream_error: ")
-    assert 'Playbook "product_import" step 1/3: this step is not idempotent.' in text
+    # RD-110: upload_products is in two chains, so the tail is the merged one.
+    assert 'Playbook step in "product_import", "tiktok_to_sourced_product": this step is not idempotent.' in text
     # RD-96: an exact supplier-id lookup replaced the title filter on list_products.
     assert "Verify with find_product_by_buy_id" in text
     assert "Ask the user before retrying." in text
     # The upstream detail is still not echoed.
     assert "boom" not in text
+
+
+async def test_a_failing_single_chain_write_carries_its_own_step(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """The credit-spending write is in one chain only, so its tail is specific:
+    step number, the read that shows whether it landed, and the user prompt."""
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "boom"})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+    body = {
+        "alibaba_1688_id": "992906129243",
+        "add_to_unfulfilled_orders": False,
+        "link": {"variations_match": [{"item_id_on_site": "992906129243_6280495563187"}]},
+    }
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool(
+            "create_1688_sourcing_request",
+            {"store_id": 1, "product_id": "a" * 24, "body": body},
+        )
+
+    text = result.content[0].text
+    assert result.is_error is True
+    assert 'Playbook "tiktok_to_sourced_product" step 7/8: this step is not idempotent.' in text
+    assert "Verify with list_store_quotes (filter product_id = the product id)." in text
+    assert "Ask the user before retrying." in text
 
 
 async def test_an_unreachable_upstream_carries_it_too(
@@ -1058,7 +1301,7 @@ async def test_an_unreachable_upstream_carries_it_too(
     text = result.content[0].text
     assert result.is_error is True
     assert text.startswith("upstream_unreachable: ")
-    assert 'Playbook "product_import" step 1/3' in text
+    assert 'Playbook step in "product_import", "tiktok_to_sourced_product"' in text
 
 
 async def test_a_step_without_on_failure_produces_an_unchanged_error(
@@ -1141,3 +1384,7 @@ def test_the_committed_playbook_text_is_implementation_agnostic(bundled_manifest
 
     for forbidden in ("celery", "mongo", "elasticsearch", "redis", "postgres", "django", "flask", "kafka"):
         assert forbidden not in blob.lower(), f"playbook text names an internal technology: {forbidden}"
+    # RD-110: the sourcing chain is where the upstream's own names are closest to
+    # hand (they are all over docs/polling-conventions.md, which is internal).
+    for symbol in ("alibaba_1688_request", "rollback_store_quote_on_error", "SSE", "Pusher", "quote_manager"):
+        assert symbol not in blob, f"playbook text names an upstream internal: {symbol}"

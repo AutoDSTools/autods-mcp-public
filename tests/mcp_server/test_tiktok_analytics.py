@@ -11,7 +11,8 @@ things that fail silently rather than loudly:
   the other one locally, and the dispatcher sends each under its own name.
 * **Tier placement** (RD-90). Everything needed to form a call — the range
   syntax, the allowed values, the date form — is on the parameter, not in the
-  expensive ``instructions`` channel, and the server index names the tools.
+  expensive ``instructions`` channel, and the server index names only their
+  string-enum exception.
 """
 
 import json
@@ -445,15 +446,12 @@ def test_the_manifest_puts_nothing_in_instructions(bundled_manifest_dir: Path) -
     assert manifest.instructions == ""
 
 
-def test_the_server_index_names_every_tiktok_tool(bundled_manifest_dir: Path) -> None:
-    """A tool missing from ``_server.json`` is missing from the only channel
-    that lists the whole server."""
+def test_the_server_index_names_the_tiktok_string_enums(bundled_manifest_dir: Path) -> None:
+    """Their enum values are strings, so the index's integer-enum rule has to
+    name them as an exception. The index lists no tools (``tools/list`` does
+    that), so this clause is the only TikTok text it carries."""
     index = json.loads((bundled_manifest_dir / "_server.json").read_text())["instructions"]
 
-    for operation_id in TIKTOK_OPS:
-        assert f"`{operation_id}`" in index
-    # Their enum values are strings, so the index's integer-enum rule has to
-    # name them as an exception.
     assert "TikTok Analytics tools are the exception" in index
 
 

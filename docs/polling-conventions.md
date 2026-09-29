@@ -60,6 +60,10 @@ The bulk-action chain is the one already in production, so it is the reference �
 polling tool should read like it. See `manifests/bulk_actions.json` (tier 2) and
 `manifests/playbooks/product_import.json` (tier 3). `list_store_quotes`
 (`manifests/store_quotes.json`, RD-93) is the second one and was written against it.
+`manifests/playbooks/tiktok_to_sourced_product.json` (RD-110) is the tier-3 runbook for
+four of these loops at once (the bulk poll, both scans and the store-quote poll), and it
+states the cadence **once** for all four rather than per step —
+`test_the_sourcing_runbook_states_the_cadence_once` keeps it that way.
 
 `upload_products` returns `{status, bulk_action}` immediately; the created product's
 id only exists once the bulk-action item finishes.
@@ -99,8 +103,8 @@ That write is also the one place where a *failed* call is more dangerous than a
 slow one. There is no idempotency key upstream, so a transport-level failure
 (`UpstreamRequestError`, no response body) leaves the agent unable to tell an
 accepted request from a rejected one, while the AO credit may already be spent.
-The rule, carried in the tool's `notes` and — once RD-110 lands the playbook —
-in its step's `on_failure`: **on any failure or timeout, read
+The rule, carried in the tool's `notes` and in step 7's `on_failure` of the
+`tiktok_to_sourced_product` playbook (RD-110): **on any failure or timeout, read
 `list_store_quotes` filtered on `product_id` before retrying.** A returned quote
 means the request landed; continue the completion poll and never resubmit blind.
 A blind second attempt risks a second charge, and it is **not** refused: the

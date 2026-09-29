@@ -209,10 +209,10 @@ destructive step to declare `incomplete_alone` and a non-idempotent one to name 
 that spends non-refundable money — the exact step where a missing `verify_with` produces a
 double charge.
 
-The consequence for RD-110: a `create_1688_sourcing_request` step **must** carry
+The consequence: a `create_1688_sourcing_request` step **must** carry
 `incomplete_alone` and an `on_failure` block naming `list_store_quotes` as `verify_with`,
-or the server will not boot — and the same now holds for any playbook step calling
-`request_manual_sourcing`.
+or the server will not boot — step 7 of `tiktok_to_sourced_product` (RD-110) does — and
+the same holds for any playbook step calling `request_manual_sourcing`.
 
 **`request_manual_sourcing` is annotated the same way, and RD-94's text says the
 opposite.** The ticket called it "a free request" and set `destructiveHint: false` on
@@ -300,7 +300,15 @@ the API silently rejects valid calls. And **a filter field is only documentable 
 is confirmed against the upstream mapping**, per the phantom-filter gotcha below.
 
 The server-wide index lives in `manifests/_server.json` — a manifest with no operations,
-carrying only the tier-4 block. Everything else is per-domain, and an **empty**
+carrying only the tier-4 block. **It lists no tools.** Until RD-110 it had one line per
+tool group, and every line repeated what `tools/list` already delivers with the tool's
+own description. Removing the list made room for the second playbook's index line under
+the 4000-character target. What stays is what no single tool can say: start with
+`list_stores_api`, check `get_user_subscription` first, and the invariants. A client
+that loads tools lazily sees only tool names until it searches. The names are
+self-describing and the search matches descriptions, so the list was not needed there
+either. A new tool goes into this text only when it adds a cross-tool rule, like the
+four irreversible writes. Everything else is per-domain, and an **empty**
 `instructions` is the normal case for a domain whose whole contract is tier 1/2
 (`users.json`, `stores.json`, `store_quotes.json`). There is deliberately no non-empty
 lint: requiring text per manifest would push filler into the most expensive channel.
@@ -744,6 +752,28 @@ Six boot lints, all fatal, all with a rejection test in `tests/mcp_server/test_p
    envelope-hint check: the tail carries the same names under a tighter cap, so it always
    overruns first (pinned by `test_the_tail_cap_subsumes_the_merged_hint_cap`).
 
+Two playbooks ship. `product_import` is the RD-100 pilot. `tiktok_to_sourced_product`
+(RD-110) is the chain RD-88 exists for: `get_tiktok_products` → `upload_products` →
+`get_bulk_action_items` → `list_products` → `search_1688_offers_by_image` →
+`get_1688_product_details` → `create_1688_sourcing_request` → `list_store_quotes`. Four
+things about it a later edit must keep:
+
+- **Step 3 is the bulk poll, not `find_product_by_buy_id`.** The lookup cannot see an
+  import that ended at 99, so it would read "not yet" to the ceiling and lose the
+  failure reason. It appears only as step 2's `verify_with`, for the case where
+  `upload_products` returned no `bulk_action.id`.
+- **`linked` is not the end.** The last check is a `list_products` read of each
+  variation's `active_buy_item.item_id_on_site` (RD-94: `linked` is set even when a
+  pairing matched nothing). It lives in `done_when` and the body, not as a ninth step:
+  lint 3 forbids `list_products` twice, and step 4 is where the images and the
+  variation ids come from. Don't drop step 4 to make room.
+- **`ask_user` is set on exactly two steps**: 2 (a blind retry duplicates a live
+  listing) and 7 (a blind retry may charge a second credit).
+  `test_the_sourcing_chain_declares_its_two_risky_writes` pins that.
+- **`incomplete_alone` has about 40 characters here, not 200.** The envelope hint cap is
+  measured over the whole serialized hint, and this chain's long name appears in it
+  twice, so most of the 200 is already used. The lint names the step that overruns.
+
 `then[]` appears in both lint 1 and lint 3 on purpose, because the references a playbook
 makes do not share one domain. `requires[].from_operation` and `on_failure.verify_with`
 point *outside* the chain by design — the pilot's step 1 takes `store_ids` from
@@ -774,6 +804,17 @@ that could have remembered. Both result-carried hints therefore give the specifi
   sets it); `then` is chain-scoped and becomes a `get_playbook` pointer. A candidate that
   declares no `on_failure` contributes nothing — a missing declaration is not evidence
   that retrying is safe — but is still named.
+
+Since RD-110 this runs on the committed files: `upload_products`, `get_bulk_action_items`
+and `list_products` are steps of both chains. `list_products` is the last step of
+`product_import`, so its hint names only the sourcing chain. **The two files word
+`upload_products`' `verify_with` the same on purpose.** The merged tail keeps a
+`verify_with` only when every chain states the identical `(operation_id, how)` pair, so
+if one file rewords `how`, the merged tail silently loses the clause that stops a
+duplicated upload. `test_the_shared_committed_steps_merge_their_failure_tails` pins the
+clause. The merged tail is capped at 320 characters and also carries both chain names,
+so a longer shared `left_behind` or `how` may not boot; shorten the text rather than
+raising the cap.
 
 Taking `steps_for(op)[0]` and stating its step number and `incomplete_alone` as fact is
 the tempting alternative and it is a confident lie: an agent in the sourcing chain would
@@ -1129,7 +1170,8 @@ reads them.
   landed** (RD-94). "Retry on failure" is the reflex, and on `create_1688_sourcing_request`
   it is how a user gets charged twice — a transport failure carries no response body at
   all, so nothing in the error says whether the request was accepted. The rule the notes
-  carry, and which RD-110 will repeat as `on_failure` data: read `list_store_quotes`
+  carry, and which the `tiktok_to_sourced_product` playbook (RD-110) repeats as step 7's
+  `on_failure` data: read `list_store_quotes`
   filtered on `product_id` first, and treat a returned request as proof the write landed.
   Keep both copies — tier 2 is the contract and tier 3 arrives at the moment of the
   decision, which prose in `notes` cannot guarantee.

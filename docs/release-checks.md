@@ -475,26 +475,43 @@ confirmation prompts on these.
 
 **C6 — Playbooks are advertised and fetchable.** In the client, check that
 `get_playbook`'s `name` parameter offers an **enum** of playbook names (not a free
-string), then call `get_playbook '{"name": "product_import"}'`.
+string) — exactly `product_import` and `tiktok_to_sourced_product` — then call
+`get_playbook '{"name": "product_import"}'`.
 → an `ok: true` envelope whose `data.steps` carries three steps with derived
 `step`/`of` numbers and a non-empty `data.body`. An empty enum, or a `get_playbook`
 that answers `invalid_arguments` for a name the enum itself offered, means the
 playbook files didn't ship in the image — the chain guidance is then silently absent
 for every user even though every other tool works.
 
-**C7 — The chain hint reaches the model.** The `upload_products` description must end
-with `Step 1 of 3 in playbook "product_import" — call get_playbook for the full
-chain.`, and `list_stores_api`'s must carry no such line.
-→ if the tails are missing, agents get no signal that upload is step 1 of 3 and will
-stop after it. If a tail appears on a tool that is in no chain, the index is wrong.
+*C6.1 — the sourcing runbook (RD-110).* The symptom this guards: a user asks to take a
+TikTok product all the way to a sourced listing, and the agent stops after the import
+(leaving a live listing priced at cost), or stops at `linked` without checking that the
+variations were really linked. Call `get_playbook '{"name": "tiktok_to_sourced_product"}'`.
+→ `data.steps` lists eight steps, `get_tiktok_products` first and `list_store_quotes`
+last, with `get_bulk_action_items` as step 3. `data.done_when` names
+`active_buy_item.item_id_on_site`, not only `linked`. `data.body` states the cadence
+once (~10s, ~15s, 10 attempts, ~2.5 min) and says that a failed request is removed
+rather than marked failed. Step 7 (`create_1688_sourcing_request`) carries
+`on_failure` with `idempotent: false`, `verify_with` on `list_store_quotes` and
+`ask_user: true`. A missing name in the enum, fewer steps, or a `done_when` that ends at
+`linked` is a **fail**: the chain an agent follows would then stop too early.
 
-Once a **second** playbook ships, add the shared-step half: for a tool that is a step of
-two chains, the description tail names both, and a successful call's `playbook` envelope
-field carries `in: [both names]` with **no** `step` and **no** `incomplete_alone`. A step
-number or a single chain's warning there means the server went back to picking the first
-match, which reads perfectly and is wrong for whichever chain the caller is actually in —
-grade it `fail`, not cosmetic. Until then this half is `skipped` (one chain exists, so
-there is nothing to be ambiguous about).
+**C7 — The chain hint reaches the model.** The `get_tiktok_products` description must
+end with `Step 1 of 8 in playbook "tiktok_to_sourced_product" — call get_playbook for
+the full chain.`, and `list_stores_api`'s must carry no such line.
+→ if the tails are missing, agents get no signal that the research call starts a chain
+and will stop after it. If a tail appears on a tool that is in no chain, the index is
+wrong.
+
+The shared-step half (live since RD-110 shipped the second playbook): `upload_products`,
+`get_bulk_action_items` and `list_products` are steps of both chains, so each
+description must end with `A step in playbooks "product_import",
+"tiktok_to_sourced_product" — call get_playbook for the full chain.` A successful call's
+`playbook` envelope field carries `in: [...]` with **no** `step` and **no**
+`incomplete_alone` (R10 checks this on `get_bulk_action_items`). A step number or a
+single chain's warning there means the server went back to picking the first match,
+which reads perfectly and is wrong for whichever chain the caller is actually in —
+grade it `fail`, not cosmetic.
 
 **C8 — Resources.** `uv run python scripts/mcp_call.py resources`
 → lists `autods://playbook/<name>` with `text/markdown` for each playbook. An error
@@ -774,10 +791,12 @@ result that has an `img_url` is a failure.
 `total_results: 0` or a documented 4xx; both pass. What must **not** happen is
 `internal_error` or a transport failure.
 On a **2xx** the envelope must also carry a `playbook` sibling of `data` reading
-`{"name": "product_import", "step": "2/3", "next": ["list_products"], …}` — this is
-step 2 of a chain, and without that field an agent has nothing telling it the import
-isn't confirmed until it reads the store back. It must **not** appear on R3's
-`list_products` (the final step) or on R1/R2 (not chain tools at all).
+`{"in": ["product_import", "tiktok_to_sourced_product"], "step_depends_on_chain": true,
+"runbook": …}` — this is a step of two chains, and without that field an agent has
+nothing telling it the import isn't finished when the poll ends. It must carry **no**
+`step` and **no** `incomplete_alone` (see C7). On R3's `list_products` it names only
+`tiktok_to_sourced_product`, because `list_products` is the last step of
+`product_import`. It must **not** appear on R1/R2 (not chain tools at all).
 
 **R11 — Bad input is refused cleanly.** Call `get_product_by_id` with
 `{"product_id": "not-a-hex-id"}` and `list_products` with no `body`.
@@ -1190,7 +1209,8 @@ like the next step of every import, and an import whose item failed is polled he
 until the ceiling, where its error is lost. Then read `upload_products`' own
 `notes`: they must point at this tool for an upload that errored. And the
 `upload_products` step's failure text in `get_playbook` `{"name": "product_import"}`
-must name `find_product_by_buy_id` in its `verify_with`, not `list_products`.
+must name `find_product_by_buy_id` in its `verify_with`, not `list_products` — and so
+must step 2 of `{"name": "tiktok_to_sourced_product"}`, with the same `how`.
 
 **R19 — TikTok Analytics research: "which TikTok products are selling, and why?"
 (RD-69).** The symptom this guards: a user asks for trending TikTok products and

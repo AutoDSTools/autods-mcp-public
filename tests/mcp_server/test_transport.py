@@ -243,14 +243,13 @@ async def test_tool_call_forwards_bearer_to_upstream(
         "status": 200,
         "ok": True,
         "data": {"task_id": "abc"},
-        # RD-100: upload_products is step 1 of the `product_import` chain, so
-        # the envelope carries the per-step nudge beside `data`.
+        # RD-100: upload_products is a chain step, so the envelope carries the
+        # nudge beside `data`. RD-110 made it a step of two chains, so the nudge
+        # names both and states no step number.
         "playbook": {
-            "name": "product_import",
-            "step": "1/3",
-            "next": ["get_bulk_action_items"],
-            "incomplete_alone": "Nothing is in the store until the bulk job finishes.",
-            "runbook": 'get_playbook("product_import")',
+            "in": ["product_import", "tiktok_to_sourced_product"],
+            "step_depends_on_chain": True,
+            "runbook": "get_playbook(<the chain you are in, from `in`>)",
         },
     }
     assert captured["url"] == "https://autods-api.test/products/store-1/"

@@ -1,0 +1,182 @@
+{
+  "name": "tiktok_to_sourced_product",
+  "title": "TikTok research → sourced product",
+  "when_to_use": "The user wants a product found in TikTok research to end up as a live listing with a supplier and Auto-Order.",
+  "entry_operation": "get_tiktok_products",
+  "steps": [
+    {
+      "operation_id": "get_tiktok_products",
+      "goal": "Find the TikTok Analytics row the user wants to sell, and keep its internal_id (19 digits) — not its hex id.",
+      "incomplete_alone": "Research only: nothing is in the store yet.",
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the read; a failed read changes nothing."
+      }
+    },
+    {
+      "operation_id": "upload_products",
+      "goal": "Import the row with the TikTok Analytics recipe at status 2 (active), since a draft cannot be sourced. This starts an asynchronous bulk job and returns its id.",
+      "requires": [
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        },
+        {
+          "param": "body.new_products[].asin",
+          "from_operation": "get_tiktok_products",
+          "field": "products[].internal_id"
+        }
+      ],
+      "incomplete_alone": "Goes live at cost, with no supplier.",
+      "on_failure": {
+        "idempotent": false,
+        "left_behind": "The bulk job may have started even though the call errored.",
+        "verify_with": {
+          "operation_id": "find_product_by_buy_id",
+          "how": "buy_id = each asin sent, as a bare id"
+        },
+        "then": "A product back: go on from its id. None at the ceiling: nothing landed.",
+        "ask_user": true
+      }
+    },
+    {
+      "operation_id": "get_bulk_action_items",
+      "goal": "Poll the import job until its item is final. A finished item carries the AutoDS product id in autods_product_id; an item at 99 carries the reason the import failed.",
+      "requires": [
+        {
+          "param": "bulk_action_id",
+          "from_operation": "upload_products",
+          "field": "bulk_action.id"
+        },
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        }
+      ],
+      "incomplete_alone": "A finished item is live at cost, no supplier.",
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the poll; a failed read changes nothing."
+      }
+    },
+    {
+      "operation_id": "list_products",
+      "goal": "Read the imported product (product_status 2, filtered on id) for its images and its variations' sku and variant_id_on_site.",
+      "requires": [
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        },
+        {
+          "param": "body.filters[].value",
+          "from_operation": "get_bulk_action_items",
+          "field": "results[].autods_product_id"
+        }
+      ],
+      "incomplete_alone": "Live at cost, with no supplier.",
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the read; a failed read changes nothing."
+      }
+    },
+    {
+      "operation_id": "search_1688_offers_by_image",
+      "goal": "Search 1688 for offers matching the product, one image at a time: go on to the next image when one finds nothing.",
+      "requires": [
+        {
+          "param": "img_url",
+          "from_operation": "list_products",
+          "field": "results[].images[] (each in turn)"
+        }
+      ],
+      "incomplete_alone": "Live at cost, with no supplier.",
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the read; a failed read changes nothing."
+      }
+    },
+    {
+      "operation_id": "get_1688_product_details",
+      "goal": "Read the chosen offer's variations: each variations[].id is the supplier variation id a pairing needs.",
+      "requires": [
+        {
+          "param": "asins",
+          "from_operation": "search_1688_offers_by_image",
+          "field": "data[].id"
+        }
+      ],
+      "incomplete_alone": "Live at cost, with no supplier.",
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the read; a failed read changes nothing."
+      }
+    },
+    {
+      "operation_id": "create_1688_sourcing_request",
+      "goal": "Submit the sourcing request, which also links each product variation to its offer variation in the same call. Spends 1 non-refundable auto-order credit.",
+      "requires": [
+        {
+          "param": "store_id",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        },
+        {
+          "param": "product_id",
+          "from_operation": "get_bulk_action_items",
+          "field": "results[].autods_product_id"
+        },
+        {
+          "param": "body.alibaba_1688_id",
+          "from_operation": "search_1688_offers_by_image",
+          "field": "data[].id"
+        },
+        {
+          "param": "body.link.variations_match[].item_id_on_site",
+          "from_operation": "get_1688_product_details",
+          "field": "data.<offer id>.variations[].id"
+        },
+        {
+          "param": "body.link.variations_match[].sku",
+          "from_operation": "list_products",
+          "field": "results[].variations[].sku"
+        }
+      ],
+      "incomplete_alone": "Accepted only; sourcing may still fail.",
+      "on_failure": {
+        "idempotent": false,
+        "left_behind": "The request may have been accepted and the credit charged.",
+        "verify_with": {
+          "operation_id": "list_store_quotes",
+          "how": "filter product_id = the product id"
+        },
+        "then": "A request there: go on polling it. None: submit again only if the user agrees.",
+        "ask_user": true
+      }
+    },
+    {
+      "operation_id": "list_store_quotes",
+      "goal": "Poll the request (filter product_id) until linked or cannot_be_sourced, or until it disappears, which means it failed. linked is not the last check: see done_when.",
+      "requires": [
+        {
+          "param": "store_ids",
+          "from_operation": "list_stores_api",
+          "field": "id"
+        },
+        {
+          "param": "body.filters[].value",
+          "from_operation": "get_bulk_action_items",
+          "field": "results[].autods_product_id"
+        }
+      ],
+      "on_failure": {
+        "idempotent": true,
+        "then": "Retry the poll; a failed read changes nothing."
+      }
+    }
+  ],
+  "done_when": "the store quote reads linked AND a list_products read of the product shows each variation's active_buy_item.item_id_on_site set to the offer variation it was paired with",
+  "body": "# TikTok research → sourced product\n\nEight calls, and the job is done only after one more read once the last call has answered. Step 2 puts a **live listing priced at cost** in the user's store; every step after it is what makes that listing safe to sell. A chain that stops in between has done real harm, so if it cannot finish, say so and offer the way out (below).\n\n## Before spending anything\n\n1. Call `get_user_subscription` once. The `product_hub` add-on (TikTok Analytics) and the `orders_processor` add-on (sourcing) must be active, and a `\"1\"` (auto-order) credit entry should show a balance. A missing `\"1\"` entry is not a zero balance: it means no balance was established, so this is a check, not a guarantee.\n2. Tell the user that the import goes live at cost, and that step 7 spends 1 non-refundable auto-order credit.\n\n## The steps\n\n1. `get_tiktok_products` — pick the row. Keep its `internal_id` (19 digits), not its hex `id`.\n2. `upload_products` — `{\"region\": 7, \"status\": 2, \"buy_site_id\": 37, \"action_source\": 10, \"new_products\": [{\"asin\": \"<internal_id>\"}]}`. Status 2, because a draft cannot be sourced. Keep `bulk_action.id`.\n3. `get_bulk_action_items` — poll the job. A finished item (3) carries the product id in `autods_product_id`. An item at 4 (canceled) or 99 (error) did not import: report it, with the reason a 99 carries, and stop.\n4. `list_products` — `product_status: 2`, filtered on `id` = that `autods_product_id` (value_type `object_id`), projecting at least `title`, `status`, `main_picture_url`, `images`, `variations.sku`, `variations.variant_id_on_site`, `variations.active_buy_item`. A projection without `main_picture_url` silently produces no images.\n5. `search_1688_offers_by_image` — one search per image, `full_scrape: true` on its first call only. Go through the product's images in turn, not only the first: one image finding nothing is not \"no supplier\".\n6. `get_1688_product_details` — `full_scrape: true` on its first call only. Read the chosen offer's `variations[].id` (offer id, underscore, supplier variation id).\n7. `create_1688_sourcing_request` — first read `list_store_quotes` on `product_id`: a request already there means do not submit. The call creates the request and links the variations: `alibaba_1688_id` = the bare offer id, `add_to_unfulfilled_orders: false` (a fresh import has no orders), one `variations_match` entry per product variation (`item_id_on_site` = the offer variation, `sku` = the product variation's SKU, or `variant_id_on_site` when it has none). A variation left out keeps its old supplier.\n8. `list_store_quotes` filtered on `product_id` — the completion poll. It is not the end of the job; see **Done**.\n\n## Polling\n\nSteps 3, 5, 6 and 8 are polls. There is no push channel and each poll costs a turn, so: first poll **~10s** after the call that started the work, then every **~15s**, stop after **10 attempts** (~2.5 min). At the ceiling, report what is unfinished and its last status instead of polling on.\n\nThe two scans are read differently:\n\n- `search_1688_offers_by_image`: `not_in_db` non-empty, or `no_info` non-empty with `data` empty → still working. `data` non-empty → done. `scraper_error` set → this image failed; go to the next image.\n- `get_1688_product_details`: the offer id in `no_info` and missing from `data` → still working. `data[<offer id>]` with no `error` → done. `data[<offer id>].error` set → failed; stop. `not_in_db` is always empty here and means nothing, so the ceiling is the only other stop.\n\n## The sourcing request's states\n\n`new` → `in_progress` → `ready` → `linked`, or `cannot_be_sourced`. `new`, `in_progress` and `ready` are not final. `cannot_be_sourced` is final: tell the user this product cannot be sourced this way.\n\n**A failed request has no status: it is removed.** A request seen on an earlier poll and gone now has failed, and so has one never seen by the ceiling. An empty answer on the first poll or two only means it is not recorded yet. A loop that waits for a final status waits for ever. A failed request may still have spent the credit, so do not resubmit without asking.\n\n## Done\n\n`linked` says the request finished, not that the variations were linked: it is set even when a pairing matched nothing. Read the product again with `list_products` filtered on `id`, projecting `variations.active_buy_item`, and check that each variation's `active_buy_item.item_id_on_site` is the offer variation it was paired with in step 7. A variation that does not match kept its old supplier: report it.\n\n## If the chain cannot finish\n\nFrom step 2 on, the product is on sale at cost with no supplier. Say so plainly and offer the way out: `delete_product` removes it (only if the user asks for that), or the user sets a real margin in the AutoDS web app if they will fulfil the orders by hand.\n\nAsking for a new quote, or switching to another quoted offer, is not available here; both are done in the web app.\n\n## When a write fails\n\n- `upload_products` errors or times out: there is no `bulk_action.id`, so step 3 cannot run. Look the product up with `find_product_by_buy_id` (`buy_id` = the `internal_id`) at the same cadence. A product back at `status` 2 → continue from its `id` at step 4. At another status, step 4's `product_status: 2` read will not find it: tell the user its status and stop. `{}` at the ceiling → nothing landed; ask the user before uploading again, since a second upload may be a duplicate live listing.\n- `create_1688_sourcing_request` errors or times out: the credit may be spent. Read `list_store_quotes` on `product_id`. A request there → go on with step 8. None → ask the user before submitting again.\n"
+}

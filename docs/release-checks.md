@@ -1219,15 +1219,22 @@ percentage and the parameter text says so. Take the first row's two ids.
 *R19.3 — overview.* `get_tiktok_product_overview` `{"product_id": "<the row's id>"}`
 → `gained_units_sold` has exactly 7 points, the last one dated **yesterday** (UTC).
 A point dated today means the documented end of the range has moved.
+Then read the `end_date` parameter's description off the handshake: it must say the
+video and affiliate counts **do** include that day. They cover one day more than the
+series, and without that sentence a user comparing them with the daily figures gets
+numbers that do not add up.
 
 *R19.4 — videos, with the right id and then the wrong one.* `get_tiktok_product_videos`
 `{"internal_id": "<the row's internal_id>", "limit": 3}` → `{quantity, videos}`.
-Then the same call with the row's **`id`** as `internal_id` → `ok: true` with
-`videos: []`. That empty list is what the tool's notes and parameter text describe;
-an error here is a finding (the documented behaviour changed). Then read the
-`internal_id` parameter's description off the handshake: it must say the hex `id`
-returns an empty list. Without that sentence an agent reports "no videos" for a
-product that has them.
+Then the same call with the row's **`id`** as `internal_id` → an error starting
+`invalid_arguments:` that names `internal_id`, before anything is sent. An `ok: true`
+answer here is a **fail**: the parameter's `pattern` is gone, and the upstream answers
+the hex id with an empty list, so an agent reports "no videos" for a product that has
+them. Do the same with the row's `internal_id` as `get_tiktok_product_details`'s
+`product_id` → `invalid_arguments` naming `product_id` (upstream it would be a 500).
+Finally `{"internal_id": "1111111111111111111", "limit": 3}` (well-formed, matches
+nothing) → `ok: true` with `videos: []`, the silent case the tool's notes still
+describe.
 
 *R19.5 — the TikTok grid and card (RD-69).* The first TikTok surfaces with pictures,
 on signed TikTok CDN URLs, so both halves of R15 apply to them.

@@ -178,6 +178,15 @@ client:
   a locally-handled operation carries no `omit`; and the operation's `notes` must
   mention `omitted`. A malformed path matches nothing and removes nothing, and a
   block the notes never mention hides data the model was never told is missing.
+- A parameter `pattern` (RD-69) must be on a `str` parameter, compile, and be
+  anchored with `^…$`. A JSON Schema pattern is a *search*, so an unanchored
+  `[0-9a-f]{32}` accepts any value that merely contains 32 hex characters — it
+  looks like a guard and checks nothing. The pattern goes into `inputSchema`,
+  which is also what the argument validator is compiled from, so a value that
+  does not match is `invalid_arguments` before anything is sent. It is the
+  RD-107 lever (see **A 500 the upstream owns is still ours to keep an agent
+  away from**) applied to a query parameter: use it only for a format fixed by
+  construction, never to narrow a value the upstream would accept.
 
 ### Destructive operations
 
@@ -1718,17 +1727,28 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   and that is far below 1 for most products — `"50-"` matches nothing, `"0.5-"` a
   handful. The 0–100 `product_score_norm` is only a sort field. (3) The overview's
   `end_date` says "included", and the code builds the series up to the day *before*
-  it; the videos endpoint's `end_date` really is included. `manifests/tiktok_analytics.json`
-  documents what the upstream does, and `tests/mcp_server/test_tiktok_analytics.py`
-  pins it. Don't "restore" the upstream wording.
+  it; the videos endpoint's `end_date` really is included. Inside the overview the two
+  halves also differ: its `related_videos_qty` / `affiliates_qty` filter with
+  `end_date + 1 day`, so they *do* include `end_date` and cover one day more than the
+  series. `manifests/tiktok_analytics.json` documents what the upstream does, and
+  `tests/mcp_server/test_tiktok_analytics.py` pins it. Don't "restore" the upstream
+  wording.
 - **A TikTok Analytics row has two ids, and the wrong one fails three different ways**
-  (RD-69). `id` (32-character hex — not 24, which RD-96's text said until RD-69) is
-  what `/product` and `/overview` take as `product_id`; `internal_id` (19 digits) is
-  what `/videos` takes, and it is also the `asin` of the TikTok import. Sent the wrong
-  id, `/product` and `/overview` answer a 500 (`upstream_error`), and `/videos`
-  answers `{quantity: 0, videos: []}` with a 200 — so an agent reports "no videos" for
-  a product that has many. That is why both parameter descriptions name the other id,
-  and why the videos notes tell the agent to compare with `related_videos_qty`.
+  (RD-69). `id` (32-character lowercase hex — not 24, which RD-96's text said until
+  RD-69) is what `/product` and `/overview` take as `product_id`; `internal_id` (19
+  digits today) is what `/videos` takes, and it is also the `asin` of the TikTok
+  import. Sent the wrong id, `/product` and `/overview` answer a 500 — the lookup
+  finds nothing and the next line dereferences `None` — and `/videos` answers
+  `{quantity: 0, videos: []}` with a 200, so an agent reports "no videos" for a
+  product that has many. Both formats are fixed by construction (`id` is an md5
+  hexdigest, `internal_id` is TikTok's numeric id), so each parameter carries a
+  `pattern` (`^[0-9a-f]{32}$` / `^[0-9]+$`) and the swapped id is refused locally as
+  `invalid_arguments`. Three things to keep. Don't pin `internal_id` to 19 digits:
+  that is what the ids look like, not a rule. Don't convert one id into the other:
+  `id` is md5 of the product URL, and of `internal_id` only when there is no URL.
+  And a **well-formed** id that matches nothing still gets the upstream's answer, so
+  the descriptions still name the other id and the videos notes still tell the agent
+  to compare with `related_videos_qty`.
 - **The TikTok Analytics reads are slow on staging, and the overview is slower than the
   dispatcher's 30 s timeout** (RD-69, measured 2026-09-28 direct against the gateway).
   The table, details and videos reads took 15–40 s. The overview took 22 s once and then

@@ -214,6 +214,14 @@ class ManifestParameter(BaseModel):
     required: bool = False
     schema_type: SchemaType = "str"
     description: str | None = None
+    # RD-69: a JSON Schema ``pattern`` for a ``str`` parameter, emitted into the
+    # tool ``inputSchema`` and so enforced by the argument validator before
+    # anything is sent. For an id whose format is fixed by construction, where
+    # the upstream answers a wrong-format id badly (a 500, or an empty 200): the
+    # call then fails as ``invalid_arguments`` naming the parameter. Must be
+    # anchored (``^…$``) — a JSON Schema pattern is a search, so an unanchored
+    # one accepts any string that merely contains a match. Both are boot lints.
+    pattern: str = ""
 
 
 class ManifestOperation(BaseModel):

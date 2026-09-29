@@ -21,6 +21,7 @@ in step are the tool counts in ``tests/mcp_server/test_loader.py`` and
 """
 
 import asyncio
+import re
 from typing import Any
 
 from mcp import types
@@ -587,11 +588,12 @@ async def _smoke_tiktok_analytics(call: Any, failures: list[str], skipped: list[
     """RD-69: the product table, then each per-product read with the id it takes.
 
     The row's ``id`` goes to the details and overview reads, its ``internal_id``
-    to the videos read. The videos read is also checked the other way round:
-    given the row ``id`` it must answer an empty list, not an error — the silent
-    case the tool's notes describe, and the reason both parameters warn about
-    the other id. ``forbidden`` is a business answer (no Product Finding Hub
-    add-on on the account), so ``_record`` accepts it and the rest is skipped.
+    to the videos read. The videos read is also checked two more ways: the row
+    ``id`` must be refused locally as ``invalid_arguments`` (the parameter's
+    ``pattern``), and a well-formed ``internal_id`` that matches nothing must
+    still answer an empty list, not an error — the silent case the tool's notes
+    describe. ``forbidden`` is a business answer (no Product Finding Hub add-on
+    on the account), so ``_record`` accepts it and the rest is skipped.
     """
     table = await call("get_tiktok_products", {"limit": 3})
     _record("get_tiktok_products", table, failures, frozenset())
@@ -606,10 +608,12 @@ async def _smoke_tiktok_analytics(call: Any, failures: list[str], skipped: list[
         return
 
     row_id, internal_id = rows[0]["id"], rows[0]["internal_id"]
-    if not (len(row_id) == 32 and len(internal_id) == 19 and internal_id.isdigit()):
+    # The same two formats the parameters' ``pattern``s enforce. 19 digits is what
+    # TikTok ids look like today, not a rule, so only "digits" is checked.
+    if not (re.fullmatch(r"[0-9a-f]{32}", row_id) and re.fullmatch(r"[0-9]+", internal_id)):
         failures.append(
             f"get_tiktok_products: row ids {row_id!r} / {internal_id!r} are not the documented "
-            f"32-character hex `id` and 19-digit `internal_id`"
+            f"32-character lowercase hex `id` and all-digit `internal_id`"
         )
     # The grid (RD-69): one thumbnail per row, and a link that carries both ids.
     items = ((table.structured_content or {}).get("images") or {}).get("items") or []
@@ -642,11 +646,15 @@ async def _smoke_tiktok_analytics(call: Any, failures: list[str], skipped: list[
         frozenset(),
     )
     wrong_id = await call("get_tiktok_product_videos", {"internal_id": row_id, "limit": 3})
-    _record("get_tiktok_product_videos (row id)", wrong_id, failures, frozenset())
-    if not wrong_id.is_error:
-        wrong = (wrong_id.structured_content or {}).get("data") or {}
-        if wrong.get("videos") != []:
-            failures.append("get_tiktok_product_videos: the row `id` did not answer the documented empty list")
+    wrong_text = wrong_id.content[0].text if wrong_id.is_error and wrong_id.content else ""
+    if not wrong_text.startswith("invalid_arguments: "):
+        failures.append(
+            f"get_tiktok_product_videos: the row `id` was not refused locally as invalid_arguments: {wrong_text!r}"
+        )
+    unknown = await call("get_tiktok_product_videos", {"internal_id": "1" * 19, "limit": 3})
+    _record("get_tiktok_product_videos (unknown internal_id)", unknown, failures, frozenset())
+    if not unknown.is_error and ((unknown.structured_content or {}).get("data") or {}).get("videos") != []:
+        failures.append("get_tiktok_product_videos: an unknown `internal_id` did not answer the documented empty list")
 
 
 async def _smoke_supplier_scans(

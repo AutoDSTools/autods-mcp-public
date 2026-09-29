@@ -84,6 +84,10 @@ class FixedQueryError(ValueError):
     """An operation's ``fixed_query`` collides with a parameter, or is never sent."""
 
 
+class ParameterPatternError(ValueError):
+    """A parameter's ``pattern`` is not on a string, does not compile, or is not anchored."""
+
+
 # The parameter a ``handler: "playbook"`` operation takes. Its ``enum`` is the
 # registered playbook names, injected at boot — which is what makes the enum the
 # index: ``inputSchema`` is the most reliably delivered channel there is, so the
@@ -115,10 +119,14 @@ def build_input_model(operation: ManifestOperation) -> type[BaseModel]:
     fields: dict[str, Any] = {}
     for parameter in operation.parameters:
         py_type = _SCHEMA_TYPE_TO_PY.get(parameter.schema_type, str)
+        constraints: dict[str, Any] = {"pattern": parameter.pattern} if parameter.pattern else {}
         if parameter.required:
-            fields[parameter.name] = (py_type, Field(description=parameter.description or None))
+            fields[parameter.name] = (py_type, Field(description=parameter.description or None, **constraints))
         else:
-            fields[parameter.name] = (py_type | None, Field(default=None, description=parameter.description or None))
+            fields[parameter.name] = (
+                py_type | None,
+                Field(default=None, description=parameter.description or None, **constraints),
+            )
 
     if operation.has_json_body:
         body_type: Any = dict[str, Any]
@@ -370,6 +378,34 @@ def _assert_fixed_query_usable(operation: ManifestOperation) -> None:
         )
 
 
+def _assert_patterns_usable(operation: ManifestOperation) -> None:
+    """Reject a parameter ``pattern`` that would check nothing, or not boot (RD-69).
+
+    Three shapes, each of which looks like a guard in review. A pattern on a
+    non-string parameter has nothing to match. One that does not compile would
+    fail the validator build with an error that names no operation. And an
+    unanchored one is a *search*, so ``[0-9a-f]{32}`` accepts any string that
+    merely contains 32 hex characters — including the id it exists to keep out.
+
+    Raises:
+        ParameterPatternError: at boot, like the other manifest lints.
+    """
+    for parameter in operation.parameters:
+        if not parameter.pattern:
+            continue
+        where = f"Operation '{operation.operation_id}' parameter '{parameter.name}'"
+        if parameter.schema_type != "str":
+            raise ParameterPatternError(f"{where} sets 'pattern' on a '{parameter.schema_type}' parameter.")
+        try:
+            re.compile(parameter.pattern)
+        except re.error as error:
+            raise ParameterPatternError(f"{where} has a 'pattern' that does not compile: {error}.") from error
+        if not (parameter.pattern.startswith("^") and parameter.pattern.endswith("$")):
+            raise ParameterPatternError(
+                f"{where} has an unanchored 'pattern'; it would accept any value that merely contains a match."
+            )
+
+
 def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry | None = None) -> list[types.Tool]:
     """Lint, then convert every operation to an MCP tool descriptor."""
     assert_valid_annotations(operations)
@@ -379,6 +415,7 @@ def build_tools(operations: list[ManifestOperation], playbooks: PlaybookRegistry
         _assert_business_errors_usable(operation)
         _assert_handler_or_upstream(operation, playbooks)
         _assert_fixed_query_usable(operation)  # RD-95
+        _assert_patterns_usable(operation)  # RD-69
         assert_images_usable(operation)  # RD-92
         assert_omit_usable(operation, served)  # RD-146
     return [to_tool(operation, playbooks) for operation in operations]

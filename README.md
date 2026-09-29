@@ -322,6 +322,14 @@ endpoint that serves several stores where the tool is only ever about one —
 constant is a value it can fill wrong; and it cannot be written into `path`,
 because httpx replaces a URL's query string when the call adds its own.
 
+A `str` parameter may also carry a `pattern` (RD-69): a JSON Schema regex that
+goes into the tool's `inputSchema`, so a call whose value does not match is
+refused as `invalid_arguments` naming the parameter, before anything is sent.
+It is for ids whose format is fixed by construction and that the upstream
+answers badly when wrong — the TikTok Analytics `product_id` (32 lowercase hex
+characters) and `internal_id` (digits), where the wrong one is a 500 on two
+endpoints and an empty list on the third.
+
 Each operation's path/query/header parameters (plus a free-form JSON `body`
 when present) are converted into a pydantic model whose JSON schema becomes
 the tool's `inputSchema`.
@@ -341,7 +349,8 @@ of `handler` / `base_url_key`; (6) the six playbook lints (below); (7) a
 `fixed_query` key must not also be a declared parameter, and a locally-handled
 operation carries no `fixed_query`; (8) every `omit` path (below) is well formed,
 gives its reason, names a served tool in `see` when the data is available there,
-and its operation's `notes` mention the `omitted` field.
+and its operation's `notes` mention the `omitted` field; (9) a parameter
+`pattern` is on a `str` parameter, compiles, and is anchored with `^…$`.
 
 #### Destructive tools
 

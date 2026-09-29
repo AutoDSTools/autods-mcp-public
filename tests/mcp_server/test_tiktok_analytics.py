@@ -5,10 +5,10 @@ things that fail silently rather than loudly:
 
 * **The two ids.** The details and overview endpoints take the row's 32-hex
   ``id`` as ``product_id``; the videos endpoint takes the 19-digit
-  ``internal_id``. Measured on staging, the wrong one gives an opaque
-  ``upstream_error`` on the first two and an empty 200 on the third — no error
-  at all. So both descriptions must name the other id, and the dispatcher must
-  send each one under its own name.
+  ``internal_id``. Upstream, the wrong one gives an opaque ``upstream_error``
+  on the first two and an empty 200 on the third — no error at all. So both
+  descriptions name the other id, each id carries a ``pattern`` that refuses
+  the other one locally, and the dispatcher sends each under its own name.
 * **Tier placement** (RD-90). Everything needed to form a call — the range
   syntax, the allowed values, the date form — is on the parameter, not in the
   expensive ``instructions`` channel, and the server index names the tools.
@@ -21,7 +21,8 @@ import httpx
 import pytest
 
 from autods_mcp_server.manifests import build_registry, load_manifests
-from autods_mcp_server.tools import build_tools
+from autods_mcp_server.manifests.schema import ManifestOperation
+from autods_mcp_server.tools import ParameterPatternError, build_tools
 from tests.mcp_server.conftest import mcp_client_session
 
 TIKTOK_OPS = (
@@ -114,9 +115,11 @@ def test_the_videos_tool_warns_against_the_row_id(registry) -> None:
 
     assert "19-digit" in description
     assert "NOT the 32-character hex `id`" in description
-    assert "empty list" in description
+    assert "invalid_arguments" in description
     assert "product_id" not in {p.name for p in op.parameters}
     assert "related_videos_qty" in op.notes
+    assert "empty list" not in description
+    assert "{quantity: 0, videos: []}" in op.notes
 
 
 def test_the_table_notes_say_which_id_feeds_which_tool(registry) -> None:
@@ -202,6 +205,84 @@ async def test_a_missing_id_is_refused_locally(
     assert result.content[0].text.startswith("invalid_arguments: ")
     assert missing in result.content[0].text
     assert upstream_calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "arguments", "bad"),
+    [
+        # Each id where the other belongs — the mistake both descriptions warn about.
+        ("get_tiktok_product_details", {"product_id": _INTERNAL_ID}, "product_id"),
+        ("get_tiktok_product_overview", {"product_id": _INTERNAL_ID}, "product_id"),
+        ("get_tiktok_product_videos", {"internal_id": _ROW_ID}, "internal_id"),
+        # Upstream ids are lowercase md5 hex, and the lookup is case-sensitive.
+        ("get_tiktok_product_details", {"product_id": _ROW_ID.upper()}, "product_id"),
+        ("get_tiktok_product_details", {"product_id": _ROW_ID + "0"}, "product_id"),
+    ],
+)
+async def test_an_id_of_the_wrong_format_is_refused_locally(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token, operation_id: str, arguments, bad: str
+) -> None:
+    """ProductsResearch answers the first two with a 500 and the videos read with
+    an empty 200, so the ``pattern`` on each id is what turns both into an error
+    that names the parameter, before anything is sent."""
+    upstream_calls: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request)
+        return httpx.Response(200, json={})
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings, upstream_handler=upstream)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        result = await session.call_tool(operation_id, arguments)
+
+    assert result.is_error is True
+    assert result.content[0].text.startswith("invalid_arguments: ")
+    assert bad in result.content[0].text
+    assert upstream_calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "name", "pattern"),
+    [
+        ("get_tiktok_product_details", "product_id", "^[0-9a-f]{32}$"),
+        ("get_tiktok_product_overview", "product_id", "^[0-9a-f]{32}$"),
+        ("get_tiktok_product_videos", "internal_id", "^[0-9]+$"),
+    ],
+)
+def test_each_id_pattern_reaches_the_input_schema(registry, operation_id: str, name: str, pattern: str) -> None:
+    """The pattern is only a guard if the client-facing schema carries it: that
+    same schema is what the argument validator is compiled from. The internal id
+    is not pinned to 19 digits, which is what TikTok ids look like, not a rule."""
+    (tool,) = build_tools([registry.get(operation_id)])
+
+    assert tool.input_schema["properties"][name]["pattern"] == pattern
+
+
+@pytest.mark.parametrize(
+    ("parameter", "message"),
+    [
+        # A JSON Schema pattern is a search, so this one accepts any value that
+        # merely contains 32 hex characters.
+        ({"name": "product_id", "in": "query", "pattern": "[0-9a-f]{32}"}, "unanchored"),
+        ({"name": "product_id", "in": "query", "pattern": "^[0-9a-f{32}$"}, "does not compile"),
+        ({"name": "limit", "in": "query", "schema_type": "int", "pattern": "^[0-9]+$"}, "on a 'int' parameter"),
+    ],
+)
+def test_a_parameter_pattern_that_would_check_nothing_is_refused(parameter, message: str) -> None:
+    operation = ManifestOperation.model_validate(
+        {
+            "operation_id": "probe",
+            "method": "GET",
+            "path": "/probe",
+            "base_url_key": "products_research",
+            "annotations": {"title": "Probe", "readOnlyHint": True},
+            "parameters": [parameter],
+        }
+    )
+    with pytest.raises(ParameterPatternError, match=message):
+        build_tools([operation])
 
 
 async def test_the_table_sends_only_the_filters_given(
@@ -342,6 +423,20 @@ def test_the_overview_end_date_is_documented_as_exclusive(registry) -> None:
 
     assert "day BEFORE" in overview_end
     assert "included" in videos_end
+
+
+def test_the_overview_counts_are_documented_as_including_the_end_date(registry) -> None:
+    """The overview's series stops the day before ``end_date``, but its
+    ``related_videos_qty`` / ``affiliates_qty`` filter with ``end_date + 1 day``,
+    so they cover one day more. Both the parameter and the notes must say so, or
+    a user comparing them with the daily figures gets numbers that do not add up."""
+    op = registry.get("get_tiktok_product_overview")
+    overview_end = _param(registry, "get_tiktok_product_overview", "end_date").description
+
+    assert "counts DO include this day" in overview_end
+    assert "they include `end_date` itself" in op.notes
+    assert "one day more than the series" in op.notes
+    assert "count only videos published in the range" not in op.notes
 
 
 def test_the_manifest_puts_nothing_in_instructions(bundled_manifest_dir: Path) -> None:

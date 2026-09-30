@@ -11,11 +11,13 @@ ui/message, so nothing here can mutate state or produce a duplicate write.
 
 The four load-bearing protocol rules and the reason findPayload() searches by
 shape rather than by channel name are documented at the top of
-product_grid.html; both files obey the same ones.
+product_grid.html; both files obey the same ones. So does the no-Referer rule
+for images (RD-149), explained there.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
 <title>AutoDS product card</title>
 <style>
   :root {
@@ -251,6 +253,7 @@ product_grid.html; both files obey the same ones.
     var img = document.createElement("img");
     img.id = "hero";
     img.decoding = "async";
+    img.referrerPolicy = "no-referrer";
     img.alt = alt || "";
     img.onerror = function () {
       mountHero(placeholder("image unavailable"));
@@ -292,6 +295,7 @@ product_grid.html; both files obey the same ones.
         var thumb = document.createElement("img");
         thumb.loading = "lazy";
         thumb.decoding = "async";
+        thumb.referrerPolicy = "no-referrer";
         thumb.alt = "";
         thumb.onerror = function () { button.disabled = true; button.textContent = "×"; };
         thumb.src = image.url;

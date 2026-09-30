@@ -475,6 +475,39 @@ async def test_widget_assets_obey_the_measured_protocol_order(
         assert "autods.images/1" in html, uri
 
 
+async def test_widget_images_are_requested_without_a_referer(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-149: every 1688 variation cell read "image unavailable" in claude.ai
+    web, with valid URLs and a CSP that allowed the host.
+
+    The cause was the Referer. The widget frame sits on the host's sandbox
+    domain, and alicdn's ``cbu01.alicdn.com/img/ibank/...`` path answers 403
+    ("denied by Referer ACL") to a Referer it does not know. Without a Referer
+    it answers 200. So both assets set ``no-referrer`` as the document default
+    *and* on every ``<img>`` they create. The per-image attribute is what still
+    holds if a host drops our ``<head>``. Removing either one brings the
+    placeholders back with no error anywhere, and nothing in CI renders HTML, so
+    this greps the served assets the way its neighbours do.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        served = {widget.uri: (await session.read_resource(widget.uri)).contents[0].text for widget in WIDGETS}
+
+    for uri, html in served.items():
+        assert '<meta name="referrer" content="no-referrer">' in html, uri
+        created = re.findall(r"var (\w+) = document\.createElement\(\"img\"\);", html)
+        assert created, uri
+        for name in created:
+            assert f'{name}.referrerPolicy = "no-referrer";' in html, (uri, name)
+        # Every image is built in JS; a literal tag or `new Image` would slip
+        # past the per-element check above.
+        assert "<img" not in html.split("<body", 1)[1], uri
+        assert "new Image(" not in html, uri
+
+
 async def test_the_diagnostic_is_idle_armed_and_retractable(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

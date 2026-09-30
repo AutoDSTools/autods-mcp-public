@@ -483,8 +483,9 @@ request takes. A 1688 offer has no page in the AutoDS web app, so no route in
 the agent to list the offers in text in the same order. 1688 images come from
 `cbu01.alicdn.com`, inside the existing `alicdn` family: its `_220x220.jpg`
 variant was measured working (~17 KB against ~110 KB), and the host is covered by
-the `*.alicdn.com` CSP entry. That CSP entry is still to be confirmed rendering in
-a real host for this host name — release check R17.3.
+the `*.alicdn.com` CSP entry. The details read's `/img/ibank/` URLs also need the
+widgets to send no Referer (RD-149, see the image-pipeline gotchas); release check
+R17.3 is where both are confirmed rendering in a real host.
 
 Whenever a tool's `base64` changes, its `notes` change with it: the sentence
 telling the model to set `include_images` is a *phantom parameter* the moment
@@ -1225,6 +1226,13 @@ reads them.
   assets.claude.ai` blocks every supplier image — with no error in the widget, in the
   host, or in our logs. Removing either declaration is invisible until someone looks at
   a rendered grid.
+- **Widget images are requested with no Referer, and the policy is set twice** (RD-149).
+  Each asset has `<meta name="referrer" content="no-referrer">` as the document default,
+  and every `<img>` it creates also sets `referrerPolicy = "no-referrer"`, which still
+  holds if a host wraps the document and drops our `<head>`. Build images in JS only, and
+  give each new one the attribute: `test_widget_images_are_requested_without_a_referer`
+  checks every `createElement("img")`. The failure it prevents is in the image-pipeline
+  gotchas below.
 - **The base64 image path fails to *fewer* pictures, never to a failed call** (RD-92).
   `_attach_thumbnails` swallows everything, per image and in bulk. The tool call already
   succeeded; the URLs, the text envelope and the widget are the contract and the base64
@@ -2026,6 +2034,23 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   operation's `image_paths`, with prefix matching, so `variations.price` does not count as
   covering `variations.*.main_picture_url.url`. If you add a projection example to a tool
   that carries an images block, it must keep the pictures.
+- **The third way: a CDN refuses the widget's Referer** (RD-149, found on staging with
+  `get_1688_product_details`). Every 1688 variation cell read "image unavailable", while
+  the `images` block carried valid `_220x220.jpg` URLs and `*.alicdn.com` was in the CSP.
+  The widget frame sits on the host's sandbox domain, so the browser sent that domain as
+  the Referer. Alibaba's CDN keeps a Referer allowlist for the
+  `cbu01.alicdn.com/img/ibank/...` path. For a Referer it does not know it answers `403`
+  with `x-tengine-error: denied by Referer ACL`. With no Referer, or with claude.ai,
+  google.com or autods.com, it answers 200. That is why the AutoDS web app shows the same
+  pictures. Only that URL form has the check: `search_1688_offers_by_image` returns the
+  bare `cbu01.alicdn.com/O1CN...` form, so the offer grid showed pictures and the details
+  grid did not. That split is what made it look like a CSP problem, and it is not one.
+  Every other family in `cdn_rewrite_sample.tsv` loads the same with and without a
+  foreign Referer, and the base64 path fetches server-side and sends none. The fix is the
+  `no-referrer` policy in both widgets (see **Conventions → Images, widgets**). The
+  attribute looks like clutter. Removing it brings the placeholders back with no error in
+  the widget, the host or our logs. To check a URL without a browser, `curl` it with
+  `-H "Referer: https://example.com/"` (403) and without (200).
 ### Which client is calling, and which ones render a widget
 
 The fields these three entries read are put on the audit line by the convention **What

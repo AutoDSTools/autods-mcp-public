@@ -39,10 +39,19 @@ name, findPayload() walks EVERY inbound message for an object tagged
 kind: "autods.images/1", which the server mints. If the host uses a channel we
 did not anticipate, the diagnostic below says so in words instead of rendering
 an empty box, and the transcript names the method that carried the data.
+
+Images are requested with no Referer (RD-149). The frame lives on the host's
+sandbox domain, and alicdn's `cbu01.alicdn.com/img/ibank/...` path answers 403
+("denied by Referer ACL") to a Referer it does not know — so every 1688
+variation cell read "image unavailable" while the URL was fine. No host family
+we render needs a Referer. The policy is set twice on purpose: the meta tag is
+the document default, and `referrerPolicy` on each <img> still holds if a host
+wraps this document and drops our <head>.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
 <title>AutoDS product grid</title>
 <style>
   :root {
@@ -337,6 +346,8 @@ an empty box, and the transcript names the method that carried the data.
         // 20 of them are not, so nothing loads until it scrolls into view.
         img.loading = "lazy";
         img.decoding = "async";
+        // RD-149: alicdn 403s the sandbox's Referer. See the header comment.
+        img.referrerPolicy = "no-referrer";
         img.alt = item.label || "";
         // A host outside the declared CSP allowlist, an expired signed URL, a
         // WAF-hostile host: all of them arrive here as an error event, and all

@@ -1181,10 +1181,13 @@ an agent to stop, since it has no search-wide error field.
   empty grid while the scan runs would read as "no offers".
 - *The rendering (human, claude.ai web only).* Ask *"find a 1688 supplier for
   <the R13.2 product>"* and look at the answer. A grid of offer thumbnails → pass.
-  Every cell "image unavailable" → the sandbox is blocking `cbu01.alicdn.com`,
-  which sits under the declared `*.alicdn.com` entry but has not been seen
-  rendering in a host before RD-95; quote one URL. Then ask for the details of one
-  offer and check the variation grid shows pictures with colour-like captions.
+  Then ask for the details of one offer and check the variation grid shows
+  pictures with colour-like captions. Every variation cell "image unavailable"
+  while the offer grid had pictures → the widget sent a Referer, and alicdn's
+  `/img/ibank/` path refuses an unknown one (RD-149). It is not the CSP. Quote
+  one URL, and check it with `curl -H "Referer: https://example.com/"` (403)
+  and without the header (200). Then check that the served widget still carries
+  `referrerPolicy = "no-referrer"`, or that the connector was reconnected.
   claude.ai shows one widget per tool call, so each unfinished poll leaves its own
   widget above the finished one. Each of those must show the neutral line **"No
   products to show."**, never the "No product payload" diagnostic (RD-148).

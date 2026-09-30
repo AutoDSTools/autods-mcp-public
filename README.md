@@ -1151,6 +1151,13 @@ choice here:
   merchant self-host outside the allowlist, an expired signed TikTok URL, or a
   WAF that refuses parameterised requests. Those degrade to the placeholder by
   design and never to a full-size retry.
+- **Only the 1688 variation grid says "image unavailable"; the offer grid has
+  pictures** (RD-149). This is not the CSP. The `get_1688_product_details` URLs
+  use alicdn's `cbu01.alicdn.com/img/ibank/...` path, which answers 403 to a
+  Referer it does not know, such as the host's sandbox domain. The widgets send
+  no Referer for that reason. If a host shows this, reconnect the connector (the
+  host may cache an older widget) and check the URL with
+  `curl -H "Referer: https://example.com/"` (403) and without the header (200).
 - **`include_images: true` came back with fewer pictures than results.** Read the
   `note` in the `images` block — it says how many of how many were attached.
   Each miss is one image that timed out, 404'd, or was not decodable (several

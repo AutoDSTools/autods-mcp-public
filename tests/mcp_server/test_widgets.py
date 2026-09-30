@@ -510,6 +510,44 @@ async def test_the_diagnostic_is_idle_armed_and_retractable(
         assert "DIAG_IDLE_MS = 60000" in html, uri
 
 
+async def test_a_tool_result_without_a_payload_settles_the_widget(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-148: the host opens the widget for every call of a tool that declares
+    it, and the server sends an ``images`` block only when the answer has items.
+    So an empty search, an unfinished 1688 poll and an ``isError`` result all
+    reach the widget as a ``tool-result`` with no payload. That is an answer, not
+    silence, and it must stop the diagnostic and show a neutral line instead of
+    leaving "Loading…" up until the "No product payload" box fires a minute later.
+
+    The diagnostic stays for a host that never sends a tool result, so the idle
+    timer must still be armed (the test above) and must be skipped once settled.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        served = {widget.uri: (await session.read_resource(widget.uri)).contents[0].text for widget in WIDGETS}
+
+    for uri, html in served.items():
+        assert 'TOOL_RESULT_METHOD = "ui/notifications/tool-result"' in html, uri
+        # The branch taken when the message carries no payload.
+        assert re.search(
+            r"if \(payload\) render\(payload\);\s*\n\s*"
+            r"else if \(data\.method === TOOL_RESULT_METHOD\) settleWithoutPayload\(data\.params\);",
+            html,
+        ), uri
+        # Settling stops the countdown, and neither the timer nor the box comes back.
+        assert re.search(r"settled = true;\s*\n\s*clearDiagnostic\(\);", html), uri
+        assert html.count("if (rendered || settled) return;") >= 3, uri
+        # A failed call is told apart from an empty one.
+        assert "params.isError === true" in html, uri
+
+    grid = served["ui://autods/product-grid"]
+    assert '"No products to show."' in grid
+    assert '"This call did not return products."' in grid
+
+
 async def test_only_the_picture_carries_the_link_never_the_text(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

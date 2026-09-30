@@ -120,7 +120,7 @@ product_grid.html; both files obey the same ones.
   };
 
   var showDiagnostic = function () {
-    if (rendered) return;
+    if (rendered || settled) return;
     $("wait").hidden = true;
     var node = $("diag");
     node.hidden = false;
@@ -128,14 +128,31 @@ product_grid.html; both files obey the same ones.
       "No product payload reached this widget.\n" +
       "Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.\n" +
       "Host methods seen: " + (seenMethods.join(", ") || "(none)") + "\n" +
-      "The image URLs are still in this tool result's structuredContent.\n";
+      "No tool result arrived. If the call returned a product, its image URLs are in its structuredContent.\n";
     reportSize();
   };
 
   var armDiagnostic = function () {
-    if (rendered) return;
+    if (rendered || settled) return;
     if (diagTimer !== null) clearTimeout(diagTimer);
     diagTimer = setTimeout(showDiagnostic, DIAG_IDLE_MS);
+  };
+
+  // A tool result without the payload is an answer, not silence (RD-148): see
+  // the comment on the same block in product_grid.html for the three cases and
+  // why this must not go back into the idle timer.
+  var TOOL_RESULT_METHOD = "ui/notifications/tool-result";
+  var settled = false;
+
+  var settleWithoutPayload = function (params) {
+    if (rendered || settled) return;
+    settled = true;
+    clearDiagnostic();
+    $("wait").textContent = params && params.isError === true
+      ? "This call did not return a product."
+      : "No product to show.";
+    $("wait").hidden = false;
+    reportSize();
   };
 
   var findPayload = function (node, depth) {
@@ -314,6 +331,7 @@ product_grid.html; both files obey the same ones.
 
     var payload = findPayload(data, 0);
     if (payload) render(payload);
+    else if (data.method === TOOL_RESULT_METHOD) settleWithoutPayload(data.params);
 
     // A reply to our own open-link request; an error means the host does not
     // know that method, which is a fall-through and not something to report.

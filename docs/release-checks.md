@@ -939,8 +939,11 @@ fetch as well.
 
 *R15.2 — the rendering (human, claude.ai web only).* Hand this over; it cannot be
 automated and it is the only check that sees what a user sees. In **claude.ai
-web** with the connector added, ask *"search the AutoDS Marketplace for phone
-holders"* and look at the answer.
+web** with the connector added, ask *"show me AutoDS Marketplace products in Toys &
+Hobbies"* and look at the answer. The prompt must be one that finds something in
+this environment: the staging Marketplace holds only test products, and *"phone
+holders"*, the prompt used here before RD-148, returns `{"results": []}` there, so
+it could never pass.
 
 **If this release changed a widget, reconnect the connector before looking.**
 Disconnect it, close the tab, open a new one, connect and re-authenticate. An
@@ -960,13 +963,20 @@ against the released commit, which takes seconds.
 - A box reading **"No product payload reached this widget"** → the document
   rendered and ran, but nothing tagged `autods.images/1` arrived. It prints the
   host methods it *did* see: quote that line, it names the channel. It appears
-  only after a full minute with no word from the host, and it retracts if the
+  only when no tool result has arrived and the host has then said nothing for a
+  full minute, and it retracts if the
   payload turns up late, so a box **under a grid that has pictures in it** is a
   bug in the widget, not a report about the data — say so rather than reading it
   as a finding about the images.
 - A muted **"Loading products…"** line while the search runs → expected, and it
   is what a user should see for the whole wait. Seeing the diagnostic box
   instead, on a search that then succeeded, is a finding.
+- An **empty search** or an **unfinished 1688 poll** → the widget must show the
+  neutral line **"No products to show."** at once, and a failed call **"This call
+  did not return products."** Never the diagnostic box, including after waiting
+  more than a minute (RD-148). To see it, ask for something the environment does not
+  hold, such as *"search the AutoDS Marketplace for phone holders"* on staging. The
+  diagnostic under an answer like that is a finding.
 - **Titles cut off** under the thumbnails — with an ellipsis, or sliced
   mid-line → a regression. The caption is deliberately shown in full, however
   tall the cell gets. The picture itself is fine; report it as cosmetic.
@@ -1008,8 +1018,8 @@ only the right one holds the product:
 Re-use R13.2's and R15.1's results rather than making fresh calls where you can.
 
 *R15.3b — does it open (human, claude.ai web only).* Ask *"list the active
-products in my store"*, then **click a thumbnail**. Then ask *"search the
-Marketplace for phone holders"* and click one there too — those are the two
+products in my store"*, then **click a thumbnail**. Then ask R15.2's *"show me
+AutoDS Marketplace products in Toys & Hobbies"* and click one there too — those are the two
 route families, and a mistake in one says nothing about the other. Reconnect the
 connector first if this release changed a widget, for the same reason R15.2 says
 so.
@@ -1175,6 +1185,9 @@ an agent to stop, since it has no search-wide error field.
   which sits under the declared `*.alicdn.com` entry but has not been seen
   rendering in a host before RD-95; quote one URL. Then ask for the details of one
   offer and check the variation grid shows pictures with colour-like captions.
+  claude.ai shows one widget per tool call, so each unfinished poll leaves its own
+  widget above the finished one. Each of those must show the neutral line **"No
+  products to show."**, never the "No product payload" diagnostic (RD-148).
   Reconnect the connector first if this release changed a widget (see R15.2).
   `skipped` without a browser session, and say so in the report as R15.2 does.
 

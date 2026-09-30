@@ -225,7 +225,7 @@ an empty box, and the transcript names the method that carried the data.
   };
 
   var showDiagnostic = function () {
-    if (rendered) return;
+    if (rendered || settled) return;
     $("wait").hidden = true;
     var node = $("diag");
     node.hidden = false;
@@ -233,14 +233,37 @@ an empty box, and the transcript names the method that carried the data.
       "No product payload reached this widget.\n" +
       "Expected an object tagged kind=\"" + PAYLOAD_KIND + "\" in a host message.\n" +
       "Host methods seen: " + (seenMethods.join(", ") || "(none)") + "\n" +
-      "The image URLs are still in this tool result's structuredContent.\n";
+      "No tool result arrived. If the call returned products, their image URLs are in its structuredContent.\n";
     reportSize();
   };
 
   var armDiagnostic = function () {
-    if (rendered) return;
+    if (rendered || settled) return;
     if (diagTimer !== null) clearTimeout(diagTimer);
     diagTimer = setTimeout(showDiagnostic, DIAG_IDLE_MS);
+  };
+
+  // The host opens this widget for EVERY call of a tool that declares it, and
+  // the server adds the payload only when the answer has items (RD-148). So a
+  // tool result without the payload is an answer, not silence: an empty
+  // search, a 1688 poll that has not finished yet (those carry no images block
+  // until the scan is done), or an isError result with no structuredContent at
+  // all. Say so in one neutral line and stop the diagnostic for good. Do not
+  // fold this back into the idle timer: that is what printed the "No product
+  // payload" box under every empty search, a minute after the answer came.
+  // render() still runs if a payload turns up later anyway.
+  var TOOL_RESULT_METHOD = "ui/notifications/tool-result";
+  var settled = false;
+
+  var settleWithoutPayload = function (params) {
+    if (rendered || settled) return;
+    settled = true;
+    clearDiagnostic();
+    $("wait").textContent = params && params.isError === true
+      ? "This call did not return products."
+      : "No products to show.";
+    $("wait").hidden = false;
+    reportSize();
   };
 
   // The payload's location in the host's message is not specified by anything
@@ -376,6 +399,7 @@ an empty box, and the transcript names the method that carried the data.
 
     var payload = findPayload(data, 0);
     if (payload) render(payload);
+    else if (data.method === TOOL_RESULT_METHOD) settleWithoutPayload(data.params);
 
     var result = data.result;
     if (result && !initDone) {

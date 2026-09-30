@@ -2133,6 +2133,27 @@ the audit line carries about a call** above.
   driving the asset in headless chromium against a fake host;
   `test_the_diagnostic_is_idle_armed_and_retractable` greps the served asset, because
   nothing in CI renders HTML.
+- **A tool result with no payload is an answer, not silence, and the widget must say so
+  at once** (RD-148, found on the 2026-09-30 staging release check). The symptom: under
+  an empty Marketplace search, the grid said "Loading products…" for a minute and then
+  printed the "No product payload" box. The box itself listed
+  `ui/notifications/tool-result` among the host methods seen, so the result did arrive.
+  The cause is a mismatch between host and server. The host opens the widget for
+  **every** call of a tool that declares it. The server adds an `images` block only when
+  the answer has items (`extract_images` returns `None` otherwise, on purpose, and tests
+  pin that). Three ordinary cases fall into that gap: an empty search, an unfinished
+  1688 poll (no `images` until the scan is done, so an empty grid is not read as "no
+  offers"; claude.ai shows one widget per poll), and an `isError` result, which has no
+  `structuredContent` at all. The widget used to treat `tool-result` like any other
+  message and only restarted the idle timer. Now a `tool-result` with no
+  `autods.images/1` payload settles the widget: the timer stops for good and the wait
+  line becomes "No products to show." (or "This call did not return products." for
+  `isError`). Do not "clean this up" back into the idle timer. The idle timer cannot tell
+  "the answer came and was empty" from "nothing came", and that is what showed users a
+  technical box under a correct "nothing found" answer. The diagnostic is now only for a
+  host that never sends a tool result. `render()` still runs if a payload turns up after
+  settling. Verified in headless chromium against a fake host;
+  `test_a_tool_result_without_a_payload_settles_the_widget` greps the served asset.
 - **A widget change is invisible to an already-connected client until it reconnects, so a
   screenshot is evidence about the host's cache, not about the deploy** (RD-92). After a
   release, claude.ai kept rendering the *previously* served `ui://autods/product-grid`

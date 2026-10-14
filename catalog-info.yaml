@@ -87,20 +87,15 @@ spec:
 
   consumesApis:
     - autods-platform-rest
-    # Deviation from § 14. Both of these are reached through the API gateway,
-    # so the edges should point at the gateway's route-group APIs, not at the
-    # upstreams' own. The catalog has no route-group entities yet. When they
-    # appear, repoint these two and the matching `dependsOn` entries (RD-162).
-    - products-research-rest
-    - scrapers-api-rest
+    # Reached through the API gateway, so these are its route-group APIs, not
+    # the upstreams' own (§ 14).
+    - autods-gateway-products-research-rest
+    - autods-gateway-scrapers-api-rest
     # Declared at the bottom of this file (§ 2).
     - autods-mcp-public-mixpanel-api
 
   dependsOn:
     - component:default/autods-api
-    # Reached through the gateway — see the § 14 note under `consumesApis`.
-    - component:default/products-research-api
-    - component:default/scrapers-api
     # Shared platform infrastructure owned by devops, declared in
     # https://github.com/AutoDSTools/backstage/blob/main/catalog/shared-infrastructure.yaml.
     # No Resource of this service's own for either: it validates tokens against

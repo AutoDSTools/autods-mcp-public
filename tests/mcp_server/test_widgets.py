@@ -127,6 +127,35 @@ async def test_an_unknown_resource_uri_is_refused(
             await session.read_resource("ui://autods/does-not-exist")
 
 
+async def test_a_resource_uri_with_a_query_string_is_still_served(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-163: claude.ai read ``autods://playbook/<name>?includeContent=true``.
+
+    We advertise the bare URI, and the query string used to stay part of the
+    name, so a playbook that exists was refused as unknown. Both kinds of
+    resource go through the same lookup, so both are checked. The response keeps
+    the URI exactly as the client sent it.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+    playbook_uri = f"{_PLAYBOOK_URI}?includeContent=true"
+    widget_uri = f"{WIDGETS[0].uri}?includeContent=true#top"
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        playbook = (await session.read_resource(playbook_uri)).contents[0]
+        widget = (await session.read_resource(widget_uri)).contents[0]
+        with pytest.raises(Exception, match="Internal server error"):
+            await session.read_resource("autods://playbook/does-not-exist?includeContent=true")
+
+    assert playbook.mime_type == "text/markdown"
+    assert playbook.text.startswith("#")
+    assert str(playbook.uri) == playbook_uri
+    assert widget.mime_type == WIDGET_MIME_TYPE
+    assert widget.text.startswith("<!DOCTYPE html>")
+    assert str(widget.uri) == widget_uri
+
+
 async def test_every_resource_read_is_logged_with_its_kind(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token, monkeypatch
 ) -> None:

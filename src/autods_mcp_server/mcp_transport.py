@@ -592,8 +592,15 @@ def _build_server(
         params: types.ReadResourceRequestParams,
     ) -> types.ReadResourceResult:
         uri = str(params.uri)
-        widget = widget_for_uri(uri)
-        name = uri.removeprefix(_PLAYBOOK_RESOURCE_SCHEME) if uri.startswith(_PLAYBOOK_RESOURCE_SCHEME) else ""
+        # Resources are looked up without the query string and fragment (RD-163).
+        # claude.ai has been seen adding ``?includeContent=true`` to a URI we
+        # advertised bare; matched as-is, that reads as an unknown resource and
+        # the user gets an error for a playbook that exists. Nothing we serve
+        # takes a query, so dropping it loses nothing. ``uri`` itself stays as
+        # sent, for the audit line and the response contents.
+        address = uri.partition("?")[0].partition("#")[0]
+        widget = widget_for_uri(address)
+        name = address.removeprefix(_PLAYBOOK_RESOURCE_SCHEME) if address.startswith(_PLAYBOOK_RESOURCE_SCHEME) else ""
         playbook = playbooks.get(name) if name else None
         # The only server-side evidence that a client rendered a widget. A host
         # that never reads ``ui://autods/<name>`` never showed the grid, and

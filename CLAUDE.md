@@ -1546,6 +1546,14 @@ settles a false alarm. The subheadings are for navigation only; nothing reads th
   branch that ships. Relatedly, `ReadResourceResult` contents need an explicit
   `mime_type` — see MCP Apps bug 3 under **The MCP Apps protocol** below for what a bare
   string costs.
+- **A client may read a resource with a query string we never advertised** (RD-163, seen
+  on prod). claude.ai read `autods://playbook/tiktok_to_sourced_product?includeContent=true`.
+  `on_read_resource` used to take everything after the scheme as the playbook name, so the
+  lookup missed and the user got `Unknown resource` for a playbook that exists — a Sentry
+  `ValueError`, and nothing else. The widget lookup is an exact match on the URI and had the
+  same weakness. Both lookups now drop the query string and fragment first; the URI as sent
+  is kept for the response and the `resource_read` line. Don't go back to matching the raw
+  URI. If a resource ever needs a real parameter, parse it on purpose instead.
 - **A locally-handled operation must not inherit the manifest-level `base_url_key`**
   (RD-100). The registry resolves the manifest default onto every operation that doesn't
   set one; left unguarded, a `handler` operation would silently acquire an upstream and

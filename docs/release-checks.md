@@ -518,6 +518,12 @@ grade it `fail`, not cosmetic.
 about an unsupported method means the server stopped declaring the `resources`
 capability — a regression, not a client quirk.
 
+Then read `autods://playbook/product_import?includeContent=true` through the connected
+client's resource-read tool (in Claude Code, `ReadMcpResourceTool`).
+→ the playbook markdown comes back. An error means the server again treats the query
+string as part of the name: claude.ai sends URIs in this form, and its users then get an
+error for a playbook that exists (RD-163).
+
 **C9 — The polling cadence is delivered.** `get_bulk_action_items`' description must
 state the numbers (first poll ~10s, then every ~15s, stop after 10 attempts / ~2.5 min)
 and the 1/2 → 3/4/99 state machine; the instructions from C3 must carry the same

@@ -1,6 +1,13 @@
 # syntax=docker/dockerfile:1.7
 FROM python:3.12-slim AS base
 
+# Update OS packages; keep /var/lib/dpkg so image scanners can read the package database.
+RUN apt-get update \
+    && apt-get upgrade -y --with-new-pkgs \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

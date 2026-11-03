@@ -51,6 +51,19 @@ uv run uvicorn --factory autods_mcp_server.app:create_app --reload
 curl http://localhost:8000/health   # {"status":"ok"}
 ```
 
+Once per clone, install the git pre-commit hook. It runs
+[gitleaks](https://github.com/gitleaks/gitleaks) on the staged changes and
+refuses a commit that adds a secret:
+
+```bash
+make hooks   # uv run pre-commit install
+```
+
+The rules are gitleaks' defaults plus one allowlist in `.gitleaks.toml`: the
+`<number>=<name>` enum tables in manifest text, which the default
+`generic-api-key` rule reads as a key and value. Keep any new exception that
+narrow — limited to one rule, one path and one value shape.
+
 ### Via Docker
 
 ```bash

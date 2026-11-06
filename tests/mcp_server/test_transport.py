@@ -218,6 +218,39 @@ async def test_get_marketplace_settings_notes_reach_the_client(
     assert "get_marketplace_settings" in by_name["search_products"].description
 
 
+async def test_every_product_tool_points_to_the_regions_tool(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """Each product tool answers one "Ships To" region, so each one says where the others are.
+
+    A user asks for products "I can sell in Germany", and the search answers with
+    the listings of the user's own region. Without a pointer the model presents
+    those as fine for Germany and never calls ``get_product_regions``. The search
+    must also send the model to ``get_marketplace_settings`` first, and the regions
+    tool must say how to answer about a country that is not a named region (only
+    ALL covers it), or the model skips the tool for every country question.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    for name in (
+        "search_products",
+        "get_winning_products",
+        "get_similar_products",
+        "get_recommended_products",
+        "get_product_by_id",
+        "get_marketplace_settings",
+    ):
+        assert "get_product_regions" in by_name[name].description, name
+    regions = by_name["get_product_regions"].description
+    assert "country" in regions.lower()
+    assert "ALL" in regions
+
+
 async def test_search_products_filter_vocabulary_reaches_the_client(
     mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
 ) -> None:

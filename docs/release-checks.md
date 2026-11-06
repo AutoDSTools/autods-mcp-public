@@ -809,6 +809,27 @@ not exist, `{"product_id": "000000000000000000000000"}` → a typed
 `upstream_client_error` (not found), never `internal_error` and never a stack trace.
 If every id you try has only one region, record that as a note, not a failure.
 
+**R7.2 — the model reaches the regions tools from a destination question** (RD-178,
+RD-180). Ask the model these four questions in plain words, each in a fresh
+conversation, and note which tools it calls:
+
+1. "Find a phone holder I can sell in Germany." → it calls `get_marketplace_settings`
+   before or with `search_products`. If the setting is not DE, it says the search covers
+   only that region and checks the chosen products with `get_product_regions`. Results
+   presented as fine for Germany with no region check is a failure.
+2. "Does this product ship to Poland?" (with the P3 id) → it calls
+   `get_product_regions`. Poland is not a named region, so the answer is about the ALL
+   listing: it never claims the supplier ships to Poland itself, and it never says
+   "does not ship there" from `regions_without_data`.
+3. "What does shipping to the UK cost for this product?" (with the P3 id) → it calls
+   `get_product_regions` and answers from the UK entry, or says there is no UK listing.
+   An answer built from `get_product_by_id`'s `shipping_array` of another region is a
+   failure.
+4. "Why are prices shown in this currency?" → it calls `get_marketplace_settings`.
+
+A host that loads tools lazily may need a tool search first; that is fine, as long as
+the search finds these tools.
+
 **R8 — `get_similar_products`** `{"product_id": "<the P3 id>"}`
 → `data.results` is a list of product cards: every result has `_id`, `title`,
 `img_url` and `product_details`, and **none** has `images`, `variations` or

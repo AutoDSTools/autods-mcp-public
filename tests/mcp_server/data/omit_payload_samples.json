@@ -7,6 +7,7 @@
     "passes the boot lint and matches nothing removes nothing, and nobody notices.",
     "The RD-146 follow-up added the two store-quote writes (same upstream record as get_store_quote)",
     "and get_1688_product_details (staging offer 917560241690, 2026-09-25, cut to two variations).",
+    "get_marketplace_settings (RD-180) is a staging answer from 2026-11-06, with a fake id and cognitoUsername.",
     "Credential values are FAKE — never paste a real token into this file.",
     "Adding an omit block to an operation means adding its sample here."
   ],
@@ -230,5 +231,22 @@
         "ebay_eias": null
       }
     }
-  ]
+  ],
+  "get_marketplace_settings": {
+    "region": "US",
+    "currency": "USD",
+    "id": 1,
+    "approvalStatus": null,
+    "denialCause": null,
+    "cognitoUsername": "00000000-0000-4000-8000-000000000000",
+    "language": 1,
+    "isAccountConfigured": false,
+    "isSupplierDetailsConfigured": false,
+    "isShippingConfigured": false,
+    "isReturnPoliciesConfigured": false,
+    "isOneStoreConnected": false,
+    "isMinProducts": false,
+    "isStoreInfoFulfilled": false,
+    "isTradingPolicyConfigured": false
+  }
 }

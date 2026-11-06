@@ -62,10 +62,10 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 8 AutoDSApi ops + 7 store-quote ops + 7 ProductsResearch ops + 4 TikTok
+    # 8 AutoDSApi ops + 7 store-quote ops + 8 ProductsResearch ops + 4 TikTok
     # Analytics ops (RD-69) + 2 users ops (get_current_user, get_user_subscription)
     # + 2 supplier scan ops (RD-95) + 1 locally-served op (get_playbook).
-    assert len(by_name) == 31
+    assert len(by_name) == 32
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
@@ -183,6 +183,39 @@ async def test_get_product_regions_notes_reach_the_client(
     # Each region's own id opens with get_product_by_id, and the pointer goes back too.
     assert "get_product_by_id" in description
     assert "get_product_regions" in by_name["get_product_by_id"].description
+
+
+async def test_get_marketplace_settings_notes_reach_the_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-180: the "Ships To" setting has a tool, and the store field that looks like it says it is not.
+
+    Users read ``list_stores_api``'s ``region: null`` on a Shopify store as their
+    "Ships To" setting. That field is the marketplace country site of an eBay or
+    TikTok Shop store. So both directions must reach a client: the new tool names
+    the two fields to read and the tool it explains, and ``list_stores_api`` points
+    away from its own ``region`` to the new tool.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    tool = by_name["get_marketplace_settings"]
+    assert tool.annotations.read_only_hint is True
+    assert tool.input_schema.get("properties", {}) == {}
+    description = tool.description
+    assert "`region`" in description
+    assert "`currency`" in description
+    assert "search_products" in description
+    assert "list_stores_api" in description
+    # The pointers back to it, from the store field users mistook for it and from
+    # the search that uses it.
+    assert "get_marketplace_settings" in by_name["list_stores_api"].description
+    assert "Ships To" in by_name["list_stores_api"].description
+    assert "get_marketplace_settings" in by_name["search_products"].description
 
 
 async def test_search_products_filter_vocabulary_reaches_the_client(

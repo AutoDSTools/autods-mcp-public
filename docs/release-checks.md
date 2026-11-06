@@ -441,7 +441,7 @@ get_current_user  get_user_subscription  list_stores_api  list_products
 upload_products  publish_drafts_to_marketplace  get_bulk_action_items
 search_products  get_winning_products  get_product_by_id  get_product_regions
 get_similar_products  get_recommended_products  get_categories
-get_playbook
+get_marketplace_settings  get_playbook
 ```
 
 Check the instructions text starts with `## AutoDS MCP — start here` and matches
@@ -748,6 +748,23 @@ resolved for the rest of this section.
 No store may carry `store.autods_store_token` or `store.ebay_eias`, and `omitted`
 beside `data` lists both paths with reason `credential` (RD-146). Either field still
 present is a failure, for the same reason as in R1.
+
+**R2.1 — `get_marketplace_settings` `{}`** (RD-180) — the account's Marketplace
+"Ships To" setting.
+→ `data.region` is one of US, UK, DE, FR, IT, ES, AU, CA, BR, ALL, and `data.currency`
+is an ISO code string. Both must match what the AutoDS web app shows for this account
+(Marketplace settings). `data` carries no other field, and `omitted` beside it lists
+`id`, `cognitoUsername`, `language`, `approvalStatus`, `denialCause` and the eight `is*`
+onboarding flags, each with reason `internal_detail`. Any of them still in `data` is a
+failure: the model reads the supplier onboarding flags as facts about the user's account.
+Then run `search_products` with
+`{"body": {"order_by": {"name": "created_at", "direction": "desc"}, "limit": 1, "filters": []}}`
+→ its `data.region` and `data.currency` equal the two values above, because the search
+reads the same setting.
+Then ask the model, in plain words, "which region does my Marketplace ship to?"
+→ it calls `get_marketplace_settings`, not `list_stores_api`, and answers with that
+`region`. An answer built from a store's `region` (often `null`) is a failure: that
+field is the marketplace country site of an eBay or TikTok Shop store.
 
 **R3 — `list_products`** `{"store_ids": "<id>", "body": {"product_status": 2, "limit": 2,
 "projection": ["title", "variations.price", "total_sold_count"]}}`

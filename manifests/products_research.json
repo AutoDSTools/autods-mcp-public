@@ -1,7 +1,7 @@
 {
   "server_name": "autods-products-research",
   "domain": "products_research",
-  "operations_count": 6,
+  "operations_count": 7,
   "instructions": "",
   "operations": [
     {
@@ -246,7 +246,7 @@
       "path": "/products/{product_id}",
       "summary": "Get a single product by its id.",
       "description": "",
-      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices in the user's currency. `region` is the listing's own destination (its \"Ships To\" region): each listing has one fixed region, and it does not follow the user's \"Ships To\" setting, so a US listing reads `\"region\": \"US\"` even when that setting is Spain — that is not an error. `shipping_array` is shipping to that one region only. `warehouse` and `available_warehouses` are where the product ships from, not destinations. A winning product the caller is not entitled to see (no Product Finding Hub add-on) is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\" — that error means the entitlement is missing, not that the id is wrong or the service is down, so do not retry it and do not report a fault: say the product needs the Product Finding Hub add-on. `get_winning_products` still returns the limited free set without it.\n\nProduct images: this product's gallery (up to 8 images) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The full-size URLs stay in `data` either way — `images` (the gallery), `imgUrl` (the hero) and `variations[].img_url` (per variation). Set `include_images: true` only when the model itself has to judge a picture — it attaches base64 thumbnails and does cost vision tokens. The block also carries a `link` to this product's page in the AutoDS web app: a client that renders the card makes the title clickable, and the URL is in the block either way.",
+      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices in the user's currency. `region` is the listing's own destination (its \"Ships To\" region): each listing has one fixed region, and it does not follow the user's \"Ships To\" setting, so a US listing reads `\"region\": \"US\"` even when that setting is Spain — that is not an error. `shipping_array` is shipping to that one region only; for the same product's price and shipping in the other \"Ships To\" regions, call `get_product_regions`. `warehouse` and `available_warehouses` are where the product ships from, not destinations. A winning product the caller is not entitled to see (no Product Finding Hub add-on) is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\" — that error means the entitlement is missing, not that the id is wrong or the service is down, so do not retry it and do not report a fault: say the product needs the Product Finding Hub add-on. `get_winning_products` still returns the limited free set without it.\n\nProduct images: this product's gallery (up to 8 images) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The full-size URLs stay in `data` either way — `images` (the gallery), `imgUrl` (the hero) and `variations[].img_url` (per variation). Set `include_images: true` only when the model itself has to judge a picture — it attaches base64 thumbnails and does cost vision tokens. The block also carries a `link` to this product's page in the AutoDS web app: a client that renders the card makes the title clickable, and the URL is in the block either way.",
       "tags": [
         "products"
       ],
@@ -283,6 +283,33 @@
             "route": "marketplace_product"
           }
         ]
+      }
+    },
+    {
+      "operation_id": "get_product_regions",
+      "method": "GET",
+      "path": "/products/{product_id}/regions",
+      "summary": "Get a product's listings in all \"Ships To\" regions, with price and shipping per region.",
+      "description": "",
+      "notes": "Read-only. Use it to answer which regions a product ships to, and what it costs in each. The catalog keeps a product as a separate listing per \"Ships To\" region (US, UK, DE, FR, IT, ES, AU, CA, BR, and ALL = \"All Other Regions\"), and each listing has its own product id. Give any of those ids; the answer covers the product's listings in every region, the given listing's own region included. Regular listings and winning-product listings are matched separately: the answer for a regular product leaves out winning listings, and the reverse. The data is per region, not per country: say \"the ALL region\", never a country list.\n\nReturns `{product_id, currency, regions: [...], locked_regions, regions_without_data}`:\n\n- `regions` has one entry per region where a listing exists: `{region, product_id, updated_at, price: {min, max}, shipping: [...]}`. Its `product_id` is that region's own listing: call `get_product_by_id` with it for the full product in that region.\n- `updated_at` is per region. Each region is refreshed separately, so one region's data can be weeks or months older than another's. When the dates differ a lot, tell the user which data is old.\n- All prices, shipping prices included, are in `currency`, the user's currency.\n- `price` is the item price range over the in-stock variations (over all variations when none is in stock).\n- `shipping` belongs to the cheapest in-stock variation only, not to every variation. Each entry is `{warehouse, price, days, method, tracking, free_shipping}`. `warehouse` is where it ships FROM, not a destination. `days` is a single number, not a range. `method` can be null (always for Amazon, often for private suppliers), and on some supplier sites it is in the region's own language. `tracking` can be null when unknown.\n- `regions_without_data` lists regions where the catalog has no current listing of this product of the same kind (regular or winning). When the given listing itself was deleted, its own region is in this list too. It does NOT mean the supplier does not ship there, so never tell the user it does not ship there.\n- `locked_regions` lists regions where the product is a paid winning product and the user has no Product Finding Hub add-on. Their data is not returned; say the add-on is needed to see them.\n\nIf the given product itself is a paid winning product and the caller has no Product Finding Hub add-on, the request is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\". That error means the add-on is missing, not that the id is wrong or the service is down: do not retry it and do not report a fault, say the product needs the Product Finding Hub add-on.",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "Product id (24-character hex string) of the product's listing in any region."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Product Regions",
+        "readOnlyHint": true,
+        "destructiveHint": false
       }
     },
     {

@@ -789,6 +789,31 @@ silently rather than erroring:
 The tree arrives in a single response (there is no paging and no way to request
 one branch) and changes a few times a year, so it is a call-once-per-task read.
 
+### A product's "Ships To" regions (RD-178)
+
+The Marketplace keeps one product as a separate listing per "Ships To" region
+(US, UK, DE, FR, IT, ES, AU, CA, BR, and ALL = "All Other Regions"), and each
+listing has its own product id. `get_product_by_id` returns shipping for its own
+region only, so before this tool no MCP tool could say which regions a product
+ships to. `get_product_regions` (`manifests/products_research.json`,
+ProductsResearch `GET /products/{product_id}/regions`) takes the id of any of
+those listings and returns price and shipping for every region that has one,
+with each region's own `product_id`. The server forwards the answer unchanged.
+
+Its `notes` carry the readings that otherwise reach the user as false claims:
+
+- **`regions_without_data` is not "does not ship there".** It only means the
+  catalog has no current listing of this product, of the same kind, in that
+  region. Regular and winning-product listings are matched separately, and a
+  deleted listing's own region is reported here too.
+- **`locked_regions` and the "unexpected redirect" error mean the Product
+  Finding Hub add-on is missing**, the same as on `get_product_by_id`. Not a
+  fault, and not something to retry.
+- **`updated_at` is per region.** Regions are refreshed separately, so one can
+  be weeks or months older than another.
+- **`shipping` belongs to the cheapest in-stock variation only.** `days` is a
+  single number, `warehouse` is where it ships from, and `method` can be null.
+
 ### Product search filters (RD-107)
 
 `search_products` forwards each `filters[].name` upstream as a field name, so the

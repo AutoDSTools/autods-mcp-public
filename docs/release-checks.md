@@ -439,7 +439,7 @@ script is what settles it; presence settles it on its own.
 ```
 get_current_user  get_user_subscription  list_stores_api  list_products
 upload_products  publish_drafts_to_marketplace  get_bulk_action_items
-search_products  get_winning_products  get_product_by_id
+search_products  get_winning_products  get_product_by_id  get_product_regions
 get_similar_products  get_recommended_products  get_categories
 get_playbook
 ```
@@ -776,6 +776,21 @@ re-derive the entitlement here.
 An `upstream_error` about an *unexpected redirect* on a **winning** product means the
 caller lacks the Product Finding Hub add-on — expected per P4, not a fault, and not a
 retry. The same error on the P3 id (a normal catalog product) **is** a failure.
+
+**R7.1 — `get_product_regions`** (RD-178) — the product's listings in every
+"Ships To" region. Take a winning product id from R6 (winning products on staging
+usually have listings in several regions); fall back to the P3 id if R6 gave none.
+→ `data.product_id` equals the id you asked for, `data.currency` is present, and
+`data.regions` is a list of `{region, product_id, updated_at, price, shipping}`.
+`locked_regions` and `regions_without_data` are both lists (empty is fine). Look for
+an id whose `regions` has **more than one** entry and call `get_product_by_id` with
+the `product_id` of a region other than the one you asked for → it opens, and its
+`region` equals that entry's `region`. Note in the report how many regions it had.
+The same *unexpected redirect* rule as R7 applies to a winning product without the
+add-on: expected per P4, not a fault. Then call it with a well-formed id that does
+not exist, `{"product_id": "000000000000000000000000"}` → a typed
+`upstream_client_error` (not found), never `internal_error` and never a stack trace.
+If every id you try has only one region, record that as a note, not a failure.
 
 **R8 — `get_similar_products`** `{"product_id": "<the P3 id>"}`
 → `data.results` is a list of product cards: every result has `_id`, `title`,

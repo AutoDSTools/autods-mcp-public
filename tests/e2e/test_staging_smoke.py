@@ -55,6 +55,7 @@ PRODUCTS_RESEARCH_OPS = {
     "search_products",
     "get_winning_products",
     "get_product_by_id",
+    "get_product_regions",
     "get_similar_products",
     "get_recommended_products",
     "get_categories",
@@ -368,12 +369,19 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         # --- ScrapersAPI: supplier scans (RD-95) ---
         await _smoke_supplier_scans(call, product_images, failures, skipped)
 
-        # These three need a real product id; a 307 (subscription-gated winning
-        # product) is a documented business response for get_product_by_id.
+        # These four need a real product id; a 307 (subscription-gated winning
+        # product) is a documented business response for get_product_by_id and
+        # get_product_regions.
         if product_id is not None:
             _record(
                 "get_product_by_id",
                 await call("get_product_by_id", {"product_id": product_id}),
+                failures,
+                frozenset({"upstream_error"}),
+            )
+            _record(
+                "get_product_regions",
+                await call("get_product_regions", {"product_id": product_id}),
                 failures,
                 frozenset({"upstream_error"}),
             )
@@ -390,7 +398,7 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
                 frozenset(),
             )
         else:
-            skipped += ["get_product_by_id", "get_similar_products", "get_recommended_products"]
+            skipped += ["get_product_by_id", "get_product_regions", "get_similar_products", "get_recommended_products"]
 
         # --- AutoDSApi: stores (also discover store ids to reuse) ---
         stores = await call("list_stores_api", {})

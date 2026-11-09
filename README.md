@@ -167,6 +167,46 @@ The callback path differs per environment (`j1OexN-34suD` for staging,
 environment's `MCP_REGISTRATION_REDIRECT_URIS` exactly. Loosening the
 server-side allowlist does not help; Cognito still rejects a mismatch.
 
+### Cursor
+
+Cursor (desktop) needs no OAuth settings of its own. Add the server in
+**Customize → MCPs** (it opens `~/.cursor/mcp.json`), or edit that file
+directly:
+
+```json
+{
+  "mcpServers": {
+    "autods-public-staging": {
+      "url": "https://mcp-staging.autods.com/mcp"
+    },
+    "autods-public-prod": {
+      "url": "https://mcp.autods.com/mcp"
+    }
+  }
+}
+```
+
+The server then appears in the same menu with a **Connect** button, which
+opens the browser sign-in.
+
+Cursor registers all three of its redirect URIs in one request, and then
+uses one of them for sign-in. Which one it uses depends on Cursor's own
+feature flags. So all three are allowlisted in staging and production, both in
+`MCP_REGISTRATION_REDIRECT_URIS` and on the Cognito app client (RD-181):
+
+- `cursor://anysphere.cursor-mcp/oauth/callback`
+- `https://www.cursor.com/agents/mcp/oauth/callback`
+- `http://localhost:8787/callback`
+
+If even one of them is missing from `MCP_REGISTRATION_REDIRECT_URIS`,
+registration fails with `invalid_redirect_uri: redirect_uris not in
+allowlist`. They are not in `.env.example`, so add them to your `.env` to
+connect Cursor to a local server.
+
+If the server does not appear in the menu after you save, check that
+`mcp.json` is valid JSON. Cursor ignores a file it cannot parse and shows no
+error. OAuth errors are in **Output → MCP Logs**.
+
 ### MCP Inspector (local debugging)
 
 The MCP Inspector at `http://localhost:6274` points at a local server
@@ -1238,13 +1278,14 @@ choice here:
   `Google_<sub>` identity sharing one email that Cognito won't auto-merge); *all* users
   failing points at global config (scopes, redirect-URI allowlist, or `client_id`).
 - **Connecting a new MCP client.** See *Connecting a client* above for the per-environment
-  endpoints and the ready-made Claude Code / Claude web+desktop / Codex recipes. The root
+  endpoints and the ready-made Claude Code / Claude web+desktop / Codex / Cursor recipes. The root
   cause any new client hits: Cognito exact-matches redirect URIs — no random loopback ports,
   no path wildcards — so the client must use a stable callback that is both pre-registered on
   the Cognito app client and listed in `MCP_REGISTRATION_REDIRECT_URIS`. Claude Code does this
   with `--callback-port 2048`; Codex needs `mcp_oauth_callback_port` / `mcp_oauth_callback_url`
-  set (its default random port+path can never match). Loosening the server-side allowlist does
-  not help — Cognito still rejects it.
+  set (its default random port+path can never match). Cursor sends three fixed URIs in one
+  registration request, and the request fails unless all three are allowlisted (see *Cursor*
+  above). Loosening the server-side allowlist does not help — Cognito still rejects it.
 - **`search_products` errors on a call that looks fine, and the error type says which
   kind of mistake it is.** Three groups, all documented on the parameters that take
   them — a client hitting one is following stale guidance, not a server fault:

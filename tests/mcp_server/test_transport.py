@@ -7,6 +7,7 @@ end-to-end ``tools/call`` that forwards the caller's bearer token to a mocked
 upstream — verifying the full middleware → auth → transport → dispatcher path.
 """
 
+import json
 from pathlib import Path
 
 import anyio
@@ -16,6 +17,7 @@ import sentry_sdk
 from fastapi.testclient import TestClient
 from sentry_sdk.transport import Transport
 
+from autods_mcp_server.errors import map_upstream_error
 from autods_mcp_server.sentry import init_sentry
 from autods_mcp_server.settings import Settings
 from tests.mcp_server.conftest import TEST_CLIENT_ID, TEST_POOL, mcp_client_session
@@ -60,10 +62,10 @@ async def test_products_manifest_lists_annotated_tools(
         tools = await session.list_tools()
 
     by_name = {tool.name: tool for tool in tools.tools}
-    # 8 AutoDSApi ops + 7 store-quote ops + 6 ProductsResearch ops + 4 TikTok
+    # 8 AutoDSApi ops + 7 store-quote ops + 8 ProductsResearch ops + 4 TikTok
     # Analytics ops (RD-69) + 2 users ops (get_current_user, get_user_subscription)
     # + 2 supplier scan ops (RD-95) + 1 locally-served op (get_playbook).
-    assert len(by_name) == 30
+    assert len(by_name) == 32
     tool = by_name["upload_products"]
     assert tool.annotations.title == "Upload Products"
     assert tool.annotations.read_only_hint is False
@@ -135,6 +137,118 @@ async def test_get_categories_notes_reach_the_client(
     assert "subtree" in description
     # The pointer back is on search_products too, or the tree is a dead end.
     assert "get_categories" in by_description["search_products"]
+
+
+async def test_get_product_regions_notes_reach_the_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-178: the readings an agent gets wrong arrive *at a client*.
+
+    The tool takes only a product id, so how to read the answer lives in its
+    tier-2 ``notes``. The two wrong readings that reach a user as false claims:
+    "no data for a region" read as "does not ship there", and the add-on redirect
+    read as a fault.
+
+    The test does not pin the wording of the notes. It checks that the notes
+    arrive whole, and that they name the things an agent has to match against:
+    the response fields, the error the client really receives, the add-on and
+    the follow-up tool.
+    """
+    manifest = json.loads((bundled_manifest_dir / "products_research.json").read_text())
+    notes = next(op["notes"] for op in manifest["operations"] if op["operation_id"] == "get_product_regions")
+
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    tool = by_name["get_product_regions"]
+    assert tool.annotations.read_only_hint is True
+    description = tool.description
+    # The notes reach the client whole, whatever they say.
+    assert notes.strip() in description
+    # Both response fields are explained, and the regions_without_data entry
+    # is about shipping: that is where the "does not ship there" warning lives.
+    without_data = [line for line in notes.splitlines() if line.startswith("- `regions_without_data`")]
+    assert len(without_data) == 1
+    assert "ship" in without_data[0].lower()
+    assert "locked_regions" in description
+    # The notes quote the error a client really gets for the add-on redirect.
+    redirect_error = map_upstream_error(307, {"message": "add-on"}).result.content[0].text
+    assert "unexpected redirect" in redirect_error
+    assert "unexpected redirect" in description
+    assert "Product Finding Hub" in description
+    # Each region's own id opens with get_product_by_id, and the pointer goes back too.
+    assert "get_product_by_id" in description
+    assert "get_product_regions" in by_name["get_product_by_id"].description
+
+
+async def test_get_marketplace_settings_notes_reach_the_client(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """RD-180: the "Ships To" setting has a tool, and the store field that looks like it says it is not.
+
+    Users read ``list_stores_api``'s ``region: null`` on a Shopify store as their
+    "Ships To" setting. That field is the marketplace country site of an eBay or
+    TikTok Shop store. So both directions must reach a client: the new tool names
+    the two fields to read and the tool it explains, and ``list_stores_api`` points
+    away from its own ``region`` to the new tool.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    tool = by_name["get_marketplace_settings"]
+    assert tool.annotations.read_only_hint is True
+    assert tool.input_schema.get("properties", {}) == {}
+    description = tool.description
+    assert "`region`" in description
+    assert "`currency`" in description
+    assert "search_products" in description
+    assert "list_stores_api" in description
+    # The pointers back to it, from the store field users mistook for it and from
+    # the search that uses it.
+    assert "get_marketplace_settings" in by_name["list_stores_api"].description
+    assert "Ships To" in by_name["list_stores_api"].description
+    assert "get_marketplace_settings" in by_name["search_products"].description
+
+
+async def test_every_product_tool_points_to_the_regions_tool(
+    mcp_settings, make_mcp_app, bundled_manifest_dir: Path, access_token
+) -> None:
+    """Each product tool answers one "Ships To" region, so each one says where the others are.
+
+    A user asks for products "I can sell in Germany", and the search answers with
+    the listings of the user's own region. Without a pointer the model presents
+    those as fine for Germany and never calls ``get_product_regions``. The search
+    must also send the model to ``get_marketplace_settings`` first, and the regions
+    tool must say how to answer about a country that is not a named region (only
+    ALL covers it), or the model skips the tool for every country question.
+    """
+    settings = mcp_settings(manifest_dir=bundled_manifest_dir)
+    app, runtime = make_mcp_app(settings)
+
+    async with mcp_client_session(app, runtime, token=access_token) as session:
+        tools = await session.list_tools()
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    for name in (
+        "search_products",
+        "get_winning_products",
+        "get_similar_products",
+        "get_recommended_products",
+        "get_product_by_id",
+        "get_marketplace_settings",
+    ):
+        assert "get_product_regions" in by_name[name].description, name
+    regions = by_name["get_product_regions"].description
+    assert "country" in regions.lower()
+    assert "ALL" in regions
 
 
 async def test_search_products_filter_vocabulary_reaches_the_client(

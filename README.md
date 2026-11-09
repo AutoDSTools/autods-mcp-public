@@ -51,6 +51,19 @@ uv run uvicorn --factory autods_mcp_server.app:create_app --reload
 curl http://localhost:8000/health   # {"status":"ok"}
 ```
 
+Once per clone, install the git pre-commit hook. It runs
+[gitleaks](https://github.com/gitleaks/gitleaks) on the staged changes and
+refuses a commit that adds a secret:
+
+```bash
+make hooks   # uv run pre-commit install
+```
+
+The rules are gitleaks' defaults plus one allowlist in `.gitleaks.toml`: the
+`<number>=<name>` enum tables in manifest text, which the default
+`generic-api-key` rule reads as a key and value. Keep any new exception that
+narrow — limited to one rule, one path and one value shape.
+
 ### Via Docker
 
 ```bash
@@ -502,6 +515,7 @@ These tools use it today:
 | `get_store_quote`, `list_store_quotes`, `set_store_quote_shipping_option`, `request_manual_sourcing` | `shipping_options` (`results.*.shipping_options` on the list) | all four answer the same store-quote record; the upstream repeats every option in this list several times, and `list_store_quote_shipping_options` returns each once |
 | `get_1688_product_details` | `data.*.variations.*.shipping_by_region.US`, `data.*.shipping_by_region.US` | a copy of `shipping`, which the upstream fills from exactly this key. Other countries stay. One 20-variation offer went from 378 KB to 199 KB on staging |
 | `get_current_user` | `*.intercom_user_jwt` | credential |
+| `get_marketplace_settings` | every field but `region` and `currency`: `id`, `cognitoUsername`, `language`, `approvalStatus`, `denialCause` and the eight `is*` onboarding flags | internal detail: ids, and the state of the Marketplace *supplier* program, which the model reads as facts about the user's account (`isOneStoreConnected: false` next to a list of stores) |
 | `list_stores_api` | `*.store.autods_store_token`, `*.store.ebay_eias` | credentials |
 
 Every shipped path is tested against a recorded upstream answer
@@ -775,6 +789,53 @@ silently rather than erroring:
 
 The tree arrives in a single response (there is no paging and no way to request
 one branch) and changes a few times a year, so it is a call-once-per-task read.
+
+### A product's "Ships To" regions (RD-178)
+
+The Marketplace keeps one product as a separate listing per "Ships To" region
+(US, UK, DE, FR, IT, ES, AU, CA, BR, and ALL = "All Other Regions"), and each
+listing has its own product id. `get_product_by_id` returns shipping for its own
+region only, so before this tool no MCP tool could say which regions a product
+ships to. `get_product_regions` (`manifests/products_research.json`,
+ProductsResearch `GET /products/{product_id}/regions`) takes the id of any of
+those listings and returns price and shipping for every region that has one,
+with each region's own `product_id`. The server forwards the answer unchanged.
+
+Its `notes` carry the readings that otherwise reach the user as false claims:
+
+- **`regions_without_data` is not "does not ship there".** It only means the
+  catalog has no current listing of this product, of the same kind, in that
+  region. Regular and winning-product listings are matched separately, and a
+  deleted listing's own region is reported here too.
+- **`locked_regions` and the "unexpected redirect" error mean the Product
+  Finding Hub add-on is missing**, the same as on `get_product_by_id`. Not a
+  fault, and not something to retry.
+- **`updated_at` is per region.** Regions are refreshed separately, so one can
+  be weeks or months older than another.
+- **`shipping` belongs to the cheapest in-stock variation only.** `days` is a
+  single number, `warehouse` is where it ships from, and `method` can be null.
+
+### The account's "Ships To" setting (RD-180)
+
+The Marketplace "Ships To" region and the currency are one setting per user,
+not per store. `search_products` searches only in that region and returns
+prices in that currency, so the model needs the setting to explain results.
+`get_marketplace_settings` (`manifests/products_research.json`,
+ProductsResearch `GET /user_settings/`) reads it. It takes no parameters. The
+upstream answer also carries ids, the UI language, and the onboarding and
+moderation state of the Marketplace supplier program; the tool's `omit` block
+removes all of those (see **Removing fields from a response**), so the model
+gets only `region` and `currency`. The setting can only be changed in the
+AutoDS web app.
+
+The setting is deliberately not added to `get_current_user`. That tool reads
+AutoDSApi, and the server uses it for identity.
+
+`list_stores_api` also has a `region` field, and users read it as this
+setting. It is not: it is the marketplace country site the store is connected
+through, set only for eBay and TikTok Shop stores, so it is `null` for
+Shopify, WooCommerce, Etsy and the others. Its `notes` say so and point to the
+new tool.
 
 ### Product search filters (RD-107)
 

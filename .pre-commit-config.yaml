@@ -1,0 +1,7 @@
+# Install once per clone: `make hooks`. The gitleaks hook scans the staged
+# changes and reads .gitleaks.toml from the repo root (DEV-1174).
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

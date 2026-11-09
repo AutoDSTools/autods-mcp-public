@@ -1,7 +1,12 @@
-.PHONY: install run test release-checks release-checks-c lint fmt
+.PHONY: install hooks run test release-checks release-checks-c lint fmt
 
 install:
 	uv sync
+
+# Installs the git pre-commit hook from .pre-commit-config.yaml (gitleaks).
+# Once per clone.
+hooks:
+	uv run pre-commit install
 
 run:
 	uv run uvicorn --factory autods_mcp_server.app:create_app --reload

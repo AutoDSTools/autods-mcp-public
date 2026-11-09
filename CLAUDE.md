@@ -17,6 +17,7 @@ bare `pip`/`venv`/`python` — and not `uvx` either (see the mcp gotcha).
 
 ```bash
 make install           # uv sync (installs dev + test groups)
+make hooks             # uv run pre-commit install — the gitleaks hook, once per clone
 make run               # uv run uvicorn --factory autods_mcp_server.app:create_app --reload
 make test              # uv run pytest
 make lint              # ruff check . && ruff format --check .

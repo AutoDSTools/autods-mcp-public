@@ -37,12 +37,13 @@ def test_loads_vendored_products_manifest(bundled_manifest_dir: Path) -> None:
     # 8 AutoDSApi ops (products/stores/bulk_actions, incl. RD-94's
     # link_quoted_product and RD-96's find_product_by_buy_id) + 7 store-quote
     # ops (4 reads + RD-94's 3 writes)
-    # + 6 ProductsResearch ops
+    # + 8 ProductsResearch ops (incl. RD-178's get_product_regions and
+    # RD-180's get_marketplace_settings)
     # + 4 TikTok Analytics ops (RD-69, also on ProductsResearch)
     # + 2 users ops (get_current_user, get_user_subscription)
     # + 2 supplier scan ops (RD-95)
     # + 1 locally-served op (get_playbook).
-    assert len(operations) == 30
+    assert len(operations) == 32
     assert all(isinstance(op, ManifestOperation) for op in operations)
 
     op = registry.get("upload_products")
@@ -61,9 +62,11 @@ def test_loads_products_research_manifest(bundled_manifest_dir: Path) -> None:
         "search_products",
         "get_winning_products",
         "get_product_by_id",
+        "get_product_regions",
         "get_similar_products",
         "get_recommended_products",
         "get_categories",
+        "get_marketplace_settings",
     }
     for operation_id in expected:
         op = registry.get(operation_id)

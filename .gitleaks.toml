@@ -1,0 +1,18 @@
+# gitleaks configuration (DEV-1174). Used by the pre-commit hook and by
+# `gitleaks git` / `gitleaks dir` run from the repo root.
+
+[extend]
+useDefault = true
+
+# Manifest text documents enum tables as `<number>=<snake_case_name>`
+# (for example "7=etsy_api, 8=etsy_non_api" in manifests/stores.json).
+# The default generic-api-key rule reads "etsy_api," as a key name followed
+# by a separator, and the next entry as its value. Only that shape is
+# allowed, and only in manifests: a real token in a manifest is still found.
+[[allowlists]]
+description = "Enum tables in manifest text"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^manifests/.*\.json$''']
+regexTarget = "secret"
+regexes = ['''^\d+=[a-z][a-z0-9_]*$''']

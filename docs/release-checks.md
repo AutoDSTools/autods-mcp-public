@@ -439,9 +439,9 @@ script is what settles it; presence settles it on its own.
 ```
 get_current_user  get_user_subscription  list_stores_api  list_products
 upload_products  publish_drafts_to_marketplace  get_bulk_action_items
-search_products  get_winning_products  get_product_by_id
+search_products  get_winning_products  get_product_by_id  get_product_regions
 get_similar_products  get_recommended_products  get_categories
-get_playbook
+get_marketplace_settings  get_playbook
 ```
 
 Check the instructions text starts with `## AutoDS MCP — start here` and matches
@@ -749,6 +749,23 @@ No store may carry `store.autods_store_token` or `store.ebay_eias`, and `omitted
 beside `data` lists both paths with reason `credential` (RD-146). Either field still
 present is a failure, for the same reason as in R1.
 
+**R2.1 — `get_marketplace_settings` `{}`** (RD-180) — the account's Marketplace
+"Ships To" setting.
+→ `data.region` is one of US, UK, DE, FR, IT, ES, AU, CA, BR, ALL, and `data.currency`
+is an ISO code string. Both must match what the AutoDS web app shows for this account
+(Marketplace settings). `data` carries no other field, and `omitted` beside it lists
+`id`, `cognitoUsername`, `language`, `approvalStatus`, `denialCause` and the eight `is*`
+onboarding flags, each with reason `internal_detail`. Any of them still in `data` is a
+failure: the model reads the supplier onboarding flags as facts about the user's account.
+Then run `search_products` with
+`{"body": {"order_by": {"name": "created_at", "direction": "desc"}, "limit": 1, "filters": []}}`
+→ its `data.region` and `data.currency` equal the two values above, because the search
+reads the same setting.
+Then ask the model, in plain words, "which region does my Marketplace ship to?"
+→ it calls `get_marketplace_settings`, not `list_stores_api`, and answers with that
+`region`. An answer built from a store's `region` (often `null`) is a failure: that
+field is the marketplace country site of an eBay or TikTok Shop store.
+
 **R3 — `list_products`** `{"store_ids": "<id>", "body": {"product_status": 2, "limit": 2,
 "projection": ["title", "variations.price", "total_sold_count"]}}`
 → `data.results` is a list, and each item carries **only** the projected fields plus
@@ -776,6 +793,42 @@ re-derive the entitlement here.
 An `upstream_error` about an *unexpected redirect* on a **winning** product means the
 caller lacks the Product Finding Hub add-on — expected per P4, not a fault, and not a
 retry. The same error on the P3 id (a normal catalog product) **is** a failure.
+
+**R7.1 — `get_product_regions`** (RD-178) — the product's listings in every
+"Ships To" region. Take a winning product id from R6 (winning products on staging
+usually have listings in several regions); fall back to the P3 id if R6 gave none.
+→ `data.product_id` equals the id you asked for, `data.currency` is present, and
+`data.regions` is a list of `{region, product_id, updated_at, price, shipping}`.
+`locked_regions` and `regions_without_data` are both lists (empty is fine). Look for
+an id whose `regions` has **more than one** entry and call `get_product_by_id` with
+the `product_id` of a region other than the one you asked for → it opens, and its
+`region` equals that entry's `region`. Note in the report how many regions it had.
+The same *unexpected redirect* rule as R7 applies to a winning product without the
+add-on: expected per P4, not a fault. Then call it with a well-formed id that does
+not exist, `{"product_id": "000000000000000000000000"}` → a typed
+`upstream_client_error` (not found), never `internal_error` and never a stack trace.
+If every id you try has only one region, record that as a note, not a failure.
+
+**R7.2 — the model reaches the regions tools from a destination question** (RD-178,
+RD-180). Ask the model these four questions in plain words, each in a fresh
+conversation, and note which tools it calls:
+
+1. "Find a phone holder I can sell in Germany." → it calls `get_marketplace_settings`
+   before or with `search_products`. If the setting is not DE, it says the search covers
+   only that region and checks the chosen products with `get_product_regions`. Results
+   presented as fine for Germany with no region check is a failure.
+2. "Does this product ship to Poland?" (with the P3 id) → it calls
+   `get_product_regions`. Poland is not a named region, so the answer is about the ALL
+   listing: it never claims the supplier ships to Poland itself, and it never says
+   "does not ship there" from `regions_without_data`.
+3. "What does shipping to the UK cost for this product?" (with the P3 id) → it calls
+   `get_product_regions` and answers from the UK entry, or says there is no UK listing.
+   An answer built from `get_product_by_id`'s `shipping_array` of another region is a
+   failure.
+4. "Why are prices shown in this currency?" → it calls `get_marketplace_settings`.
+
+A host that loads tools lazily may need a tool search first; that is fine, as long as
+the search finds these tools.
 
 **R8 — `get_similar_products`** `{"product_id": "<the P3 id>"}`
 → `data.results` is a list of product cards: every result has `_id`, `title`,

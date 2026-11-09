@@ -28,7 +28,7 @@ from mcp import types
 
 from tests.mcp_server.conftest import mcp_client_session
 
-# The full registered tool set (17 AutoDSApi ops + 10 ProductsResearch ops + 2
+# The full registered tool set (17 AutoDSApi ops + 12 ProductsResearch ops + 2
 # ScrapersAPI ops + 1 op this server answers itself). Used both to assert tools/list and to drive the
 # per-op smoke calls, so it has to track the manifests by hand — the same
 # hand-maintained count as the loader/transport assertions.
@@ -55,9 +55,11 @@ PRODUCTS_RESEARCH_OPS = {
     "search_products",
     "get_winning_products",
     "get_product_by_id",
+    "get_product_regions",
     "get_similar_products",
     "get_recommended_products",
     "get_categories",
+    "get_marketplace_settings",
     # RD-69: TikTok Analytics, on the same upstream.
     "get_tiktok_products",
     "get_tiktok_product_details",
@@ -308,6 +310,29 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
             product_id = _first_product_id((search.structured_content or {}).get("data"))
             product_images = _first_product_images((search.structured_content or {}).get("data"))
 
+        # RD-180: the "Ships To" setting. The search answers with the region and
+        # currency it used, which come from this same setting, so the two must agree.
+        settings = await call("get_marketplace_settings", {})
+        _record("get_marketplace_settings", settings, failures, frozenset())
+        if not settings.is_error:
+            settings_data = (settings.structured_content or {}).get("data")
+            if not isinstance(settings_data, dict) or not {"region", "currency"} <= settings_data.keys():
+                failures.append("get_marketplace_settings: response carries no 'region'/'currency'")
+                settings_data = None
+            elif extra := sorted(settings_data.keys() - {"region", "currency"}):
+                # The omit block should leave only these two. A key here is either an
+                # omit path that no longer matches (renamed upstream) or a new field
+                # someone has to look at.
+                failures.append(f"get_marketplace_settings: fields the omit block did not remove: {extra}")
+            if settings_data is not None and not search.is_error:
+                search_data = (search.structured_content or {}).get("data") or {}
+                for key in ("region", "currency"):
+                    if key in search_data and search_data[key] != settings_data[key]:
+                        failures.append(
+                            f"get_marketplace_settings: {key} {settings_data[key]!r} "
+                            f"differs from search_products' {search_data[key]!r}"
+                        )
+
         # RD-108: the category tree, and the reason it exists — a top-level id
         # has to come back with products under it, since the filter matches a
         # whole subtree.
@@ -368,12 +393,19 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
         # --- ScrapersAPI: supplier scans (RD-95) ---
         await _smoke_supplier_scans(call, product_images, failures, skipped)
 
-        # These three need a real product id; a 307 (subscription-gated winning
-        # product) is a documented business response for get_product_by_id.
+        # These four need a real product id; a 307 (subscription-gated winning
+        # product) is a documented business response for get_product_by_id and
+        # get_product_regions.
         if product_id is not None:
             _record(
                 "get_product_by_id",
                 await call("get_product_by_id", {"product_id": product_id}),
+                failures,
+                frozenset({"upstream_error"}),
+            )
+            _record(
+                "get_product_regions",
+                await call("get_product_regions", {"product_id": product_id}),
                 failures,
                 frozenset({"upstream_error"}),
             )
@@ -390,7 +422,7 @@ async def test_every_registered_op_smoke(staging_app, access_token, staging_conf
                 frozenset(),
             )
         else:
-            skipped += ["get_product_by_id", "get_similar_products", "get_recommended_products"]
+            skipped += ["get_product_by_id", "get_product_regions", "get_similar_products", "get_recommended_products"]
 
         # --- AutoDSApi: stores (also discover store ids to reuse) ---
         stores = await call("list_stores_api", {})

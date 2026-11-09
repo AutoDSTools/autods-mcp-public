@@ -35,6 +35,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ruff>=0.7.0",
+    "pre-commit>=4.0",
 ]
 test = [
     "fakeredis>=2.21",

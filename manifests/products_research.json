@@ -1,7 +1,7 @@
 {
   "server_name": "autods-products-research",
   "domain": "products_research",
-  "operations_count": 6,
+  "operations_count": 8,
   "instructions": "",
   "operations": [
     {
@@ -10,7 +10,7 @@
       "path": "/products/",
       "summary": "Search the product-research catalog by filter.",
       "description": "",
-      "notes": "Read-only POST. Searches the product-research catalog and returns `{results: [...], region, currency}`. Winning products and deleted products are excluded automatically.\n\nThe body is a filter object. `order_by` ({name, direction}) and `filters` are both REQUIRED. `filters` is a list of {name, value, value_type, op}, all combined with AND; an unfiltered listing is `filters: []` — a body with no `filters` key at all is refused before the call is made, because the upstream answers that shape with an error rather than a listing. The whole filter vocabulary, with the `value_type` and `op` each field takes, is documented on the `filters[].name` parameter; the three most useful: free text is `{name: \"search_query\", value_type: \"string\", op: \"search\"}`, the AutoDS Marketplace is `{name: \"site_name\", value: \"private_suppliers\", value_type: \"list\", op: \"in\"}`, and a category is `{name: \"categories.autods_category_id.$id\", value_type: \"objectId\", op: \"=\"}` with an id from `get_categories` (a parent id matches every product in its whole subtree). `region` is resolved from the user's settings server-side and is ignored if sent.\n\nThree things about the response a caller gets wrong otherwise:\n\n- **Results are card-shaped, not full products.** Each result carries 12 fields — the ids, `title`, `images`, `categories`, `site_name`, `supplier_name`, `private_supplier`, `product_details` and the winning-product flags. Fields you can *filter* on are not all fields you *get back*: `rating`, `description`, `brand`, `url` and the per-variation details are absent here. Call `get_product_by_id` with a result's `_id` for the full document.\n- **No total count is returned.** Page with `offset`/`limit` (default limit 10) and stop on an empty page — but read the next bullet before treating a short page as the end.\n- **Paging ends at 10,000 results, and the final page comes back short rather than empty.** An `offset` beyond that window is refused as `invalid_arguments` (it is capped at 9999 in this schema), but a page that merely runs past the ceiling from inside the window is silently truncated instead — `offset: 9999, limit: 2` returns one result. So a short page near the ceiling is not proof the catalog is exhausted; narrow the filters instead of paging on.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
+      "notes": "Read-only POST. Searches the product-research catalog and returns `{results: [...], region, currency}`. Winning products and deleted products are excluded automatically. So an empty result for a search by a winning product's `_id` means it is excluded here, not that it is unavailable in the region: read it with `get_product_by_id`, or list winning products with `get_winning_products`.\n\nResults are only listings for the user's \"Ships To\" region, which the server takes from the user's settings; a `region` sent here is ignored. When the user asks for products for a destination (a country or a region), call `get_marketplace_settings` first. If the destination is not that region, tell the user this search covers only that region, check the chosen products with `get_product_regions`, and say that searching the other region itself needs the \"Ships To\" setting changed in the AutoDS web app.\n\nThe body is a filter object. `order_by` ({name, direction}) and `filters` are both REQUIRED. `filters` is a list of {name, value, value_type, op}, all combined with AND; an unfiltered listing is `filters: []` — a body with no `filters` key at all is refused before the call is made, because the upstream answers that shape with an error rather than a listing. The whole filter vocabulary, with the `value_type` and `op` each field takes, is documented on the `filters[].name` parameter; the three most useful: free text is `{name: \"search_query\", value_type: \"string\", op: \"search\"}`, the AutoDS Marketplace is `{name: \"site_name\", value: \"private_suppliers\", value_type: \"list\", op: \"in\"}`, and a category is `{name: \"categories.autods_category_id.$id\", value_type: \"objectId\", op: \"=\"}` with an id from `get_categories` (a parent id matches every product in its whole subtree).\n\nThree things about the response a caller gets wrong otherwise:\n\n- **Results are card-shaped, not full products.** Each result carries 12 fields — the ids, `title`, `images`, `categories`, `site_name`, `supplier_name`, `private_supplier`, `product_details` and the winning-product flags. Fields you can *filter* on are not all fields you *get back*: `rating`, `description`, `brand`, `url` and the per-variation details are absent here. Call `get_product_by_id` with a result's `_id` for the full document.\n- **No total count is returned.** Page with `offset`/`limit` (default limit 10) and stop on an empty page — but read the next bullet before treating a short page as the end.\n- **Paging ends at 10,000 results, and the final page comes back short rather than empty.** An `offset` beyond that window is refused as `invalid_arguments` (it is capped at 9999 in this schema), but a page that merely runs past the ceiling from inside the window is silently truncated instead — `offset: 9999, limit: 2` returns one result. So a short page near the ceiling is not proof the catalog is exhausted; narrow the filters instead of paging on.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -139,7 +139,7 @@
       "path": "/products/winning",
       "summary": "List winning products with optional discovery filters.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (24-character hex id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
+      "notes": "Read-only. Returns {results: [...]} of winning products. `offset`, `limit` (1-100) and `sort` are required. `sort` is a field name; prefix with `-` for descending (e.g. -created_at, -orders_count). Optional filters: category (24-character hex id), ads (advertising platform name, e.g. Facebook/TikTok), orders (min order count), profit / item_cost (range buckets like 10-20 or 100-), created_date (day window: 0=today,1,7,14,30), search (free text). Without the Product Finding Hub subscription the service returns a limited free set. Each result is the product's listing for one \"Ships To\" region; for its price and shipping in the other regions, call `get_product_regions` with its `_id`.\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -246,7 +246,7 @@
       "path": "/products/{product_id}",
       "summary": "Get a single product by its id.",
       "description": "",
-      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices/region normalised to the user's settings. A winning product the caller is not entitled to see (no Product Finding Hub add-on) is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\" — that error means the entitlement is missing, not that the id is wrong or the service is down, so do not retry it and do not report a fault: say the product needs the Product Finding Hub add-on. `get_winning_products` still returns the limited free set without it.\n\nProduct images: this product's gallery (up to 8 images) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The full-size URLs stay in `data` either way — `images` (the gallery), `imgUrl` (the hero) and `variations[].img_url` (per variation). Set `include_images: true` only when the model itself has to judge a picture — it attaches base64 thumbnails and does cost vision tokens. The block also carries a `link` to this product's page in the AutoDS web app: a client that renders the card makes the title clickable, and the URL is in the block either way.",
+      "notes": "Read-only. Returns the full product document for the given product id (24-character hex string), with prices in the user's currency. For price and shipping to any other destination, call `get_product_regions`: this answer covers one region only. `region` is the listing's own destination (its \"Ships To\" region): each listing has one fixed region, and it does not follow the user's \"Ships To\" setting, so a US listing reads `\"region\": \"US\"` even when that setting is Spain — that is not an error. `shipping_array` is shipping to that one region only. `warehouse` and `available_warehouses` are where the product ships from, not destinations. A winning product the caller is not entitled to see (no Product Finding Hub add-on) is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\" — that error means the entitlement is missing, not that the id is wrong or the service is down, so do not retry it and do not report a fault: say the product needs the Product Finding Hub add-on. `get_winning_products` still returns the limited free set without it.\n\nProduct images: this product's gallery (up to 8 images) also arrives in an `images` block beside `data`, each rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows it as a card with a clickable gallery, at no vision-token cost; the others show the URLs. The full-size URLs stay in `data` either way — `images` (the gallery), `imgUrl` (the hero) and `variations[].img_url` (per variation). Set `include_images: true` only when the model itself has to judge a picture — it attaches base64 thumbnails and does cost vision tokens. The block also carries a `link` to this product's page in the AutoDS web app: a client that renders the card makes the title clickable, and the URL is in the block either way.",
       "tags": [
         "products"
       ],
@@ -286,12 +286,39 @@
       }
     },
     {
+      "operation_id": "get_product_regions",
+      "method": "GET",
+      "path": "/products/{product_id}/regions",
+      "summary": "Which destinations (\"Ships To\" regions) a product ships to, with price, shipping cost and delivery days in each.",
+      "description": "",
+      "notes": "Read-only. Call it when the user asks whether a product ships to a country or region, what shipping costs or how long delivery takes there, or in which markets the product can be sold. Every other product tool returns one region's listing only.The catalog keeps a product as a separate listing per \"Ships To\" region (US, UK, DE, FR, IT, ES, AU, CA, BR, and ALL = \"All Other Regions\"), and each listing has its own product id. Give any of those ids; the answer covers the product's listings in every region, the given listing's own region included. Regular listings and winning-product listings are matched separately: the answer for a regular product leaves out winning listings, and the reverse. The data is per region, not per country. For a country, use its region. A country that is not one of the nine named regions is covered only by ALL: say the product has an ALL listing, and do not claim the supplier ships to that country. Never turn ALL into a country list.\n\nReturns `{product_id, currency, regions: [...], locked_regions, regions_without_data}`:\n\n- `regions` has one entry per region where a listing exists: `{region, product_id, updated_at, price: {min, max}, shipping: [...]}`. Its `product_id` is that region's own listing: call `get_product_by_id` with it for the full product in that region.\n- `updated_at` is per region. Each region is refreshed separately, so one region's data can be weeks or months older than another's. When the dates differ a lot, tell the user which data is old.\n- All prices, shipping prices included, are in `currency`, the user's currency.\n- `price` is the item price range over the in-stock variations (over all variations when none is in stock).\n- `shipping` belongs to the cheapest in-stock variation only, not to every variation. Each entry is `{warehouse, price, days, method, tracking, free_shipping}`. `warehouse` is where it ships FROM, not a destination. `days` is a single number, not a range. `method` can be null (always for Amazon, often for private suppliers), and on some supplier sites it is in the region's own language. `tracking` can be null when unknown.\n- `regions_without_data` lists regions where the catalog has no current listing of this product of the same kind (regular or winning). When the given listing itself was deleted, its own region is in this list too. It does NOT mean the supplier does not ship there, so never tell the user it does not ship there.\n- `locked_regions` lists regions where the product is a paid winning product and the user has no Product Finding Hub add-on. Their data is not returned; say the add-on is needed to see them.\n\nIf the given product itself is a paid winning product and the caller has no Product Finding Hub add-on, the request is refused upstream with a redirect, which this tool reports as an `upstream_error` about an \"unexpected redirect\". That error means the add-on is missing, not that the id is wrong or the service is down: do not retry it and do not report a fault, say the product needs the Product Finding Hub add-on.",
+      "tags": [
+        "products"
+      ],
+      "parameters": [
+        {
+          "name": "product_id",
+          "in": "path",
+          "required": true,
+          "schema_type": "str",
+          "description": "Product id (24-character hex string) of the product's listing in any region."
+        }
+      ],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Product Regions",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      }
+    },
+    {
       "operation_id": "get_similar_products",
       "method": "GET",
       "path": "/products/{product_id}/similar",
       "summary": "Get products similar to the given product.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results.\n\nEach result is a product card, not the full document: this server removes `description`, `variations` and the `images` gallery from every result, and the `omitted` field beside `data` lists what was removed. The upstream sends the full document for every result, and one page measured over 250 KB — mostly scraped image galleries. What stays is enough to choose from: `_id`, `title`, `img_url` (the main image), `product_details` (min/max price and shipping), the supplier, the categories and the `url`. For one product's description, variations or full gallery, call `get_product_by_id` with its `_id`.\n\nProduct images: the first 20 results' main images also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The full-size main image stays in `data` as `img_url`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
+      "notes": "Read-only. Returns {results: [...]} of products similar to the given product id (same region/categories, excluding winning and deleted products), preferring the same private supplier. Up to ~20 results. They are listings in the given product's \"Ships To\" region; for a result's price and shipping in the other regions, call `get_product_regions` with its `_id`.\n\nEach result is a product card, not the full document: this server removes `description`, `variations` and the `images` gallery from every result, and the `omitted` field beside `data` lists what was removed. The upstream sends the full document for every result, and one page measured over 250 KB — mostly scraped image galleries. What stays is enough to choose from: `_id`, `title`, `img_url` (the main image), `product_details` (min/max price and shipping), the supplier, the categories and the `url`. For one product's description, variations or full gallery, call `get_product_by_id` with its `_id`.\n\nProduct images: the first 20 results' main images also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. The full-size main image stays in `data` as `img_url`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -355,7 +382,7 @@
       "path": "/products/recommended/{product_id}",
       "summary": "Get products recommended for the given product.",
       "description": "",
-      "notes": "Read-only. Returns {results: [...], total_results} of products recommended for the given product id, with prices normalised to the user's currency/region. Use `offset`/`limit` for pagination (default limit 10).\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
+      "notes": "Read-only. Returns {results: [...], total_results} of products recommended for the given product id, with prices in the user's currency. Each result is the product's listing for one \"Ships To\" region; for its price and shipping in the other regions, call `get_product_regions` with its `_id`. Use `offset`/`limit` for pagination (default limit 10).\n\nProduct images: the first 20 results' image URLs also arrive in an `images` block beside `data`, rewritten to a ~256px thumbnail where the supplier CDN offers one. A client that renders MCP Apps shows them as a thumbnail grid, which costs no vision tokens; Claude Code, Cursor and MCP Inspector render no widget and show the URLs instead. Either way the full-size URLs stay in `data`. To have the model *judge* a picture rather than show it, read one product with `get_product_by_id` and set `include_images` there. Each entry also carries a `link` to that product's page in the AutoDS web app: a client that renders the grid makes the thumbnail clickable, and the URL is in the block either way, so it can be offered to the user as a plain link.",
       "tags": [
         "products"
       ],
@@ -426,6 +453,92 @@
         "readOnlyHint": true,
         "destructiveHint": false
       }
+    },
+    {
+      "operation_id": "get_marketplace_settings",
+      "method": "GET",
+      "path": "/user_settings/",
+      "summary": "Get the user's default destination (the Marketplace \"Ships To\" region) and currency for product search.",
+      "description": "",
+      "notes": "Read-only, takes no parameters. Call it when the user asks which region or country their Marketplace ships to (\"my country\", \"where I sell\") or why prices are in a currency; before a product search for a destination the user names; and when a product's `region` is not what the user expected.The setting belongs to the user, not to a store, so it is the same for every connected store.\n\nUse only two fields of the answer. `region` is the \"Ships To\" region: US, UK, DE, FR, IT, ES, AU, CA, BR, or ALL = \"All Other Regions\". `currency` is an ISO currency code (\"USD\", \"EUR\", …). The upstream answer also carries internal ids, the UI language and the onboarding and moderation state of the AutoDS Marketplace *supplier* program, which is not about this user's stores. The server removes those fields before answering, and the `omitted` field beside `data` lists them; no tool returns them.\n\n`search_products` searches only in this region, and its prices come back in this currency. `get_product_by_id` and `get_product_regions` also return prices in this currency. To see one product in the other regions, call `get_product_regions`. The `region` field of a store in `list_stores_api` is a different thing (the marketplace country site of an eBay or TikTok Shop store) and is not this setting.\n\nThe setting can only be changed by the user in the AutoDS web app, not through this server.",
+      "tags": [
+        "settings"
+      ],
+      "parameters": [],
+      "has_json_body": false,
+      "request_body_required": false,
+      "annotations": {
+        "title": "Get Marketplace Settings",
+        "readOnlyHint": true,
+        "destructiveHint": false
+      },
+      "omit": [
+        {
+          "path": "id",
+          "reason": "internal_detail",
+          "detail": "Primary key of the user's ProductsResearch user_settings row. No tool takes it as input."
+        },
+        {
+          "path": "cognitoUsername",
+          "reason": "internal_detail",
+          "detail": "The user's internal identity key. Not a credential, and get_current_user already returns it; nothing about the Ships To setting needs it."
+        },
+        {
+          "path": "language",
+          "reason": "internal_detail",
+          "detail": "UI language enum copied from the Cognito claim at sign-up. Not part of the Ships To setting, and no tool uses it."
+        },
+        {
+          "path": "approvalStatus",
+          "reason": "internal_detail",
+          "detail": "Moderation status of a Marketplace supplier application (approved/declined/pending/...). A dropshipper's 'declined' or null reads as a verdict on their account."
+        },
+        {
+          "path": "denialCause",
+          "reason": "internal_detail",
+          "detail": "Free text a moderator writes when declining a supplier application. Must not be repeated to the user as if it were about their account."
+        },
+        {
+          "path": "isAccountConfigured",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step (staging sample, 2026-11-06: all eight onboarding flags present, all false)."
+        },
+        {
+          "path": "isSupplierDetailsConfigured",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step."
+        },
+        {
+          "path": "isShippingConfigured",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step. Easy to misread as the Ships To setting."
+        },
+        {
+          "path": "isReturnPoliciesConfigured",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step."
+        },
+        {
+          "path": "isOneStoreConnected",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step, not the user's dropshipping stores, so it can be false while list_stores_api returns stores."
+        },
+        {
+          "path": "isMinProducts",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step."
+        },
+        {
+          "path": "isStoreInfoFulfilled",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step."
+        },
+        {
+          "path": "isTradingPolicyConfigured",
+          "reason": "internal_detail",
+          "detail": "Supplier onboarding checklist step."
+        }
+      ]
     }
   ],
   "base_url_key": "products_research"

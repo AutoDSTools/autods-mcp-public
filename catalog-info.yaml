@@ -65,6 +65,7 @@ metadata:
     # nothing here changing and nothing reporting it.
     backstage.io/kubernetes-namespace: prod
     backstage.io/kubernetes-id: autods-mcp
+    autods.com/deployed-branch: master
   links:
     - url: https://github.com/AutoDSTools/autods-mcp-public
       title: Source (GitHub)
